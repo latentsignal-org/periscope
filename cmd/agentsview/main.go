@@ -198,6 +198,7 @@ func runServe(args []string) {
 			Commit:    commit,
 			BuildDate: buildDate,
 		}),
+		server.WithDataDir(cfg.DataDir),
 	)
 
 	url := fmt.Sprintf("http://%s:%d", cfg.Host, cfg.Port)

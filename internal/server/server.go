@@ -36,6 +36,7 @@ type Server struct {
 	mux     *http.ServeMux
 	httpSrv *http.Server
 	version VersionInfo
+	dataDir string
 
 	generateStreamFunc insight.GenerateStreamFunc
 	spaFS              fs.FS
@@ -45,6 +46,11 @@ type Server struct {
 	// handler, used only by tests to guarantee handlers
 	// exceed a short timeout. Zero in production.
 	handlerDelay time.Duration
+
+	// updateCheckFn is the function called to check for
+	// updates. Defaults to update.CheckForUpdate; tests
+	// can override it via WithUpdateChecker.
+	updateCheckFn UpdateCheckFunc
 }
 
 // New creates a new Server.
@@ -79,6 +85,17 @@ type Option func(*Server)
 // WithVersion sets the build-time version metadata.
 func WithVersion(v VersionInfo) Option {
 	return func(s *Server) { s.version = v }
+}
+
+// WithDataDir sets the data directory used for update caching.
+func WithDataDir(dir string) Option {
+	return func(s *Server) { s.dataDir = dir }
+}
+
+// WithUpdateChecker overrides the update check function,
+// allowing tests to substitute a deterministic stub.
+func WithUpdateChecker(f UpdateCheckFunc) Option {
+	return func(s *Server) { s.updateCheckFn = f }
 }
 
 // WithGenerateFunc overrides the insight generation function,
@@ -171,6 +188,7 @@ func (s *Server) routes() {
 	s.mux.Handle(
 		"POST /api/v1/config/terminal", s.withTimeout(s.handleSetTerminalConfig),
 	)
+	s.mux.Handle("GET /api/v1/update/check", s.withTimeout(s.handleCheckUpdate))
 
 	s.mux.Handle("GET /api/v1/starred", s.withTimeout(s.handleListStarred))
 	s.mux.Handle("PUT /api/v1/sessions/{id}/star", s.withTimeout(s.handleStarSession))

@@ -26,6 +26,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": "v1Compatible",
     "externalBin": [
       "binaries/agentsview"
     ],
@@ -35,6 +36,18 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "entitlements": "./Entitlements.plist",
+      "minimumSystemVersion": "11.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "NOT_SET",
+      "endpoints": [
+        "https://github.com/wesm/agentsview/releases/download/updater/latest.json"
+      ]
+    }
   }
 }

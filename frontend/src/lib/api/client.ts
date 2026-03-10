@@ -9,6 +9,7 @@ import type {
   AgentsResponse,
   Stats,
   VersionInfo,
+  UpdateCheck,
   SyncStatus,
   SyncProgress,
   SyncStats,
@@ -179,6 +180,10 @@ export function getStats(
 
 export function getVersion(): Promise<VersionInfo> {
   return fetchJSON("/version");
+}
+
+export function checkForUpdate(): Promise<UpdateCheck> {
+  return fetchJSON("/update/check");
 }
 
 /* Sync */
