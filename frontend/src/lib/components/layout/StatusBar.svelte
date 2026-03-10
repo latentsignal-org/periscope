@@ -61,9 +61,16 @@
       {#if sync.versionMismatch || progressText || sync.lastSync}
         <span class="sep">&middot;</span>
       {/if}
-      <span class="version" title="Build: {sync.serverVersion.commit}">
+      <button
+        class="version"
+        title="Build: {sync.serverVersion.commit}"
+        onclick={() => {
+          if (ui.activeModal === "resync" && sync.syncing) return;
+          ui.activeModal = "about";
+        }}
+      >
         {sync.serverVersion.version}
-      </span>
+      </button>
     {/if}
   </div>
 </footer>
@@ -122,5 +129,12 @@
 
   .version {
     font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+
+  .version:hover {
+    color: var(--text-secondary);
   }
 </style>

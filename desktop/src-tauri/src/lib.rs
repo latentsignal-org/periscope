@@ -66,6 +66,13 @@ pub fn run() {
         .expect("failed to build tauri app")
         .run(|app_handle, event| {
             if let RunEvent::MenuEvent(event) = &event {
+                if event.id().0 == "about" {
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.eval(
+                            "window.dispatchEvent(new CustomEvent('show-about'));",
+                        );
+                    }
+                }
                 if event.id().0 == "check_updates" {
                     let handle = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
@@ -584,10 +591,14 @@ fn parse_listening_port_from_stdout_buffer(buffer: &mut String, chunk: &str) -> 
 }
 
 fn setup_menu(app: &mut App) -> Result<(), DynError> {
+    let about = MenuItemBuilder::with_id("about", "About AgentsView")
+        .build(app)?;
     let check_updates = MenuItemBuilder::with_id("check_updates", "Check for Updates...")
         .build(app)?;
 
     let app_submenu = SubmenuBuilder::new(app, "AgentsView")
+        .item(&about)
+        .separator()
         .item(&check_updates)
         .separator()
         .quit()

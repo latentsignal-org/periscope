@@ -7,6 +7,7 @@
   import SessionList from "./lib/components/sidebar/SessionList.svelte";
   import MessageList from "./lib/components/content/MessageList.svelte";
   import CommandPalette from "./lib/components/command-palette/CommandPalette.svelte";
+  import AboutModal from "./lib/components/modals/AboutModal.svelte";
   import ShortcutsModal from "./lib/components/modals/ShortcutsModal.svelte";
   import PublishModal from "./lib/components/modals/PublishModal.svelte";
   import ResyncModal from "./lib/components/modals/ResyncModal.svelte";
@@ -160,6 +161,11 @@
     });
   });
 
+  function showAbout() {
+    if (ui.activeModal === "resync" && sync.syncing) return;
+    ui.activeModal = "about";
+  }
+
   onMount(() => {
     starred.load();
     sync.loadStatus();
@@ -168,9 +174,11 @@
     sync.checkForUpdate();
     sync.startPolling();
 
+    window.addEventListener("show-about", showAbout);
     const cleanup = registerShortcuts({ navigateMessage });
     return () => {
       cleanup();
+      window.removeEventListener("show-about", showAbout);
       sync.stopPolling();
       sync.unwatchSession();
     };
@@ -214,6 +222,10 @@
 {/if}
 
 <StatusBar />
+
+{#if ui.activeModal === "about"}
+  <AboutModal />
+{/if}
 
 {#if ui.activeModal === "commandPalette"}
   <CommandPalette />

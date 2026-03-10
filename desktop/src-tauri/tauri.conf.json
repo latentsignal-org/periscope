@@ -26,6 +26,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "copyright": "Copyright 2026 Wes McKinney",
+    "shortDescription": "Local viewer for AI agent sessions",
+    "longDescription": "AgentsView is a local web viewer for AI agent sessions including Claude Code, Codex, Copilot CLI, Gemini CLI, OpenCode, and Amp.",
     "createUpdaterArtifacts": "v1Compatible",
     "externalBin": [
       "binaries/agentsview"

@@ -1,6 +1,7 @@
 type Theme = "light" | "dark";
 export type MessageLayout = "default" | "compact" | "stream";
 type ModalType =
+  | "about"
   | "commandPalette"
   | "shortcuts"
   | "publish"

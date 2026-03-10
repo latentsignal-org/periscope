@@ -67,9 +67,12 @@ desktop-dev:
 desktop-build:
 	cd desktop && npm install && npm run tauri:build
 
-# Build only the macOS .app bundle (skip DMG packaging)
+# Build only the macOS .app bundle (skip DMG packaging).
+# Skips updater artifact signing when TAURI_SIGNING_PRIVATE_KEY
+# is not set so local builds succeed without release keys.
 desktop-macos-app:
-	cd desktop && npm install && npm run tauri:build:macos-app
+	cd desktop && npm install && npm run tauri:build:macos-app \
+		$(if $(TAURI_SIGNING_PRIVATE_KEY),,-- --config '{"bundle":{"createUpdaterArtifacts":false}}')
 	mkdir -p $(DESKTOP_DIST_DIR)/macos
 	rm -rf $(DESKTOP_DIST_DIR)/macos/AgentsView.app
 	cp -R desktop/src-tauri/target/release/bundle/macos/AgentsView.app \

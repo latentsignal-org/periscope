@@ -2,7 +2,7 @@
 name = "agentsview-desktop"
 version = "0.1.0"
 description = "AgentsView desktop wrapper"
-authors = ["agentsview contributors"]
+authors = ["Wes McKinney"]
 edition = "2021"
 
 [lib]
