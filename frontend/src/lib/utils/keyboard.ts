@@ -87,7 +87,7 @@ export function registerShortcuts(
       },
       o: () => ui.toggleSort(),
       l: () => ui.cycleLayout(),
-      r: () => sync.triggerSync(() => sessions.load()),
+      r: () => sync.triggerSync(),
       e: () => {
         if (sessions.activeSessionId) {
           window.open(

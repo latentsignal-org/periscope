@@ -646,3 +646,10 @@ export function buildSessionGroups(sessions: Session[]): SessionGroup[] {
 }
 
 export const sessions = createSessionsStore();
+
+// Refresh project/agent dropdowns whenever a sync completes
+// (local trigger or detected via status polling).
+sync.onSyncComplete(() => {
+  sessions.invalidateFilterCaches();
+  sessions.load();
+});

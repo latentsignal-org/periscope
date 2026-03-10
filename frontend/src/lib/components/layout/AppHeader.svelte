@@ -286,7 +286,7 @@
     <button
       class="header-btn"
       class:syncing={sync.syncing}
-      onclick={() => sync.triggerSync(() => sessions.load())}
+      onclick={() => sync.triggerSync()}
       disabled={sync.syncing}
       title="Sync sessions (r)"
       aria-label="Sync sessions"

@@ -7,6 +7,8 @@ import type {
   UpdateCheck,
 } from "../api/types.js";
 
+type SyncCompleteListener = () => void;
+
 const POLL_INTERVAL_MS = 10_000;
 
 /**
@@ -49,17 +51,41 @@ class SyncStore {
   private lastStatsParams: { include_one_shot?: boolean } =
     {};
   private statsVersion = 0;
+  private syncCompleteListeners: SyncCompleteListener[] = [];
+  private statusHydrated = false;
+  private pendingHydration = false;
+
+  /** Register a callback invoked after any sync completes. */
+  onSyncComplete(listener: SyncCompleteListener) {
+    this.syncCompleteListeners.push(listener);
+  }
+
+  private notifySyncComplete() {
+    for (const fn of this.syncCompleteListeners) {
+      fn();
+    }
+  }
 
   async loadStatus() {
     try {
       const status = await api.getSyncStatus();
       const newLastSync = status.last_sync || null;
+      const isInitial = !this.statusHydrated;
+      this.statusHydrated = true;
       const changed =
         newLastSync !== null && newLastSync !== this.lastSync;
       this.lastSync = newLastSync;
       this.lastSyncStats = status.stats;
-      if (changed) this.loadStats();
+      // Suppress notifications on initial hydration and
+      // when a local sync just completed (pendingHydration).
+      if (this.pendingHydration) {
+        this.pendingHydration = false;
+      } else if (changed && !isInitial) {
+        this.loadStats();
+        this.notifySyncComplete();
+      }
     } catch (error) {
+      this.pendingHydration = false;
       console.warn("Failed to load sync status:", error);
     }
   }
@@ -163,9 +189,14 @@ class SyncStore {
     handle.done
       .then((s: SyncStats) => {
         this.lastSyncStats = s;
-        this.lastSync = new Date().toISOString();
         this.loadStats();
         finalizeSync();
+        this.notifySyncComplete();
+        // Hydrate the authoritative server timestamp.
+        // pendingHydration suppresses the notification so
+        // the poll path won't double-fire.
+        this.pendingHydration = true;
+        this.loadStatus();
         onComplete?.();
       })
       .catch((err: unknown) => {

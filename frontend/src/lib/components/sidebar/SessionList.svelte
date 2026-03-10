@@ -212,6 +212,58 @@
     });
   }
 
+  // Scroll to the active session when it changes (e.g. from
+  // the command palette). Expands collapsed agent groups and
+  // scrolls the item into view. Only fires on selection
+  // changes, not on displayItems rebuilds, so collapsing a
+  // group containing the active session stays collapsed.
+  let prevRevealedId: string | null = null;
+  $effect(() => {
+    const activeId = sessions.activeSessionId;
+    if (!activeId) {
+      prevRevealedId = null;
+      return;
+    }
+    if (activeId === prevRevealedId) return;
+    if (!containerRef) return;
+    // Read displayItems inside the effect so Svelte tracks
+    // it — needed to re-run after a group expansion.
+    const items = displayItems;
+    const item = items.find(
+      (it) =>
+        it.type === "session" &&
+        it.group?.sessions.some((s) => s.id === activeId),
+    );
+    if (!item) {
+      // Session may be hidden in a collapsed agent group.
+      // Expand it — the effect will re-run when displayItems
+      // updates, and prevRevealedId is still unset so the
+      // second pass will proceed to scroll.
+      if (!groupByAgent) return;
+      for (const section of agentSections) {
+        const owns = section.groups.some((g) =>
+          g.sessions.some((s) => s.id === activeId),
+        );
+        if (owns && collapsedAgents.has(section.agent)) {
+          toggleAgent(section.agent);
+          return;
+        }
+      }
+      return;
+    }
+    // Item found — mark as revealed so subsequent
+    // displayItems rebuilds don't re-trigger.
+    prevRevealedId = activeId;
+    const itemBottom = item.top + item.height;
+    const viewTop = containerRef.scrollTop;
+    const viewBottom = viewTop + containerRef.clientHeight;
+    if (item.top >= viewTop && itemBottom <= viewBottom) return;
+    containerRef.scrollTop = Math.max(
+      0,
+      item.top - containerRef.clientHeight / 2 + item.height / 2,
+    );
+  });
+
   onDestroy(() => {
     if (scrollRaf !== null) {
       cancelAnimationFrame(scrollRaf);

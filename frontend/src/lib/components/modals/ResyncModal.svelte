@@ -1,7 +1,6 @@
 <script lang="ts">
   import { ui } from "../../stores/ui.svelte.js";
   import { sync } from "../../stores/sync.svelte.js";
-  import { sessions } from "../../stores/sessions.svelte.js";
 
   type View = "confirm" | "progress" | "done" | "error";
 
@@ -12,7 +11,6 @@
     const started = sync.triggerResync(
       () => {
         view = "done";
-        sessions.load();
       },
       (err) => {
         errorMessage = err.message;
