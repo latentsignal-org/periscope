@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -98,6 +99,7 @@ func ParseAmpSession(
 
 		content, hasThinking, hasToolUse, tcs, trs :=
 			ExtractTextContent(msg.Get("content"))
+		trs = append(trs, extractAmpToolResults(msg.Get("content"))...)
 		if strings.TrimSpace(content) == "" && len(trs) == 0 {
 			return true
 		}
@@ -179,4 +181,140 @@ func ampThreadIDFromPath(path string) string {
 		return ""
 	}
 	return stem
+}
+
+func serializeAmpResult(result gjson.Result) string {
+	if !result.Exists() || result.Type == gjson.Null {
+		return ""
+	}
+
+	if result.Type == gjson.String {
+		return result.Str
+	}
+
+	if result.IsObject() {
+		// Priority order is intentional: Bash commonly uses "output",
+		// Read uses "content", and Edit uses "diff". If shapes overlap,
+		// prefer the most common display fields.
+		knownFieldSeen := false
+		for _, key := range []string{"output", "content", "diff"} {
+			if field := result.Get(key); field.Exists() {
+				knownFieldSeen = true
+				if s := serializeAmpResult(field); s != "" {
+					return s
+				}
+			}
+		}
+
+		success := result.Get("success")
+		if success.Exists() {
+			if success.Bool() {
+				return "success"
+			}
+			return "failed"
+		}
+
+		// If a known display field was present but empty, return empty
+		// rather than falling back to noisy raw JSON metadata.
+		if knownFieldSeen {
+			return ""
+		}
+
+		return result.Raw
+	}
+
+	if result.IsArray() {
+		items := result.Array()
+		if len(items) == 0 {
+			return ""
+		}
+
+		if items[0].Type == gjson.String {
+			// Only apply "string list" formatting when all items are strings.
+			// Mixed-type arrays should round-trip via Raw rather than silently
+			// dropping or mangling non-string elements.
+			lines := make([]string, 0, len(items))
+			for _, item := range items {
+				if item.Type != gjson.String {
+					return result.Raw
+				}
+				lines = append(lines, item.Str)
+			}
+			return strings.Join(lines, "\n")
+		}
+
+		if items[0].IsObject() {
+			// Only treat as binary/image if the first element looks like an
+			// image block. Generic arrays of objects (search results, file
+			// listings, etc.) should round-trip as raw JSON instead.
+			if items[0].Get("type").Str == "image" {
+				return "[binary content]"
+			}
+			return result.Raw
+		}
+
+		return result.Raw
+	}
+
+	return result.Raw
+}
+
+func extractAmpToolResults(content gjson.Result) []ParsedToolResult {
+	if !content.IsArray() {
+		return nil
+	}
+
+	var results []ParsedToolResult
+	for _, block := range content.Array() {
+		if block.Get("type").Str != "tool_result" {
+			continue
+		}
+
+		if block.Get("tool_use_id").Str != "" {
+			// Canonical schema is handled by shared extractor.
+			continue
+		}
+
+		toolUseID := block.Get("toolUseID").Str
+		if toolUseID == "" {
+			continue
+		}
+
+		var text string
+		hasResult := false
+		result := block.Get("run.result")
+		if result.Exists() && result.Type != gjson.Null {
+			text = serializeAmpResult(result)
+			hasResult = true
+		} else {
+			switch block.Get("run.status").Str {
+			case "error":
+				text = block.Get("run.error.message").Str
+				if text == "" {
+					text = "[unknown error]"
+				}
+			case "cancelled":
+				text = "[cancelled]"
+			}
+		}
+		// Skip blocks with no result and no error/cancelled status.
+		// Preserve blocks where run.result existed but serialized to empty
+		// (e.g. empty string, empty array) so the tool call is not left pending.
+		if text == "" && !hasResult {
+			continue
+		}
+
+		quoted, err := json.Marshal(text)
+		if err != nil {
+			continue
+		}
+
+		results = append(results, ParsedToolResult{
+			ToolUseID:     toolUseID,
+			ContentRaw:    string(quoted),
+			ContentLength: len(text),
+		})
+	}
+
+	return results
 }

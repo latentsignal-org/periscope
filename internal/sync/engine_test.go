@@ -303,6 +303,9 @@ func TestPairToolResults(t *testing.T) {
 }
 
 func TestPairToolResultsContent(t *testing.T) {
+	ampToolResultText := "line 1\nline \"2\" output"
+	ampToolResultRaw := "\"line 1\\nline \\\"2\\\" output\""
+
 	tests := []struct {
 		name    string
 		msgs    []db.Message
@@ -369,6 +372,40 @@ func TestPairToolResultsContent(t *testing.T) {
 				}},
 				{ToolResults: []db.ToolResult{
 					{ToolUseID: "t1", ContentLength: 100, ContentRaw: `"file content"`},
+				}},
+			},
+		},
+		{
+			// Mirrors ContentRaw produced by parser.extractAmpToolResults
+			// (JSON-marshaled plain-text output).
+			name: "amp: marshaled tool result text decodes into ResultContent",
+			msgs: []db.Message{
+				{ToolCalls: []db.ToolCall{
+					{ToolUseID: "t1", ToolName: "Bash", Category: "Bash"},
+				}},
+				{ToolResults: []db.ToolResult{
+					{
+						ToolUseID:     "t1",
+						ContentLength: len(ampToolResultText),
+						ContentRaw:    ampToolResultRaw,
+					},
+				}},
+			},
+			blocked: nil,
+			want: []db.Message{
+				{ToolCalls: []db.ToolCall{
+					{
+						ToolUseID: "t1", ToolName: "Bash", Category: "Bash",
+						ResultContentLength: len(ampToolResultText),
+						ResultContent:       ampToolResultText,
+					},
+				}},
+				{ToolResults: []db.ToolResult{
+					{
+						ToolUseID:     "t1",
+						ContentLength: len(ampToolResultText),
+						ContentRaw:    ampToolResultRaw,
+					},
 				}},
 			},
 		},
