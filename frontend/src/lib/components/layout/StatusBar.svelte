@@ -3,6 +3,9 @@
   import { ui } from "../../stores/ui.svelte.js";
   import { formatNumber, formatRelativeTime } from "../../utils/format.js";
 
+  const isMac = navigator.platform.toUpperCase().includes("MAC");
+  const mod = isMac ? "Cmd" : "Ctrl";
+
   let progressText = $derived.by(() => {
     if (!sync.syncing || !sync.progress) return null;
     const p = sync.progress;
@@ -31,6 +34,34 @@
   </div>
 
   <div class="status-right">
+    {#if sync.isDesktop}
+      <div class="zoom-controls">
+        <button
+          class="zoom-btn"
+          onclick={() => ui.zoomOut()}
+          disabled={ui.zoomLevel <= 67}
+          title="Zoom out ({mod}+-)"
+        >
+          &minus;
+        </button>
+        <button
+          class="zoom-level"
+          onclick={() => ui.resetZoom()}
+          title="Reset zoom ({mod}+0)"
+        >
+          {ui.zoomLevel}%
+        </button>
+        <button
+          class="zoom-btn"
+          onclick={() => ui.zoomIn()}
+          disabled={ui.zoomLevel >= 200}
+          title="Zoom in ({mod}++)"
+        >
+          +
+        </button>
+      </div>
+      <span class="sep">&middot;</span>
+    {/if}
     {#if sync.updateAvailable && !sync.isDesktop}
       <button
         class="update-available"
@@ -135,6 +166,45 @@
   }
 
   .version:hover {
+    color: var(--text-secondary);
+  }
+
+  .zoom-controls {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+  }
+
+  .zoom-btn {
+    width: 18px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-muted);
+    border-radius: var(--radius-sm);
+    line-height: 1;
+  }
+
+  .zoom-btn:hover:not(:disabled) {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+  }
+
+  .zoom-level {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    padding: 0 2px;
+    min-width: 32px;
+    text-align: center;
+    border-radius: var(--radius-sm);
+  }
+
+  .zoom-level:hover {
+    background: var(--bg-surface-hover);
     color: var(--text-secondary);
   }
 </style>

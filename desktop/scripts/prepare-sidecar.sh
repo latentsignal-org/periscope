@@ -108,6 +108,11 @@ patch_tauri_version() {
     return 0
   fi
   local conf="$TAURI_DIR/src-tauri/tauri.conf.json"
+  # Save original only if not already saved (handles re-run
+  # after a previous failure left the backup behind).
+  if [ ! -f "$conf.orig" ]; then
+    cp "$conf" "$conf.orig"
+  fi
   sed -i.bak \
     "s/\"version\": \"[^\"]*\"/\"version\": \"$semver\"/" \
     "$conf"

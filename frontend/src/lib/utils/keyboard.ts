@@ -55,6 +55,25 @@ export function registerShortcuts(
       return;
     }
 
+    // Zoom: Cmd+= / Cmd+- / Cmd+0 (desktop only)
+    if (sync.isDesktop) {
+      if (meta && (e.key === "=" || e.key === "+")) {
+        e.preventDefault();
+        ui.zoomIn();
+        return;
+      }
+      if (meta && e.key === "-") {
+        e.preventDefault();
+        ui.zoomOut();
+        return;
+      }
+      if (meta && e.key === "0") {
+        e.preventDefault();
+        ui.resetZoom();
+        return;
+      }
+    }
+
     // Esc — always works
     if (e.key === "Escape") {
       handleEscape();

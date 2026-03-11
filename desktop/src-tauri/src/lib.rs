@@ -120,11 +120,10 @@ fn init_navigation_guard_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlug
         .on_navigation(|webview, url| {
             let backend_port = webview
                 .app_handle()
-                .state::<SidecarState>()
-                .backend_port
-                .lock()
-                .ok()
-                .and_then(|guard| *guard);
+                .try_state::<SidecarState>()
+                .and_then(|state| {
+                    state.backend_port.lock().ok().and_then(|g| *g)
+                });
             if is_allowed_navigation_url(url, backend_port) {
                 return true;
             }
@@ -151,13 +150,15 @@ fn is_allowed_navigation_url(url: &Url, backend_port: Option<u16>) -> bool {
     if url.scheme() == "tauri" && url.host_str() == Some("localhost") {
         return true;
     }
-    if url.scheme() != "http" || url.host_str() != Some(HOST) {
-        return false;
+    // Only allow navigation to the known sidecar port on
+    // localhost. Rejects all localhost URLs when the sidecar
+    // port is not yet known.
+    if let Some(port) = backend_port {
+        return url.scheme() == "http"
+            && url.host_str() == Some(HOST)
+            && url.port() == Some(port);
     }
-    matches!(
-        (url.port(), backend_port),
-        (Some(navigated_port), Some(sidecar_port)) if navigated_port == sidecar_port
-    )
+    false
 }
 
 fn is_allowed_external_open_url(url: &Url) -> bool {
@@ -531,13 +532,22 @@ fn redirect_when_ready(window: WebviewWindow, port: u16) {
 
     thread::spawn(move || {
         if wait_for_server(port, READY_TIMEOUT) {
-            let script = format!("window.location.replace({target_url:?});");
-            let _ = window.eval(&script);
+            match Url::parse(target_url.as_str()) {
+                Ok(url) => {
+                    if let Err(err) = window.navigate(url) {
+                        eprintln!("[agentsview] navigate failed: {err}");
+                    }
+                }
+                Err(err) => {
+                    eprintln!("[agentsview] invalid redirect URL: {err}");
+                }
+            }
             return;
         }
 
         let _ = window.eval(
-            "document.getElementById('status').textContent = 'AgentsView backend did not start within 30 seconds.';",
+            "document.getElementById('status').textContent = \
+             'AgentsView backend did not start within 30 seconds.';",
         );
     });
 }
@@ -903,11 +913,16 @@ mod tests {
     fn is_allowed_navigation_url_allows_local_only() {
         let tauri_url = Url::parse("tauri://localhost/index.html").expect("valid tauri url");
         assert!(is_allowed_navigation_url(&tauri_url, None));
+        assert!(is_allowed_navigation_url(&tauri_url, Some(18080)));
 
         let local_backend = Url::parse("http://127.0.0.1:18080/").expect("valid localhost url");
         assert!(is_allowed_navigation_url(&local_backend, Some(18080)));
-        assert!(!is_allowed_navigation_url(&local_backend, Some(19090)));
+
+        // Reject when port is unknown
         assert!(!is_allowed_navigation_url(&local_backend, None));
+
+        // Reject when port doesn't match
+        assert!(!is_allowed_navigation_url(&local_backend, Some(9999)));
 
         let remote = Url::parse("https://example.com/").expect("valid remote url");
         assert!(!is_allowed_navigation_url(&remote, Some(18080)));
