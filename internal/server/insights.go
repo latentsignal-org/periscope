@@ -170,7 +170,7 @@ func (s *Server) handleGenerateInsight(
 	}
 	if !insight.ValidAgents[req.Agent] {
 		writeError(w, http.StatusBadRequest,
-			"invalid agent: must be claude, codex, copilot, or gemini")
+			"invalid agent: must be claude, codex, or gemini")
 		return
 	}
 

@@ -49,6 +49,9 @@ func main() {
 		case "sync":
 			runSync(os.Args[2:])
 			return
+		case "token-use":
+			runTokenUse(os.Args[2:])
+			return
 		case "version", "--version", "-v":
 			fmt.Printf("agentsview %s (commit %s, built %s)\n",
 				version, commit, buildDate)
@@ -73,6 +76,7 @@ Usage:
   agentsview [flags]          Start the server (default command)
   agentsview serve [flags]    Start the server (explicit)
   agentsview sync [flags]     Sync session data without serving
+  agentsview token-use <id>   Show token usage for a session (JSON)
   agentsview prune [flags]    Delete sessions matching filters
   agentsview update [flags]   Check for and install updates
   agentsview version          Show version information
@@ -169,6 +173,13 @@ func runServe(args []string) {
 	if err := validateServeConfig(cfg); err != nil {
 		fatal("invalid serve config: %v", err)
 	}
+
+	// Write the startup lock immediately after config setup,
+	// before opening the DB, so token-use never sees a window
+	// with no lock and no state file during startup.
+	server.WriteStartupLock(cfg.DataDir)
+	defer server.RemoveStartupLock(cfg.DataDir)
+
 	database := mustOpenDB(cfg)
 	defer database.Close()
 
@@ -323,6 +334,24 @@ func runServe(args []string) {
 			}
 			fatal("managed caddy error: %v", err)
 		}
+	}
+
+	// Server is ready — write the definitive state file with the
+	// final port and remove the startup lock. If the state file
+	// write fails, keep the startup lock as a fallback "server
+	// is active" marker so token-use doesn't start a competing
+	// on-demand sync against our live DB.
+	if _, sfErr := server.WriteStateFile(
+		cfg.DataDir, cfg.Host, cfg.Port, version,
+	); sfErr != nil {
+		log.Printf(
+			"warning: could not write state file: %v"+
+				" (keeping startup lock as fallback)",
+			sfErr,
+		)
+	} else {
+		defer server.RemoveStateFile(cfg.DataDir, cfg.Port)
+		server.RemoveStartupLock(cfg.DataDir)
 	}
 
 	localURL := fmt.Sprintf("http://%s:%d", cfg.Host, cfg.Port)
