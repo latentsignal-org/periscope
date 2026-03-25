@@ -323,6 +323,81 @@ func TestSessionBoundsStartedAtFromLeadingEvent(t *testing.T) {
 	}
 }
 
+func TestForkDetection_NestedForkCountsFullSubtree(t *testing.T) {
+	// Regression test: when the first child at a fork point
+	// itself contains nested forks early in its chain, the
+	// old first-child-only countUserTurns would see only 1
+	// user turn (following first children that dead-end
+	// quickly) and treat the entire large branch as a small
+	// retry, discarding it.
+	//
+	// DAG:  root(a) -> b (fork point)
+	//   First child:  c -> d (fork) -> e -> f -> g -> h -> i -> j
+	//                          \-> d2 (retry, 1 entry)
+	//   Second child: z (1 entry, the "retry")
+	//
+	// The first child subtree has 5 user turns total (c,e,g,i
+	// plus d2). With first-child-only traversal, the path
+	// c->d->d2 sees only 1 user turn (c is user, d is asst,
+	// d2 is user but d2 is the SECOND child not the first) --
+	// actually c->d->(first child of d's fork)=e gives more.
+	// Let's build a clearer case: the first child at the fork
+	// is a dead-end assistant reply, so first-child traversal
+	// stops after 0 user turns.
+	//
+	// DAG:  root(a) -> b (fork)
+	//   First child:  c(user) -> d(asst, fork)
+	//                   d -> e(asst, dead-end first child)
+	//                   d -> f(user) -> g(asst) -> h(user) ->
+	//                        i(asst) -> j(user) -> k(asst)
+	//   Second child: z(user, 1 msg)
+	//
+	// Old countUserTurns for c: c(user,1) -> d(asst) ->
+	//   e(asst, no children) = 1 user turn <= 3 -> retry!
+	// New countUserTurns for c: 1+0+1+0+1+0+1+0 = 4 > 3
+	content := testjsonl.NewSessionBuilder().
+		AddClaudeUserWithUUID("2024-01-01T10:00:00Z", "start", "a", "").
+		AddClaudeAssistantWithUUID("2024-01-01T10:00:01Z", "ok", "b", "a").
+		// First child branch from b: large subtree
+		AddClaudeUserWithUUID("2024-01-01T10:00:02Z", "main1", "c", "b").
+		AddClaudeAssistantWithUUID("2024-01-01T10:00:03Z", "m-ok1", "d", "c").
+		// Nested fork at d: first child is a dead-end
+		AddClaudeAssistantWithUUID("2024-01-01T10:00:04Z", "dead-end", "e", "d").
+		// Second child of d's fork continues the real conversation
+		AddClaudeUserWithUUID("2024-01-01T10:00:05Z", "main2", "f", "d").
+		AddClaudeAssistantWithUUID("2024-01-01T10:00:06Z", "m-ok2", "g", "f").
+		AddClaudeUserWithUUID("2024-01-01T10:00:07Z", "main3", "h", "g").
+		AddClaudeAssistantWithUUID("2024-01-01T10:00:08Z", "m-ok3", "i", "h").
+		AddClaudeUserWithUUID("2024-01-01T10:00:09Z", "main4", "j", "i").
+		AddClaudeAssistantWithUUID("2024-01-01T10:00:10Z", "m-ok4", "k", "j").
+		// Second child of b's fork: trivial retry
+		AddClaudeUserWithUUID("2024-01-01T10:01:00Z", "retry", "z", "b").
+		String()
+
+	// The first child subtree has 4 user turns (c,f,h,j) > 3,
+	// so it should be treated as a large-gap fork. We expect
+	// 2 results: main path (a,b,c,d,f,g,h,i,j,k = 10 msgs)
+	// and the fork (z = 1 msg).
+	results := parseTestContent(t, "nested-fork-subtree.jsonl", content, 2)
+
+	// Main path should follow first child at b, then second
+	// child at d (the retry heuristic picks last child when
+	// first child has <= 3 user turns — here "e" is a dead
+	// end with 0 user turns so the nested fork follows "f").
+	main := results[0]
+	if main.Session.MessageCount < 8 {
+		t.Errorf(
+			"main MessageCount = %d, want >= 8 "+
+				"(first child subtree should not be discarded)",
+			main.Session.MessageCount,
+		)
+	}
+
+	// The trivial "retry" branch should be the fork.
+	fork := results[1]
+	assertMessage(t, fork.Messages[0], RoleUser, "retry")
+}
+
 func TestSessionBoundsDAGMainWidenedNotFork(t *testing.T) {
 	// DAG session with a trailing queue-operation after all
 	// messages. Main session's EndedAt should be widened;

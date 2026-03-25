@@ -601,25 +601,25 @@ func parseDAG(
 	return results, nil
 }
 
-// countUserTurns counts the number of user entries reachable from
-// a starting index by following the first child at each node.
+// countUserTurns counts all user entries reachable from a
+// starting index by traversing the entire subtree. Earlier
+// versions followed only the first child at each node, which
+// undercounted in sessions with many nested forks and caused
+// the fork heuristic to discard the main conversation branch.
 func countUserTurns(
 	entries []dagEntry,
 	children map[string][]int,
 	startIdx int,
 ) int {
 	count := 0
-	current := startIdx
-	for current >= 0 {
+	stack := []int{startIdx}
+	for len(stack) > 0 {
+		current := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
 		if entries[current].entryType == "user" {
 			count++
 		}
-		uuid := entries[current].uuid
-		kids := children[uuid]
-		if len(kids) == 0 {
-			break
-		}
-		current = kids[0]
+		stack = append(stack, children[entries[current].uuid]...)
 	}
 	return count
 }
