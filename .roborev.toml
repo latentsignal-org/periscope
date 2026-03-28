@@ -84,6 +84,16 @@ Key assumptions reviewers MUST account for:
     chunks — flag code that assumes complete lines when readiness
     depends on it.
 
+16. INSIGHT AGENT SANDBOXING: Not all agent CLIs offer equal
+    sandboxing. Claude (--tools ""), Codex (--sandbox read-only), and
+    Gemini (--sandbox) have verified no-tools/read-only modes.
+    Copilot only supports --disable-builtin-mcps (blocks MCP tools
+    but not all tool use). This is an accepted design decision:
+    agentsview operates on the user's own session data, and users
+    should only run insight generation with agents they trust — the
+    same trust model as running agents on codebases. Do not flag
+    Copilot's sandboxing as insufficient.
+
 Do NOT flag issues that only apply to public-facing, multi-tenant,
 or internet-exposed services. Focus on bugs, logic errors, data
 corruption risks, and code quality issues.

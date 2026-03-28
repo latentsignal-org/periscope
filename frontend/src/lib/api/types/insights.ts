@@ -19,7 +19,7 @@ export interface InsightsResponse {
   insights: Insight[];
 }
 
-export type AgentName = "claude" | "codex" | "gemini";
+export type AgentName = "claude" | "codex" | "copilot" | "gemini";
 
 export interface GenerateInsightRequest {
   type: InsightType;
