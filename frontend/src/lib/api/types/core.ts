@@ -27,6 +27,7 @@ export interface Session {
   peak_context_tokens: number;
   has_total_output_tokens?: boolean;
   has_peak_context_tokens?: boolean;
+  is_automated: boolean;
   created_at: string;
 }
 

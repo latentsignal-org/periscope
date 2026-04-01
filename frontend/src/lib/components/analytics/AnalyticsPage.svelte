@@ -58,6 +58,8 @@
       sessions.filters.minUserMessages;
     const headerIncludeOneShot =
       sessions.filters.includeOneShot;
+    const headerIncludeAutomated =
+      sessions.filters.includeAutomated;
 
     const curProject = untrack(() => analytics.project);
     const curAgent = untrack(() => analytics.agent);
@@ -69,6 +71,9 @@
     );
     const curIncludeOneShot = untrack(
       () => analytics.includeOneShot,
+    );
+    const curIncludeAutomated = untrack(
+      () => analytics.includeAutomated,
     );
 
     let changed = false;
@@ -96,6 +101,11 @@
 
     if (curIncludeOneShot !== headerIncludeOneShot) {
       analytics.includeOneShot = headerIncludeOneShot;
+      changed = true;
+    }
+
+    if (curIncludeAutomated !== headerIncludeAutomated) {
+      analytics.includeAutomated = headerIncludeAutomated;
       changed = true;
     }
 

@@ -107,7 +107,15 @@ func buildAnalyticsWhere(
 				pb.add(f.MinUserMessages))
 	}
 	if f.ExcludeOneShot {
-		preds = append(preds, "user_message_count > 1")
+		if !f.ExcludeAutomated {
+			preds = append(preds,
+				"(user_message_count > 1 OR is_automated = TRUE)")
+		} else {
+			preds = append(preds, "user_message_count > 1")
+		}
+	}
+	if f.ExcludeAutomated {
+		preds = append(preds, "is_automated = FALSE")
 	}
 	if f.ActiveSince != "" {
 		preds = append(preds,

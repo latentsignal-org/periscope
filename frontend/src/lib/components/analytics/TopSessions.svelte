@@ -18,8 +18,16 @@
   }
 
   function handleSessionClick(id: string) {
+    let needInvalidate = false;
     if (analytics.includeOneShot && !sessions.filters.includeOneShot) {
       sessions.filters.includeOneShot = true;
+      needInvalidate = true;
+    }
+    if (analytics.includeAutomated && !sessions.filters.includeAutomated) {
+      sessions.filters.includeAutomated = true;
+      needInvalidate = true;
+    }
+    if (needInvalidate) {
       sessions.invalidateFilterCaches();
     }
     router.navigateToSession(id);

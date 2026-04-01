@@ -117,7 +117,7 @@ func runLocalSync(
 	}
 
 	fmt.Println()
-	stats, err := database.GetStats(context.Background(), false)
+	stats, err := database.GetStats(context.Background(), false, false)
 	if err == nil {
 		fmt.Printf(
 			"Database: %d sessions, %d messages\n",

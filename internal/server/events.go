@@ -319,8 +319,10 @@ func (s *Server) handleSyncStatus(
 func (s *Server) handleGetStats(
 	w http.ResponseWriter, r *http.Request,
 ) {
-	excludeOneShot := r.URL.Query().Get("include_one_shot") != "true"
-	stats, err := s.db.GetStats(r.Context(), excludeOneShot)
+	q := r.URL.Query()
+	excludeOneShot := q.Get("include_one_shot") != "true"
+	excludeAutomated := q.Get("include_automated") != "true"
+	stats, err := s.db.GetStats(r.Context(), excludeOneShot, excludeAutomated)
 	if err != nil {
 		if handleContextError(w, err) {
 			return
@@ -334,8 +336,10 @@ func (s *Server) handleGetStats(
 func (s *Server) handleListProjects(
 	w http.ResponseWriter, r *http.Request,
 ) {
-	excludeOneShot := r.URL.Query().Get("include_one_shot") != "true"
-	projects, err := s.db.GetProjects(r.Context(), excludeOneShot)
+	q := r.URL.Query()
+	excludeOneShot := q.Get("include_one_shot") != "true"
+	excludeAutomated := q.Get("include_automated") != "true"
+	projects, err := s.db.GetProjects(r.Context(), excludeOneShot, excludeAutomated)
 	if err != nil {
 		if handleContextError(w, err) {
 			return
@@ -351,8 +355,10 @@ func (s *Server) handleListProjects(
 func (s *Server) handleListMachines(
 	w http.ResponseWriter, r *http.Request,
 ) {
-	excludeOneShot := r.URL.Query().Get("include_one_shot") != "true"
-	machines, err := s.db.GetMachines(r.Context(), excludeOneShot)
+	q := r.URL.Query()
+	excludeOneShot := q.Get("include_one_shot") != "true"
+	excludeAutomated := q.Get("include_automated") != "true"
+	machines, err := s.db.GetMachines(r.Context(), excludeOneShot, excludeAutomated)
 	if err != nil {
 		if handleContextError(w, err) {
 			return
@@ -368,8 +374,10 @@ func (s *Server) handleListMachines(
 func (s *Server) handleListAgents(
 	w http.ResponseWriter, r *http.Request,
 ) {
-	excludeOneShot := r.URL.Query().Get("include_one_shot") != "true"
-	agents, err := s.db.GetAgents(r.Context(), excludeOneShot)
+	q := r.URL.Query()
+	excludeOneShot := q.Get("include_one_shot") != "true"
+	excludeAutomated := q.Get("include_automated") != "true"
+	agents, err := s.db.GetAgents(r.Context(), excludeOneShot, excludeAutomated)
 	if err != nil {
 		if handleContextError(w, err) {
 			return

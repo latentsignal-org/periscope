@@ -590,6 +590,9 @@ func (s *Sync) pushSession(
 	ctx context.Context, tx *sql.Tx, sess db.Session,
 ) error {
 	createdAt, _ := ParseSQLiteTimestamp(sess.CreatedAt)
+	isAutomated := sess.UserMessageCount <= 1 &&
+		sess.FirstMessage != nil &&
+		db.IsAutomatedSession(*sess.FirstMessage)
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO sessions (
 			id, machine, project, agent,
@@ -598,13 +601,14 @@ func (s *Sync) pushSession(
 			message_count, user_message_count,
 			total_output_tokens, peak_context_tokens,
 			has_total_output_tokens, has_peak_context_tokens,
+			is_automated,
 			parent_session_id, relationship_type,
 			updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10,
 			$11, $12, $13, $14,
-			$15, $16, $17, $18, NOW()
+			$15, $16, $17, $18, $19, NOW()
 		)
 		ON CONFLICT (id) DO UPDATE SET
 			machine = EXCLUDED.machine,
@@ -622,6 +626,7 @@ func (s *Sync) pushSession(
 			peak_context_tokens = EXCLUDED.peak_context_tokens,
 			has_total_output_tokens = EXCLUDED.has_total_output_tokens,
 			has_peak_context_tokens = EXCLUDED.has_peak_context_tokens,
+			is_automated = EXCLUDED.is_automated,
 			parent_session_id = EXCLUDED.parent_session_id,
 			relationship_type = EXCLUDED.relationship_type,
 			updated_at = NOW()
@@ -640,6 +645,7 @@ func (s *Sync) pushSession(
 			OR sessions.peak_context_tokens IS DISTINCT FROM EXCLUDED.peak_context_tokens
 			OR sessions.has_total_output_tokens IS DISTINCT FROM EXCLUDED.has_total_output_tokens
 			OR sessions.has_peak_context_tokens IS DISTINCT FROM EXCLUDED.has_peak_context_tokens
+			OR sessions.is_automated IS DISTINCT FROM EXCLUDED.is_automated
 			OR sessions.parent_session_id IS DISTINCT FROM EXCLUDED.parent_session_id
 			OR sessions.relationship_type IS DISTINCT FROM EXCLUDED.relationship_type`,
 		sess.ID, s.machine,
@@ -654,6 +660,7 @@ func (s *Sync) pushSession(
 		sess.MessageCount, sess.UserMessageCount,
 		sess.TotalOutputTokens, sess.PeakContextTokens,
 		sess.HasTotalOutputTokens, sess.HasPeakContextTokens,
+		isAutomated,
 		nilStr(sess.ParentSessionID),
 		sess.RelationshipType,
 	)

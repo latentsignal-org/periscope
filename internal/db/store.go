@@ -39,10 +39,10 @@ type Store interface {
 	GetSessionVersion(id string) (count int, fileMtime int64, ok bool)
 
 	// Metadata.
-	GetStats(ctx context.Context, excludeOneShot bool) (Stats, error)
-	GetProjects(ctx context.Context, excludeOneShot bool) ([]ProjectInfo, error)
-	GetAgents(ctx context.Context, excludeOneShot bool) ([]AgentInfo, error)
-	GetMachines(ctx context.Context, excludeOneShot bool) ([]string, error)
+	GetStats(ctx context.Context, excludeOneShot, excludeAutomated bool) (Stats, error)
+	GetProjects(ctx context.Context, excludeOneShot, excludeAutomated bool) ([]ProjectInfo, error)
+	GetAgents(ctx context.Context, excludeOneShot, excludeAutomated bool) ([]AgentInfo, error)
+	GetMachines(ctx context.Context, excludeOneShot, excludeAutomated bool) ([]string, error)
 
 	// Analytics.
 	GetAnalyticsSummary(ctx context.Context, f AnalyticsFilter) (AnalyticsSummary, error)

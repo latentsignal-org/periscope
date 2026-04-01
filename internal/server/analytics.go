@@ -108,19 +108,21 @@ func parseAnalyticsFilter(
 	}
 
 	includeOneShot := q.Get("include_one_shot") == "true"
+	includeAutomated := q.Get("include_automated") == "true"
 
 	return db.AnalyticsFilter{
-		From:            from,
-		To:              to,
-		Machine:         q.Get("machine"),
-		Project:         q.Get("project"),
-		Agent:           q.Get("agent"),
-		Timezone:        tz,
-		DayOfWeek:       dow,
-		Hour:            hour,
-		MinUserMessages: minUserMsgs,
-		ExcludeOneShot:  !includeOneShot,
-		ActiveSince:     activeSince,
+		From:             from,
+		To:               to,
+		Machine:          q.Get("machine"),
+		Project:          q.Get("project"),
+		Agent:            q.Get("agent"),
+		Timezone:         tz,
+		DayOfWeek:        dow,
+		Hour:             hour,
+		MinUserMessages:  minUserMsgs,
+		ExcludeOneShot:   !includeOneShot,
+		ExcludeAutomated: !includeAutomated,
+		ActiveSince:      activeSince,
 	}, true
 }
 

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     peak_context_tokens INT NOT NULL DEFAULT 0,
     has_total_output_tokens BOOLEAN NOT NULL DEFAULT FALSE,
     has_peak_context_tokens BOOLEAN NOT NULL DEFAULT FALSE,
+    is_automated       BOOLEAN NOT NULL DEFAULT FALSE,
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -235,6 +237,13 @@ func EnsureSchema(
 			 INT NOT NULL DEFAULT 0`,
 			"adding tool_calls.call_index",
 		},
+		{
+			"sessions", "is_automated",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS is_automated
+			 BOOLEAN NOT NULL DEFAULT FALSE`,
+			"adding sessions.is_automated",
+		},
 	}
 	tokenCoverageColumnsAdded := false
 	for _, a := range alters {
@@ -247,6 +256,9 @@ func EnsureSchema(
 			"has_context_tokens", "has_output_tokens":
 			tokenCoverageColumnsAdded = tokenCoverageColumnsAdded || added
 		}
+	}
+	if err := backfillIsAutomatedPG(ctx, db); err != nil {
+		return err
 	}
 	runRepair, err := shouldRunTokenCoverageRepair(
 		ctx, db, tokenCoverageColumnsAdded,
@@ -262,6 +274,125 @@ func EnsureSchema(
 	}
 	if err := markTokenCoverageRepairDone(ctx, db); err != nil {
 		return err
+	}
+	return nil
+}
+
+const isAutomatedBackfillMetadataKey = "is_automated_backfill_v1"
+
+// backfillIsAutomatedPG recomputes is_automated for all PG
+// sessions, correcting both false negatives (new patterns) and
+// stale false positives (patterns tightened since last run).
+// Guarded by a sync_metadata marker so it only runs once per
+// pattern version.
+func backfillIsAutomatedPG(
+	ctx context.Context, pg *sql.DB,
+) error {
+	var done int
+	if err := pg.QueryRowContext(ctx,
+		`SELECT count(*) FROM sync_metadata
+		 WHERE key = $1 AND value != ''`,
+		isAutomatedBackfillMetadataKey,
+	).Scan(&done); err != nil {
+		return fmt.Errorf(
+			"probing PG automated backfill marker: %w", err,
+		)
+	}
+	if done > 0 {
+		return nil
+	}
+
+	rows, err := pg.QueryContext(ctx,
+		`SELECT id, first_message, user_message_count,
+			is_automated
+		 FROM sessions
+		 WHERE first_message IS NOT NULL`)
+	if err != nil {
+		return fmt.Errorf(
+			"querying PG automated backfill candidates: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+
+	var setIDs, clearIDs []string
+	for rows.Next() {
+		var id, fm string
+		var umc int
+		var current bool
+		if err := rows.Scan(
+			&id, &fm, &umc, &current,
+		); err != nil {
+			return fmt.Errorf(
+				"scanning PG backfill candidate: %w", err,
+			)
+		}
+		want := umc <= 1 && db.IsAutomatedSession(fm)
+		if want && !current {
+			setIDs = append(setIDs, id)
+		} else if !want && current {
+			clearIDs = append(clearIDs, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	if err := batchUpdateAutomatedPG(
+		ctx, pg, setIDs, true,
+	); err != nil {
+		return err
+	}
+	if err := batchUpdateAutomatedPG(
+		ctx, pg, clearIDs, false,
+	); err != nil {
+		return err
+	}
+
+	if len(setIDs) > 0 || len(clearIDs) > 0 {
+		log.Printf(
+			"pg migration: recomputed is_automated"+
+				" (set %d, cleared %d)",
+			len(setIDs), len(clearIDs),
+		)
+	}
+
+	_, err = pg.ExecContext(ctx,
+		`INSERT INTO sync_metadata (key, value)
+		 VALUES ($1, '1')
+		 ON CONFLICT (key) DO UPDATE
+		 SET value = EXCLUDED.value`,
+		isAutomatedBackfillMetadataKey,
+	)
+	return err
+}
+
+func batchUpdateAutomatedPG(
+	ctx context.Context, pg *sql.DB,
+	ids []string, val bool,
+) error {
+	const batchSize = 500
+	for i := 0; i < len(ids); i += batchSize {
+		end := min(i+batchSize, len(ids))
+		batch := ids[i:end]
+		pb := &paramBuilder{}
+		valPh := pb.add(val)
+		phs := make([]string, len(batch))
+		for j, id := range batch {
+			phs[j] = pb.add(id)
+		}
+		_, err := pg.ExecContext(ctx,
+			"UPDATE sessions SET is_automated = "+valPh+
+				" WHERE id IN ("+
+				strings.Join(phs, ",")+
+				")",
+			pb.args...,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"updating is_automated in PG: %w", err,
+			)
+		}
 	}
 	return nil
 }

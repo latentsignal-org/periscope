@@ -85,8 +85,11 @@
   let isHideUnknownOn = $derived(
     sessions.filters.hideUnknownProject,
   );
-  let isIncludeOneShotOn = $derived(
-    sessions.filters.includeOneShot,
+  let isHideSingleTurnOn = $derived(
+    !sessions.filters.includeOneShot,
+  );
+  let isIncludeAutomatedOn = $derived(
+    sessions.filters.includeAutomated,
   );
 
   let groups = $derived.by(() => {
@@ -455,17 +458,31 @@
           </div>
           <button
             class="filter-toggle"
-            class:active={isIncludeOneShotOn}
+            class:active={isHideSingleTurnOn}
             onclick={() =>
               sessions.setIncludeOneShotFilter(
-                !isIncludeOneShotOn,
+                isHideSingleTurnOn,
               )}
           >
             <span
               class="toggle-check"
-              class:on={isIncludeOneShotOn}
+              class:on={isHideSingleTurnOn}
             ></span>
-            Include single-turn
+            Hide single-turn
+          </button>
+          <button
+            class="filter-toggle"
+            class:active={isIncludeAutomatedOn}
+            onclick={() =>
+              sessions.setIncludeAutomatedFilter(
+                !isIncludeAutomatedOn,
+              )}
+          >
+            <span
+              class="toggle-check"
+              class:on={isIncludeAutomatedOn}
+            ></span>
+            Include automated reviews
           </button>
         </div>
         <div class="filter-section">

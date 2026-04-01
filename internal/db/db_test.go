@@ -1397,7 +1397,7 @@ func TestCanceledContext(t *testing.T) {
 			return err
 		}, false},
 		{"GetStats", func() error {
-			_, err := d.GetStats(ctx, false)
+			_, err := d.GetStats(ctx, false, false)
 			return err
 		}, false},
 	}
@@ -1416,7 +1416,7 @@ func TestStats(t *testing.T) {
 	d := testDB(t)
 
 	// Empty DB returns nil EarliestSession
-	stats, err := d.GetStats(context.Background(), false)
+	stats, err := d.GetStats(context.Background(), false, false)
 	requireNoError(t, err, "GetStats empty")
 	if stats.EarliestSession != nil {
 		t.Errorf(
@@ -1440,7 +1440,7 @@ func TestStats(t *testing.T) {
 		userMsg("s2", 0, "bye"),
 	)
 
-	stats, err = d.GetStats(context.Background(), false)
+	stats, err = d.GetStats(context.Background(), false, false)
 	requireNoError(t, err, "GetStats")
 	if stats.SessionCount != 2 {
 		t.Errorf("session_count = %d, want 2", stats.SessionCount)
@@ -1473,7 +1473,7 @@ func TestStatsEarliestFallsBackToCreatedAt(t *testing.T) {
 	insertSession(t, d, "s-null-start", "proj")
 	insertMessages(t, d, userMsg("s-null-start", 0, "hi"))
 
-	stats, err := d.GetStats(context.Background(), false)
+	stats, err := d.GetStats(context.Background(), false, false)
 	requireNoError(t, err, "GetStats null started_at")
 	if stats.EarliestSession == nil {
 		t.Fatal(
@@ -1489,7 +1489,7 @@ func TestStatsEarliestFallsBackToCreatedAt(t *testing.T) {
 	})
 	insertMessages(t, d, userMsg("s-empty-start", 0, "hey"))
 
-	stats, err = d.GetStats(context.Background(), false)
+	stats, err = d.GetStats(context.Background(), false, false)
 	requireNoError(t, err, "GetStats empty started_at")
 	if stats.EarliestSession == nil {
 		t.Fatal(
@@ -1512,7 +1512,7 @@ func TestStatsEarliestFallsBackToCreatedAt(t *testing.T) {
 	})
 	insertMessages(t, d, userMsg("s-old", 0, "hello"))
 
-	stats, err = d.GetStats(context.Background(), false)
+	stats, err = d.GetStats(context.Background(), false, false)
 	requireNoError(t, err, "GetStats with old session")
 	if stats.EarliestSession == nil {
 		t.Fatal("earliest_session nil")
@@ -1534,7 +1534,7 @@ func TestGetProjects(t *testing.T) {
 	})
 	insertSession(t, d, "s3", "alpha")
 
-	projects, err := d.GetProjects(context.Background(), false)
+	projects, err := d.GetProjects(context.Background(), false, false)
 	requireNoError(t, err, "GetProjects")
 	if len(projects) != 2 {
 		t.Fatalf("got %d projects, want 2", len(projects))
@@ -1936,7 +1936,7 @@ func TestDeleteSessions(t *testing.T) {
 		insertMessages(t, d, userMsg(id, 0, "msg for "+id))
 	}
 
-	stats, _ := d.GetStats(context.Background(), false)
+	stats, _ := d.GetStats(context.Background(), false, false)
 	if stats.SessionCount != 3 {
 		t.Fatalf("initial sessions = %d, want 3", stats.SessionCount)
 	}
@@ -1963,7 +1963,7 @@ func TestDeleteSessions(t *testing.T) {
 		t.Errorf("s2 messages = %d, want 1", len(msgs))
 	}
 
-	stats, _ = d.GetStats(context.Background(), false)
+	stats, _ = d.GetStats(context.Background(), false, false)
 	if stats.SessionCount != 1 {
 		t.Errorf("session_count = %d, want 1", stats.SessionCount)
 	}
@@ -3895,7 +3895,7 @@ func TestGetAgentsExcludesEmptyAgent(t *testing.T) {
 	insertSession(t, d, "s3", "proj",
 		func(s *Session) { s.Agent = "" })
 
-	agents, err := d.GetAgents(context.Background(), false)
+	agents, err := d.GetAgents(context.Background(), false, false)
 	if err != nil {
 		t.Fatalf("GetAgents: %v", err)
 	}
@@ -3913,7 +3913,7 @@ func TestGetAgentsExcludesEmptyAgent(t *testing.T) {
 func TestGetAgentsEmptyResultSerializesAsArray(t *testing.T) {
 	d := testDB(t)
 
-	agents, err := d.GetAgents(context.Background(), false)
+	agents, err := d.GetAgents(context.Background(), false, false)
 	if err != nil {
 		t.Fatalf("GetAgents: %v", err)
 	}
@@ -4452,19 +4452,19 @@ func TestMetadataQueriesExcludeTrashed(t *testing.T) {
 	})
 
 	// Before trashing: both projects, agents, machines visible.
-	projects, err := d.GetProjects(ctx, false)
+	projects, err := d.GetProjects(ctx, false, false)
 	requireNoError(t, err, "GetProjects before trash")
 	if len(projects) != 2 {
 		t.Fatalf("projects before trash: got %d, want 2", len(projects))
 	}
 
-	agents, err := d.GetAgents(ctx, false)
+	agents, err := d.GetAgents(ctx, false, false)
 	requireNoError(t, err, "GetAgents before trash")
 	if len(agents) != 2 {
 		t.Fatalf("agents before trash: got %d, want 2", len(agents))
 	}
 
-	machines, err := d.GetMachines(ctx, false)
+	machines, err := d.GetMachines(ctx, false, false)
 	requireNoError(t, err, "GetMachines before trash")
 	if len(machines) != 2 {
 		t.Fatalf("machines before trash: got %d, want 2", len(machines))
@@ -4473,7 +4473,7 @@ func TestMetadataQueriesExcludeTrashed(t *testing.T) {
 	// Soft-delete s2: its project/agent/machine should disappear.
 	requireNoError(t, d.SoftDeleteSession("s2"), "soft delete s2")
 
-	projects, err = d.GetProjects(ctx, false)
+	projects, err = d.GetProjects(ctx, false, false)
 	requireNoError(t, err, "GetProjects after trash")
 	if len(projects) != 1 {
 		t.Errorf("projects after trash: got %d, want 1", len(projects))
@@ -4482,7 +4482,7 @@ func TestMetadataQueriesExcludeTrashed(t *testing.T) {
 		t.Errorf("project name: got %q, want %q", projects[0].Name, "proj-a")
 	}
 
-	agents, err = d.GetAgents(ctx, false)
+	agents, err = d.GetAgents(ctx, false, false)
 	requireNoError(t, err, "GetAgents after trash")
 	if len(agents) != 1 {
 		t.Errorf("agents after trash: got %d, want 1", len(agents))
@@ -4491,7 +4491,7 @@ func TestMetadataQueriesExcludeTrashed(t *testing.T) {
 		t.Errorf("agent name: got %q, want %q", agents[0].Name, "claude")
 	}
 
-	machines, err = d.GetMachines(ctx, false)
+	machines, err = d.GetMachines(ctx, false, false)
 	requireNoError(t, err, "GetMachines after trash")
 	if len(machines) != 1 {
 		t.Errorf("machines after trash: got %d, want 1", len(machines))

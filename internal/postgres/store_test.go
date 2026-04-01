@@ -278,7 +278,7 @@ func TestStoreGetStats(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
-	stats, err := store.GetStats(ctx, false)
+	stats, err := store.GetStats(ctx, false, false)
 	if err != nil {
 		t.Fatalf("GetStats: %v", err)
 	}

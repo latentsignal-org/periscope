@@ -233,26 +233,31 @@ export function searchSession(
 
 /* Metadata */
 
+interface MetadataParams {
+  include_one_shot?: boolean;
+  include_automated?: boolean;
+}
+
 export function getProjects(
-  params: { include_one_shot?: boolean } = {},
+  params: MetadataParams = {},
 ): Promise<ProjectsResponse> {
   return fetchJSON(`/projects${buildQuery({ ...params })}`);
 }
 
 export function getMachines(
-  params: { include_one_shot?: boolean } = {},
+  params: MetadataParams = {},
 ): Promise<MachinesResponse> {
   return fetchJSON(`/machines${buildQuery({ ...params })}`);
 }
 
 export function getAgents(
-  params: { include_one_shot?: boolean } = {},
+  params: MetadataParams = {},
 ): Promise<AgentsResponse> {
   return fetchJSON(`/agents${buildQuery({ ...params })}`);
 }
 
 export function getStats(
-  params: { include_one_shot?: boolean } = {},
+  params: MetadataParams = {},
 ): Promise<Stats> {
   return fetchJSON(`/stats${buildQuery({ ...params })}`);
 }
@@ -655,6 +660,7 @@ export interface AnalyticsParams {
   hour?: number;
   min_user_messages?: number;
   include_one_shot?: boolean;
+  include_automated?: boolean;
   active_since?: string;
 }
 

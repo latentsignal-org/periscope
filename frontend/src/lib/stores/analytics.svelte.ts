@@ -65,7 +65,8 @@ class AnalyticsStore {
   project: string = $state("");
   agent: string = $state("");
   minUserMessages: number = $state(0);
-  includeOneShot: boolean = $state(false);
+  includeOneShot: boolean = $state(true);
+  includeAutomated: boolean = $state(false);
   recentlyActive: boolean = $state(false);
   selectedDow: number | null = $state(null);
   selectedHour: number | null = $state(null);
@@ -127,7 +128,8 @@ class AnalyticsStore {
       this.project !== "" ||
       this.agent !== "" ||
       this.minUserMessages > 0 ||
-      this.includeOneShot ||
+      !this.includeOneShot ||
+      this.includeAutomated ||
       this.recentlyActive ||
       this.selectedDow !== null ||
       this.selectedHour !== null
@@ -139,14 +141,16 @@ class AnalyticsStore {
     this.project = "";
     this.agent = "";
     this.minUserMessages = 0;
-    this.includeOneShot = false;
+    this.includeOneShot = true;
+    this.includeAutomated = false;
     this.recentlyActive = false;
     this.selectedDow = null;
     this.selectedHour = null;
     sessions.filters.project = "";
     sessions.filters.agent = "";
     sessions.filters.minUserMessages = 0;
-    sessions.filters.includeOneShot = false;
+    sessions.filters.includeOneShot = true;
+    sessions.filters.includeAutomated = false;
     sessions.filters.recentlyActive = false;
     sessions.activeSessionId = null;
     sessions.invalidateFilterCaches();
@@ -186,8 +190,17 @@ class AnalyticsStore {
   }
 
   clearIncludeOneShot() {
-    this.includeOneShot = false;
-    sessions.filters.includeOneShot = false;
+    this.includeOneShot = true;
+    sessions.filters.includeOneShot = true;
+    sessions.activeSessionId = null;
+    sessions.invalidateFilterCaches();
+    sessions.load();
+    this.fetchAll();
+  }
+
+  clearIncludeAutomated() {
+    this.includeAutomated = false;
+    sessions.filters.includeAutomated = false;
     sessions.activeSessionId = null;
     sessions.invalidateFilterCaches();
     sessions.load();
@@ -256,6 +269,9 @@ class AnalyticsStore {
     if (this.includeOneShot) {
       p.include_one_shot = true;
     }
+    if (this.includeAutomated) {
+      p.include_automated = true;
+    }
     if (this.recentlyActive) {
       p.active_since = new Date(
         Date.now() - 24 * 60 * 60 * 1000,
@@ -293,6 +309,9 @@ class AnalyticsStore {
       }
       if (this.includeOneShot) {
         p.include_one_shot = true;
+      }
+      if (this.includeAutomated) {
+        p.include_automated = true;
       }
       if (this.recentlyActive) {
         p.active_since = new Date(

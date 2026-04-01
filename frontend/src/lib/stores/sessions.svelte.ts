@@ -31,6 +31,7 @@ interface Filters {
   maxMessages: number;
   minUserMessages: number;
   includeOneShot: boolean;
+  includeAutomated: boolean;
 }
 
 function defaultFilters(): Filters {
@@ -46,7 +47,8 @@ function defaultFilters(): Filters {
     minMessages: 0,
     maxMessages: 0,
     minUserMessages: 0,
-    includeOneShot: false,
+    includeOneShot: true,
+    includeAutomated: false,
   };
 }
 
@@ -110,6 +112,7 @@ class SessionsStore {
       min_user_messages:
         f.minUserMessages > 0 ? f.minUserMessages : undefined,
       include_one_shot: f.includeOneShot || undefined,
+      include_automated: f.includeAutomated || undefined,
       include_children: true,
     };
   }
@@ -142,8 +145,14 @@ class SessionsStore {
     }
 
     const prevOneShot = this.filters.includeOneShot;
+    const prevAutomated = this.filters.includeAutomated;
+    // Default is true (show single-turn); only false when
+    // explicitly set to "false" in URL params.
+    const oneShotParam = params["include_one_shot"];
     const nextOneShot =
-      params["include_one_shot"] === "true";
+      oneShotParam === undefined ? true : oneShotParam === "true";
+    const nextAutomated =
+      params["include_automated"] === "true";
 
     this.filters = {
       project,
@@ -160,8 +169,10 @@ class SessionsStore {
         ? minUserMsgs
         : 0,
       includeOneShot: nextOneShot,
+      includeAutomated: nextAutomated,
     };
-    if (prevOneShot !== nextOneShot) {
+    if (prevOneShot !== nextOneShot ||
+        prevAutomated !== nextAutomated) {
       this.invalidateFilterCaches();
     }
     this.setActiveSession(null);
@@ -277,10 +288,7 @@ class SessionsStore {
     const ver = this.projectsVersion;
     this.projectsPromise = (async () => {
       try {
-        const params = this.filters.includeOneShot
-          ? { include_one_shot: true as const }
-          : {};
-        const res = await api.getProjects(params);
+        const res = await api.getProjects(this.metadataParams);
         if (ver === this.projectsVersion) {
           this.projects = res.projects;
           this.projectsLoaded = true;
@@ -302,10 +310,7 @@ class SessionsStore {
     const ver = this.agentsVersion;
     this.agentsPromise = (async () => {
       try {
-        const params = this.filters.includeOneShot
-          ? { include_one_shot: true as const }
-          : {};
-        const res = await api.getAgents(params);
+        const res = await api.getAgents(this.metadataParams);
         if (ver === this.agentsVersion) {
           this.agents = res.agents;
           this.agentsLoaded = true;
@@ -327,10 +332,7 @@ class SessionsStore {
     const ver = this.machinesVersion;
     this.machinesPromise = (async () => {
       try {
-        const params = this.filters.includeOneShot
-          ? { include_one_shot: true as const }
-          : {};
-        const res = await api.getMachines(params);
+        const res = await api.getMachines(this.metadataParams);
         if (ver === this.machinesVersion) {
           this.machines = res.machines;
           this.machinesLoaded = true;
@@ -451,10 +453,13 @@ class SessionsStore {
   }
 
   setProjectFilter(project: string) {
-    const wasOneShot = this.filters.includeOneShot;
-    this.filters = { ...defaultFilters(), project, agent: this.filters.agent };
+    const prev = this.filters;
+    this.filters = { ...defaultFilters(), project, agent: prev.agent };
     this.setActiveSession(null);
-    if (wasOneShot) this.invalidateFilterCaches();
+    if (prev.includeOneShot !== this.filters.includeOneShot ||
+        prev.includeAutomated !== this.filters.includeAutomated) {
+      this.invalidateFilterCaches();
+    }
     this.load();
   }
 
@@ -552,6 +557,13 @@ class SessionsStore {
     this.load();
   }
 
+  setIncludeAutomatedFilter(include: boolean) {
+    this.filters.includeAutomated = include;
+    this.setActiveSession(null);
+    this.invalidateFilterCaches();
+    this.load();
+  }
+
   get hasActiveFilters(): boolean {
     const f = this.filters;
     return !!(
@@ -563,16 +575,20 @@ class SessionsStore {
       f.dateTo ||
       f.date ||
       f.minUserMessages > 0 ||
-      f.includeOneShot
+      !f.includeOneShot ||
+      f.includeAutomated
     );
   }
 
   clearSessionFilters() {
     const project = this.filters.project;
     const wasOneShot = this.filters.includeOneShot;
+    const wasAutomated = this.filters.includeAutomated;
     this.filters = { ...defaultFilters(), project };
     this.setActiveSession(null);
-    if (wasOneShot) this.invalidateFilterCaches();
+    if (wasOneShot !== this.filters.includeOneShot || wasAutomated) {
+      this.invalidateFilterCaches();
+    }
     this.load();
   }
 
@@ -607,6 +623,13 @@ class SessionsStore {
     await this.load();
   }
 
+  private get metadataParams() {
+    return {
+      include_one_shot: this.filters.includeOneShot || undefined,
+      include_automated: this.filters.includeAutomated || undefined,
+    };
+  }
+
   invalidateFilterCaches() {
     this.projectsVersion++;
     this.projectsLoaded = false;
@@ -620,11 +643,7 @@ class SessionsStore {
     this.loadProjects();
     this.loadAgents();
     this.loadMachines();
-    sync.loadStats(
-      this.filters.includeOneShot
-        ? { include_one_shot: true }
-        : {},
-    );
+    sync.loadStats(this.metadataParams);
   }
 
   /** Remove one or all entries from the undo toast list. */

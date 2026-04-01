@@ -48,8 +48,10 @@ class SyncStore {
   private watchEventSource: EventSource | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null =
     null;
-  private lastStatsParams: { include_one_shot?: boolean } =
-    {};
+  private lastStatsParams: {
+    include_one_shot?: boolean;
+    include_automated?: boolean;
+  } = { include_one_shot: true };
   private statsVersion = 0;
   private syncCompleteListeners: SyncCompleteListener[] = [];
   private statusHydrated = false;
@@ -106,7 +108,10 @@ class SyncStore {
   }
 
   async loadStats(
-    params?: { include_one_shot?: boolean },
+    params?: {
+      include_one_shot?: boolean;
+      include_automated?: boolean;
+    },
   ) {
     if (params !== undefined) {
       this.lastStatsParams = params;

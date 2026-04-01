@@ -56,24 +56,26 @@ func (s *Server) handleListSessions(
 	}
 
 	includeOneShot := q.Get("include_one_shot") == "true"
+	includeAutomated := q.Get("include_automated") == "true"
 	includeChildren := q.Get("include_children") == "true"
 
 	filter := db.SessionFilter{
-		Project:         q.Get("project"),
-		ExcludeProject:  q.Get("exclude_project"),
-		Machine:         q.Get("machine"),
-		Agent:           q.Get("agent"),
-		Date:            date,
-		DateFrom:        dateFrom,
-		DateTo:          dateTo,
-		ActiveSince:     activeSince,
-		MinMessages:     minMsgs,
-		MaxMessages:     maxMsgs,
-		MinUserMessages: minUserMsgs,
-		ExcludeOneShot:  !includeOneShot,
-		IncludeChildren: includeChildren,
-		Cursor:          q.Get("cursor"),
-		Limit:           limit,
+		Project:          q.Get("project"),
+		ExcludeProject:   q.Get("exclude_project"),
+		Machine:          q.Get("machine"),
+		Agent:            q.Get("agent"),
+		Date:             date,
+		DateFrom:         dateFrom,
+		DateTo:           dateTo,
+		ActiveSince:      activeSince,
+		MinMessages:      minMsgs,
+		MaxMessages:      maxMsgs,
+		MinUserMessages:  minUserMsgs,
+		ExcludeOneShot:   !includeOneShot,
+		ExcludeAutomated: !includeAutomated,
+		IncludeChildren:  includeChildren,
+		Cursor:           q.Get("cursor"),
+		Limit:            limit,
 	}
 
 	page, err := s.db.ListSessions(r.Context(), filter)

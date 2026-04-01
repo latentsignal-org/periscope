@@ -29,6 +29,7 @@ const sessionBaseCols = `id, project, machine, agent,
 	parent_session_id, relationship_type,
 	total_output_tokens, peak_context_tokens,
 	has_total_output_tokens, has_peak_context_tokens,
+	is_automated,
 	deleted_at, created_at`
 
 // sessionPruneCols extends sessionBaseCols with file metadata
@@ -39,6 +40,7 @@ const sessionPruneCols = `id, project, machine, agent,
 	parent_session_id, relationship_type,
 	total_output_tokens, peak_context_tokens,
 	has_total_output_tokens, has_peak_context_tokens,
+	is_automated,
 	deleted_at, file_path, file_size, created_at`
 
 // sessionFullCols includes all columns for a complete session record.
@@ -48,6 +50,7 @@ const sessionFullCols = `id, project, machine, agent,
 	parent_session_id, relationship_type,
 	total_output_tokens, peak_context_tokens,
 	has_total_output_tokens, has_peak_context_tokens,
+	is_automated,
 	deleted_at, file_path, file_size, file_mtime,
 	file_hash, local_modified_at, created_at`
 
@@ -74,6 +77,7 @@ func scanSessionRow(rs rowScanner) (Session, error) {
 		&s.ParentSessionID, &s.RelationshipType,
 		&s.TotalOutputTokens, &s.PeakContextTokens,
 		&s.HasTotalOutputTokens, &s.HasPeakContextTokens,
+		&s.IsAutomated,
 		&s.DeletedAt, &s.CreatedAt,
 	)
 	return s, err
@@ -97,6 +101,7 @@ type Session struct {
 	PeakContextTokens    int     `json:"peak_context_tokens"`
 	HasTotalOutputTokens bool    `json:"has_total_output_tokens"`
 	HasPeakContextTokens bool    `json:"has_peak_context_tokens"`
+	IsAutomated          bool    `json:"is_automated"`
 	DeletedAt            *string `json:"deleted_at,omitempty"`
 	FilePath             *string `json:"file_path,omitempty"`
 	FileSize             *int64  `json:"file_size,omitempty"`
@@ -196,8 +201,9 @@ type SessionFilter struct {
 	MinMessages     int    // message_count >= N (0 = no filter)
 	MaxMessages     int    // message_count <= N (0 = no filter)
 	MinUserMessages int    // user_message_count >= N (0 = no filter)
-	ExcludeOneShot  bool   // exclude sessions with user_message_count <= 1
-	IncludeChildren bool   // include subagent sessions (for sidebar grouping)
+	ExcludeOneShot   bool   // exclude sessions with user_message_count <= 1
+	ExcludeAutomated bool   // exclude sessions where is_automated = 1
+	IncludeChildren  bool   // include subagent sessions (for sidebar grouping)
 	Cursor          string // opaque cursor from previous page
 	Limit           int
 }
@@ -313,14 +319,25 @@ func buildSessionFilter(f SessionFilter) (string, []any) {
 	// are almost always one-shot by nature and must not be
 	// excluded. The one-shot filter applies only to root
 	// sessions that match the filter directly.
+	// When ExcludeOneShot is true but automated sessions are
+	// included, exempt them from the one-shot filter — automated
+	// sessions are single-turn by definition, so a strict
+	// user_message_count > 1 predicate would always hide them.
 	oneShotPred := ""
 	if f.ExcludeOneShot {
-		if f.IncludeChildren {
-			oneShotPred = "user_message_count > 1"
-		} else {
-			filterPreds = append(filterPreds,
-				"user_message_count > 1")
+		pred := "user_message_count > 1"
+		if !f.ExcludeAutomated {
+			pred = "(user_message_count > 1 OR is_automated = 1)"
 		}
+		if f.IncludeChildren {
+			oneShotPred = pred
+		} else {
+			filterPreds = append(filterPreds, pred)
+		}
+	}
+
+	if f.ExcludeAutomated {
+		filterPreds = append(filterPreds, "is_automated = 0")
 	}
 
 	// Simple case: no IncludeChildren or no user filters.
@@ -482,6 +499,7 @@ func (db *DB) GetSessionFull(
 		&s.ParentSessionID, &s.RelationshipType,
 		&s.TotalOutputTokens, &s.PeakContextTokens,
 		&s.HasTotalOutputTokens, &s.HasPeakContextTokens,
+		&s.IsAutomated,
 		&s.DeletedAt, &s.FilePath, &s.FileSize,
 		&s.FileMtime, &s.FileHash, &s.LocalModifiedAt, &s.CreatedAt,
 	)
@@ -534,6 +552,10 @@ func (db *DB) UpsertSession(s Session) error {
 		return ErrSessionExcluded
 	}
 
+	isAutomated := s.UserMessageCount <= 1 &&
+		s.FirstMessage != nil &&
+		IsAutomatedSession(*s.FirstMessage)
+
 	_, err := db.getWriter().Exec(`
 		INSERT INTO sessions (
 			id, project, machine, agent, first_message,
@@ -542,8 +564,9 @@ func (db *DB) UpsertSession(s Session) error {
 			relationship_type,
 			total_output_tokens, peak_context_tokens,
 			has_total_output_tokens, has_peak_context_tokens,
+			is_automated,
 			file_path, file_size, file_mtime, file_hash
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			project = excluded.project,
 			machine = excluded.machine,
@@ -559,6 +582,7 @@ func (db *DB) UpsertSession(s Session) error {
 			peak_context_tokens = excluded.peak_context_tokens,
 			has_total_output_tokens = excluded.has_total_output_tokens,
 			has_peak_context_tokens = excluded.has_peak_context_tokens,
+			is_automated = excluded.is_automated,
 			file_path = excluded.file_path,
 			file_size = excluded.file_size,
 			file_mtime = excluded.file_mtime,
@@ -569,6 +593,7 @@ func (db *DB) UpsertSession(s Session) error {
 		s.RelationshipType,
 		s.TotalOutputTokens, s.PeakContextTokens,
 		s.HasTotalOutputTokens, s.HasPeakContextTokens,
+		isAutomated,
 		s.FilePath, s.FileSize, s.FileMtime, s.FileHash)
 	if err != nil {
 		return fmt.Errorf("upserting session %s: %w", s.ID, err)
@@ -760,11 +785,17 @@ func (db *DB) UpdateSessionIncremental(
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
+	// is_automated requires single-turn (user_message_count <= 1).
+	// When the count grows past 1, clear the flag in SQL without
+	// an extra SELECT. UpsertSession already sets the flag for new
+	// sessions, so the only incremental transition is clearing it.
 	_, err := db.getWriter().Exec(`
 		UPDATE sessions SET
 			ended_at = COALESCE(?, ended_at),
 			message_count = ?,
 			user_message_count = ?,
+			is_automated = CASE WHEN ? > 1 THEN 0
+				ELSE is_automated END,
 			file_size = ?,
 			file_mtime = ?,
 			total_output_tokens = ?,
@@ -772,7 +803,7 @@ func (db *DB) UpdateSessionIncremental(
 			has_total_output_tokens = ?,
 			has_peak_context_tokens = ?
 		WHERE id = ?`,
-		endedAt, msgCount, userMsgCount,
+		endedAt, msgCount, userMsgCount, userMsgCount,
 		fileSize, fileMtime,
 		totalOutputTokens, peakContextTokens,
 		hasTotalOutputTokens, hasPeakContextTokens, id,
@@ -897,7 +928,8 @@ func (db *DB) DeleteSessionIfTrashed(id string) (int64, error) {
 
 // GetProjects returns project names with session counts.
 func (db *DB) GetProjects(
-	ctx context.Context, excludeOneShot bool,
+	ctx context.Context,
+	excludeOneShot, excludeAutomated bool,
 ) ([]ProjectInfo, error) {
 	q := `SELECT project, COUNT(*) as session_count
 		FROM sessions
@@ -905,7 +937,14 @@ func (db *DB) GetProjects(
 		  AND relationship_type NOT IN ('subagent', 'fork')
 		  AND deleted_at IS NULL`
 	if excludeOneShot {
-		q += " AND user_message_count > 1"
+		if !excludeAutomated {
+			q += " AND (user_message_count > 1 OR is_automated = 1)"
+		} else {
+			q += " AND user_message_count > 1"
+		}
+	}
+	if excludeAutomated {
+		q += " AND is_automated = 0"
 	}
 	q += " GROUP BY project ORDER BY project"
 	rows, err := db.getReader().QueryContext(ctx, q)
@@ -933,7 +972,8 @@ type ProjectInfo struct {
 
 // GetAgents returns distinct agent names with session counts.
 func (db *DB) GetAgents(
-	ctx context.Context, excludeOneShot bool,
+	ctx context.Context,
+	excludeOneShot, excludeAutomated bool,
 ) ([]AgentInfo, error) {
 	q := `SELECT agent, COUNT(*) as session_count
 		FROM sessions
@@ -941,7 +981,14 @@ func (db *DB) GetAgents(
 		  AND deleted_at IS NULL
 		  AND relationship_type NOT IN ('subagent', 'fork')`
 	if excludeOneShot {
-		q += " AND user_message_count > 1"
+		if !excludeAutomated {
+			q += " AND (user_message_count > 1 OR is_automated = 1)"
+		} else {
+			q += " AND user_message_count > 1"
+		}
+	}
+	if excludeAutomated {
+		q += " AND is_automated = 0"
 	}
 	q += " GROUP BY agent ORDER BY agent"
 	rows, err := db.getReader().QueryContext(ctx, q)
@@ -969,11 +1016,19 @@ type AgentInfo struct {
 
 // GetMachines returns distinct machine names.
 func (db *DB) GetMachines(
-	ctx context.Context, excludeOneShot bool,
+	ctx context.Context,
+	excludeOneShot, excludeAutomated bool,
 ) ([]string, error) {
 	q := "SELECT DISTINCT machine FROM sessions WHERE deleted_at IS NULL"
 	if excludeOneShot {
-		q += " AND user_message_count > 1"
+		if !excludeAutomated {
+			q += " AND (user_message_count > 1 OR is_automated = 1)"
+		} else {
+			q += " AND user_message_count > 1"
+		}
+	}
+	if excludeAutomated {
+		q += " AND is_automated = 0"
 	}
 	q += " ORDER BY machine"
 	rows, err := db.getReader().QueryContext(ctx, q)
@@ -1094,6 +1149,7 @@ func (db *DB) FindPruneCandidates(
 			&s.ParentSessionID, &s.RelationshipType,
 			&s.TotalOutputTokens, &s.PeakContextTokens,
 			&s.HasTotalOutputTokens, &s.HasPeakContextTokens,
+			&s.IsAutomated,
 			&s.DeletedAt, &s.FilePath, &s.FileSize, &s.CreatedAt,
 		)
 		if err != nil {
@@ -1339,6 +1395,7 @@ func (db *DB) ListSessionsModifiedBetween(
 			&s.ParentSessionID, &s.RelationshipType,
 			&s.TotalOutputTokens, &s.PeakContextTokens,
 			&s.HasTotalOutputTokens, &s.HasPeakContextTokens,
+			&s.IsAutomated,
 			&s.DeletedAt, &s.FilePath, &s.FileSize,
 			&s.FileMtime, &s.FileHash, &s.LocalModifiedAt, &s.CreatedAt,
 		)

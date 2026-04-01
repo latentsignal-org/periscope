@@ -275,7 +275,7 @@ func TestSyncEngineWorktreesShareProject(t *testing.T) {
 	assertSessionProject(t, env.db, "main-repo", "agentsview")
 	assertSessionProject(t, env.db, "worktree-repo", "agentsview")
 
-	projects, err := env.db.GetProjects(context.Background(), false)
+	projects, err := env.db.GetProjects(context.Background(), false, false)
 	if err != nil {
 		t.Fatalf("GetProjects: %v", err)
 	}

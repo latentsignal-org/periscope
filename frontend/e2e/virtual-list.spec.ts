@@ -44,7 +44,7 @@ test.describe("Virtual list behavior", () => {
       ]),
     );
 
-    await page.route("**/api/v1/projects", async (route) => {
+    await page.route("**/api/v1/projects*", async (route) => {
       await route.fulfill({
         json: {
           projects: [
