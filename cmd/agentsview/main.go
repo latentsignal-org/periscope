@@ -79,9 +79,9 @@ func main() {
 func printUsage() {
 	fmt.Printf(`agentsview %s - local web viewer for AI agent sessions
 
-Syncs Claude Code, Codex, Copilot CLI, Gemini CLI, OpenCode, Cursor,
-and Amp session data into SQLite, serves an analytics dashboard and
-session browser via a local web UI.
+Syncs Claude Code, Codex, Copilot CLI, Gemini CLI, OpenCode, OpenHands,
+Cursor, and Amp session data into SQLite, serves an analytics dashboard
+and session browser via a local web UI.
 
 Usage:
   agentsview [flags]          Start the server (default command)
@@ -150,6 +150,7 @@ Environment variables:
   COPILOT_DIR             Copilot CLI directory
   GEMINI_DIR              Gemini CLI directory
   OPENCODE_DIR            OpenCode data directory
+  OPENHANDS_CONVERSATIONS_DIR OpenHands CLI conversations directory
   CURSOR_PROJECTS_DIR     Cursor projects directory
   IFLOW_DIR               iFlow projects directory
   AMP_DIR                 Amp threads directory
@@ -512,8 +513,9 @@ func startFileWatcher(
 	}
 
 	type watchRoot struct {
-		dir  string
-		root string // actual path passed to WatchRecursive
+		dir     string
+		root    string // actual path passed to WatchRecursive
+		shallow bool   // use shallow watch (root only)
 	}
 
 	var roots []watchRoot
@@ -525,7 +527,7 @@ func startFileWatcher(
 			if len(def.WatchSubdirs) == 0 {
 				if _, err := os.Stat(d); err == nil {
 					roots = append(
-						roots, watchRoot{d, d},
+						roots, watchRoot{d, d, def.ShallowWatch},
 					)
 				}
 				continue
@@ -534,7 +536,7 @@ func startFileWatcher(
 				watchDir := filepath.Join(d, sub)
 				if _, err := os.Stat(watchDir); err == nil {
 					roots = append(
-						roots, watchRoot{d, watchDir},
+						roots, watchRoot{d, watchDir, def.ShallowWatch},
 					)
 				}
 			}
@@ -542,7 +544,17 @@ func startFileWatcher(
 	}
 
 	var totalWatched int
+	var shallowWatched int
 	for _, r := range roots {
+		if r.shallow {
+			if watcher.WatchShallow(r.root) {
+				shallowWatched++
+				totalWatched++
+			} else {
+				unwatchedDirs = append(unwatchedDirs, r.dir)
+			}
+			continue
+		}
 		watched, uw, _ := watcher.WatchRecursive(r.root)
 		totalWatched += watched
 		if uw > 0 {
@@ -554,10 +566,17 @@ func startFileWatcher(
 		}
 	}
 
-	fmt.Printf(
-		"Watching %d directories for changes (%s)\n",
-		totalWatched, time.Since(t).Round(time.Millisecond),
-	)
+	if shallowWatched > 0 {
+		fmt.Printf(
+			"Watching %d directories for changes (%d shallow) (%s)\n",
+			totalWatched, shallowWatched, time.Since(t).Round(time.Millisecond),
+		)
+	} else {
+		fmt.Printf(
+			"Watching %d directories for changes (%s)\n",
+			totalWatched, time.Since(t).Round(time.Millisecond),
+		)
+	}
 	watcher.Start()
 	return watcher.Stop, unwatchedDirs
 }
