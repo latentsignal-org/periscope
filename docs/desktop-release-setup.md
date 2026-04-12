@@ -331,12 +331,17 @@ Each release produces these artifacts:
 
 | File                                      | Description                                  |
 | ----------------------------------------- | -------------------------------------------- |
-| `AgentsView_x.y.z_aarch64.dmg`            | macOS installer (signed + notarized)         |
-| `AgentsView.app.tar.gz`                   | macOS updater bundle                         |
-| `AgentsView.app.tar.gz.sig`               | macOS updater signature                      |
+| `AgentsView_x.y.z_aarch64.dmg`            | macOS Apple Silicon installer                |
+| `AgentsView_x.y.z_x64.dmg`                | macOS Intel installer                        |
+| `AgentsView_aarch64.app.tar.gz`           | macOS Apple Silicon updater bundle           |
+| `AgentsView_aarch64.app.tar.gz.sig`       | macOS Apple Silicon updater signature        |
+| `AgentsView_x86_64.app.tar.gz`            | macOS Intel updater bundle                   |
+| `AgentsView_x86_64.app.tar.gz.sig`        | macOS Intel updater signature                |
 | `AgentsView_x.y.z_x64-setup.exe`          | Windows NSIS installer                       |
 | `AgentsView_x.y.z_x64-setup.nsis.zip`     | Windows updater bundle                       |
 | `AgentsView_x.y.z_x64-setup.nsis.zip.sig` | Windows updater signature                    |
+| `AgentsView_x.y.z_amd64.AppImage`         | Linux x86_64 AppImage                        |
+| `AgentsView_x.y.z_aarch64.AppImage`       | Linux arm64 AppImage                         |
 | `latest.json`                             | Updater manifest (version, URLs, signatures) |
 | `SHA256SUMS-desktop`                      | Checksums for all desktop artifacts          |
 

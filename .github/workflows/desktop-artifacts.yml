@@ -19,24 +19,44 @@ concurrency:
 
 jobs:
   build:
-    name: Desktop Build (${{ matrix.platform }})
+    name: Desktop Build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    env:
+      AGENTSVIEW_TARGET_TRIPLE: ${{ matrix.target_triple }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: macos
+          - name: macOS (aarch64)
             os: macos-15
             bundle: app
-            bundle_dir: macos
-          - platform: windows
+            target_triple: aarch64-apple-darwin
+            artifact_name: agentsview-desktop-macos-aarch64
+            artifact_dir: desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/
+          - name: macOS (x86_64)
+            os: macos-15
+            bundle: app
+            target_triple: x86_64-apple-darwin
+            artifact_name: agentsview-desktop-macos-x86_64
+            artifact_dir: desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/
+          - name: Windows
             os: windows-latest
             bundle: nsis
-            bundle_dir: nsis
-          - platform: linux
+            target_triple: ""
+            artifact_name: agentsview-desktop-windows
+            artifact_dir: desktop/src-tauri/target/release/bundle/nsis/
+          - name: Linux
             os: ubuntu-22.04
             bundle: appimage
-            bundle_dir: appimage
+            target_triple: ""
+            artifact_name: agentsview-desktop-linux
+            artifact_dir: desktop/src-tauri/target/release/bundle/appimage/
+          - name: Linux (arm64)
+            os: ubuntu-22.04-arm
+            bundle: appimage
+            target_triple: aarch64-unknown-linux-gnu
+            artifact_name: agentsview-desktop-linux-arm64
+            artifact_dir: desktop/src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/appimage/
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -52,7 +72,7 @@ jobs:
           node-version: "24"
 
       - name: Setup MinGW (Windows)
-        if: matrix.platform == 'windows'
+        if: runner.os == 'Windows'
         uses: msys2/setup-msys2@cafece8e6baf9247cf9b1bf95097b0b983cc558d  # v2
         with:
           msystem: MINGW64
@@ -61,13 +81,17 @@ jobs:
           path-type: inherit
 
       - name: Install Linux system dependencies
-        if: matrix.platform == 'linux'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libgtk-3-dev \
             libappindicator3-dev librsvg2-dev \
-            patchelf
+            patchelf xdg-utils
+
+      - name: Install Rust target
+        if: env.AGENTSVIEW_TARGET_TRIPLE != ''
+        run: rustup target add "$AGENTSVIEW_TARGET_TRIPLE"
 
       - name: Install desktop dependencies
         run: npm ci
@@ -77,24 +101,36 @@ jobs:
         shell: bash
         run: |
           bash desktop/scripts/test-prepare-sidecar.sh
+          bash desktop/scripts/test-desktop-workflows.sh
           bash desktop/scripts/test-startup-ui.sh
 
       - name: Build desktop bundle
         shell: bash
         run: |
           cd desktop
+          export TAURI_ENV_TARGET_TRIPLE="$AGENTSVIEW_TARGET_TRIPLE"
           npm run prepare-sidecar
-          npx tauri build --bundles "${{ matrix.bundle }}" \
-            --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          build_cmd=(npx tauri build --bundles "${{ matrix.bundle }}")
+          if [ -n "$AGENTSVIEW_TARGET_TRIPLE" ]; then
+            build_cmd+=(--target "$AGENTSVIEW_TARGET_TRIPLE")
+          fi
+          build_cmd+=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
+          "${build_cmd[@]}"
 
       - name: Desktop smoke tests (Rust unit tests)
         shell: bash
-        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib
+        run: |
+          test_cmd=(cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib)
+          if [ -n "$AGENTSVIEW_TARGET_TRIPLE" ]; then
+            export TAURI_ENV_TARGET_TRIPLE="$AGENTSVIEW_TARGET_TRIPLE"
+            test_cmd+=(--target "$AGENTSVIEW_TARGET_TRIPLE")
+          fi
+          "${test_cmd[@]}"
 
       - name: Smoke check sidecar metadata
         shell: bash
         run: |
-          target_triple="${TAURI_ENV_TARGET_TRIPLE:-${CARGO_BUILD_TARGET:-$(rustc -vV | awk '/^host: /{print $2}')}}"
+          target_triple="${AGENTSVIEW_TARGET_TRIPLE:-$(rustc -vV | awk '/^host: /{print $2}')}"
           if [ -z "$target_triple" ]; then
             echo "target triple is empty" >&2
             exit 1
@@ -126,6 +162,6 @@ jobs:
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
         with:
-          name: agentsview-desktop-${{ matrix.platform }}
-          path: desktop/src-tauri/target/release/bundle/${{ matrix.bundle_dir }}/
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_dir }}
           if-no-files-found: error

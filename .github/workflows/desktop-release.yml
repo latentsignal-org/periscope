@@ -14,8 +14,19 @@ concurrency:
 
 jobs:
   build-macos:
-    name: Desktop Build (macOS)
+    name: Desktop Build (macOS ${{ matrix.arch }})
     runs-on: macos-15
+    env:
+      AGENTSVIEW_TARGET_TRIPLE: ${{ matrix.target_triple }}
+      CARGO_BUILD_TARGET: ${{ matrix.target_triple }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target_triple: aarch64-apple-darwin
+          - arch: x86_64
+            target_triple: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -30,6 +41,9 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Install Rust target
+        run: rustup target add "$AGENTSVIEW_TARGET_TRIPLE"
+
       - name: Install desktop dependencies
         run: npm ci
         working-directory: desktop
@@ -37,7 +51,9 @@ jobs:
       - name: Prepare sidecar
         env:
           AGENTSVIEW_VERSION: ${{ github.ref_name }}
-        run: npm run prepare-sidecar
+        run: |
+          export TAURI_ENV_TARGET_TRIPLE="$AGENTSVIEW_TARGET_TRIPLE"
+          npm run prepare-sidecar
         working-directory: desktop
 
       - name: Patch updater config for current repository
@@ -96,20 +112,27 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           AGENTSVIEW_UPDATER_PUBKEY: ${{ secrets.AGENTSVIEW_UPDATER_PUBKEY }}
-        run: npx tauri build
+        run: npx tauri build --target "$AGENTSVIEW_TARGET_TRIPLE"
         working-directory: desktop
 
       - name: Collect build artifacts
         run: |
+          bundle_dir="desktop/src-tauri/target/${AGENTSVIEW_TARGET_TRIPLE}/release/bundle"
           mkdir -p staging
-          cp desktop/src-tauri/target/release/bundle/dmg/*.dmg staging/
-          cp desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz staging/
-          cp desktop/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig staging/
+          cp "$bundle_dir"/dmg/*.dmg staging/
+
+          app_bundle="$(find "$bundle_dir"/macos -maxdepth 1 -name '*.app.tar.gz' -print -quit)"
+          app_sig="$(find "$bundle_dir"/macos -maxdepth 1 -name '*.app.tar.gz.sig' -print -quit)"
+
+          app_name="$(basename "$app_bundle")"
+          app_sig_name="$(basename "$app_sig")"
+          cp "$app_bundle" "staging/${app_name%.app.tar.gz}_${{ matrix.arch }}.app.tar.gz"
+          cp "$app_sig" "staging/${app_sig_name%.app.tar.gz.sig}_${{ matrix.arch }}.app.tar.gz.sig"
           ls -la staging/
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
         with:
-          name: agentsview-desktop-macos
+          name: agentsview-desktop-macos-${{ matrix.arch }}
           path: staging/*
           if-no-files-found: error
 
@@ -192,8 +215,26 @@ jobs:
           if-no-files-found: error
 
   build-linux:
-    name: Desktop Build (Linux)
-    runs-on: ubuntu-22.04
+    name: Desktop Build (Linux ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    env:
+      AGENTSVIEW_TARGET_TRIPLE: ${{ matrix.target_triple }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-22.04
+            target_triple: ""
+            artifact_name: agentsview-desktop-linux
+            artifact_dir: desktop/src-tauri/target/release/bundle/appimage/
+            create_updater_artifacts: "true"
+          - arch: arm64
+            os: ubuntu-22.04-arm
+            target_triple: aarch64-unknown-linux-gnu
+            artifact_name: agentsview-desktop-linux-arm64
+            artifact_dir: desktop/src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/appimage/
+            create_updater_artifacts: "false"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -208,13 +249,17 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Install Rust target
+        if: env.AGENTSVIEW_TARGET_TRIPLE != ''
+        run: rustup target add "$AGENTSVIEW_TARGET_TRIPLE"
+
       - name: Install Linux system dependencies
         run: |
           sudo apt-get update -q
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libgtk-3-dev \
             libappindicator3-dev librsvg2-dev \
-            patchelf
+            patchelf xdg-utils
 
       - name: Install desktop dependencies
         run: npm ci
@@ -223,7 +268,9 @@ jobs:
       - name: Prepare sidecar
         env:
           AGENTSVIEW_VERSION: ${{ github.ref_name }}
-        run: npm run prepare-sidecar
+        run: |
+          export TAURI_ENV_TARGET_TRIPLE="$AGENTSVIEW_TARGET_TRIPLE"
+          npm run prepare-sidecar
         working-directory: desktop
 
       - name: Patch updater config for current repository
@@ -241,20 +288,30 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           AGENTSVIEW_UPDATER_PUBKEY: ${{ secrets.AGENTSVIEW_UPDATER_PUBKEY }}
-        run: npx tauri build --bundles appimage
+        run: |
+          build_cmd=(npx tauri build --bundles appimage)
+          if [ -n "$AGENTSVIEW_TARGET_TRIPLE" ]; then
+            build_cmd+=(--target "$AGENTSVIEW_TARGET_TRIPLE")
+          fi
+          if [ "${{ matrix.create_updater_artifacts }}" = "false" ]; then
+            build_cmd+=(--config '{"bundle":{"createUpdaterArtifacts":false}}')
+          fi
+          "${build_cmd[@]}"
         working-directory: desktop
 
       - name: Collect build artifacts
         run: |
           mkdir -p staging
-          cp desktop/src-tauri/target/release/bundle/appimage/*.AppImage staging/
-          cp desktop/src-tauri/target/release/bundle/appimage/*.AppImage.tar.gz staging/
-          cp desktop/src-tauri/target/release/bundle/appimage/*.AppImage.tar.gz.sig staging/
+          cp "${{ matrix.artifact_dir }}"/*.AppImage staging/
+          if [ "${{ matrix.create_updater_artifacts }}" = "true" ]; then
+            cp "${{ matrix.artifact_dir }}"/*.AppImage.tar.gz staging/
+            cp "${{ matrix.artifact_dir }}"/*.AppImage.tar.gz.sig staging/
+          fi
           ls -la staging/
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f  # v7.0.0
         with:
-          name: agentsview-desktop-linux
+          name: ${{ matrix.artifact_name }}
           path: staging/*
           if-no-files-found: error
 
@@ -284,18 +341,28 @@ jobs:
           DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           TAG="updater"
 
-          MACOS_SIG=""
-          MACOS_URL=""
+          MACOS_AARCH64_SIG=""
+          MACOS_AARCH64_URL=""
+          MACOS_X86_64_SIG=""
+          MACOS_X86_64_URL=""
           WINDOWS_SIG=""
           WINDOWS_URL=""
           LINUX_SIG=""
           LINUX_URL=""
 
-          for f in artifacts/*.app.tar.gz.sig; do
+          for f in artifacts/*_aarch64.app.tar.gz.sig; do
             if [ -f "$f" ]; then
-              MACOS_SIG="$(cat "$f")"
-              MACOS_TARBALL="$(basename "${f%.sig}")"
-              MACOS_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${MACOS_TARBALL}"
+              MACOS_AARCH64_SIG="$(cat "$f")"
+              MACOS_AARCH64_TARBALL="$(basename "${f%.sig}")"
+              MACOS_AARCH64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${MACOS_AARCH64_TARBALL}"
+            fi
+          done
+
+          for f in artifacts/*_x86_64.app.tar.gz.sig; do
+            if [ -f "$f" ]; then
+              MACOS_X86_64_SIG="$(cat "$f")"
+              MACOS_X86_64_TARBALL="$(basename "${f%.sig}")"
+              MACOS_X86_64_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${MACOS_X86_64_TARBALL}"
             fi
           done
 
@@ -315,8 +382,12 @@ jobs:
             fi
           done
 
-          if [ -z "$MACOS_SIG" ] || [ -z "$MACOS_URL" ]; then
-            echo "error: missing macOS updater signature or URL" >&2
+          if [ -z "$MACOS_AARCH64_SIG" ] || [ -z "$MACOS_AARCH64_URL" ]; then
+            echo "error: missing macOS aarch64 updater signature or URL" >&2
+            exit 1
+          fi
+          if [ -z "$MACOS_X86_64_SIG" ] || [ -z "$MACOS_X86_64_URL" ]; then
+            echo "error: missing macOS x86_64 updater signature or URL" >&2
             exit 1
           fi
           if [ -z "$WINDOWS_SIG" ] || [ -z "$WINDOWS_URL" ]; then
@@ -334,8 +405,12 @@ jobs:
             "pub_date": "${DATE}",
             "platforms": {
               "darwin-aarch64": {
-                "url": "${MACOS_URL}",
-                "signature": "${MACOS_SIG}"
+                "url": "${MACOS_AARCH64_URL}",
+                "signature": "${MACOS_AARCH64_SIG}"
+              },
+              "darwin-x86_64": {
+                "url": "${MACOS_X86_64_URL}",
+                "signature": "${MACOS_X86_64_SIG}"
               },
               "windows-x86_64": {
                 "url": "${WINDOWS_URL}",
