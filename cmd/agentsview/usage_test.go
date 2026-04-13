@@ -8,6 +8,32 @@ import (
 	"github.com/wesm/agentsview/internal/db"
 )
 
+func TestFmtCost(t *testing.T) {
+	tests := []struct {
+		name string
+		in   float64
+		want string
+	}{
+		{"zero is $0.00", 0, "$0.00"},
+		{"under half a cent shows <$0.01", 0.001, "<$0.01"},
+		{"half a cent rounds up to $0.01", 0.005, "$0.01"},
+		{"typical cents", 0.45, "$0.45"},
+		{"dollars", 12.34, "$12.34"},
+		{"rounds to two decimals", 1.23456, "$1.23"},
+		{"large value", 1234.56, "$1234.56"},
+		// A negative input shouldn't hit the <$0.01 branch.
+		{"negative passes through", -0.42, "$-0.42"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := fmtCost(tc.in); got != tc.want {
+				t.Errorf("fmtCost(%v) = %q, want %q",
+					tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResolveDefaultSince(t *testing.T) {
 	now := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
 	const utc = "UTC"

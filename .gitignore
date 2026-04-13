@@ -21,6 +21,9 @@ internal/web/dist/
 coverage.out
 *.test
 
+# Air (live-reload dev server)
+/tmp/
+
 # OS files
 .DS_Store
 Thumbs.db

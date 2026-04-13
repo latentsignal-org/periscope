@@ -5,12 +5,6 @@
     return n.toLocaleString();
   }
 
-  function formatOptionalNum(
-    n: number | null | undefined,
-  ): string {
-    return typeof n === "number" ? formatNum(n) : "—";
-  }
-
   function pct(n: number): string {
     return `${(n * 100).toFixed(1)}%`;
   }
@@ -31,20 +25,6 @@
       label: "Messages",
       value: () =>
         formatNum(analytics.summary?.total_messages ?? 0),
-    },
-    {
-      label: "Output Tokens",
-      value: () =>
-        formatOptionalNum(
-          analytics.summary?.total_output_tokens,
-        ),
-    },
-    {
-      label: "Reporting Sessions",
-      value: () =>
-        formatOptionalNum(
-          analytics.summary?.token_reporting_sessions,
-        ),
     },
     {
       label: "Projects",

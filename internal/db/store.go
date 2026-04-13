@@ -55,6 +55,11 @@ type Store interface {
 	GetAnalyticsVelocity(ctx context.Context, f AnalyticsFilter) (VelocityResponse, error)
 	GetAnalyticsTopSessions(ctx context.Context, f AnalyticsFilter, metric string) (TopSessionsResponse, error)
 
+	// Usage (token cost).
+	GetDailyUsage(ctx context.Context, f UsageFilter) (DailyUsageResult, error)
+	GetTopSessionsByCost(ctx context.Context, f UsageFilter, limit int) ([]TopSessionEntry, error)
+	GetUsageSessionCounts(ctx context.Context, f UsageFilter) (UsageSessionCounts, error)
+
 	// Stars (local-only; PG returns ErrReadOnly).
 	StarSession(sessionID string) (bool, error)
 	UnstarSession(sessionID string) error

@@ -1,0 +1,15 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+cmd = "./scripts/dev-backend-build.sh"
+bin = "./tmp/agentsview"
+delay = 500
+exclude_dir = ["frontend", "internal/web/dist", "tmp", "vendor", ".git", "dist", "desktop", "data", "sessions", "html", ".superpowers"]
+include_ext = ["go", "tpl", "tmpl", "html", "sql"]
+stop_on_error = true
+send_interrupt = true
+kill_delay = "500ms"
+
+[screen]
+clear_on_rebuild = true

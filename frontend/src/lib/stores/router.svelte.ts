@@ -1,5 +1,6 @@
 export type Route =
   | "sessions"
+  | "usage"
   | "insights"
   | "pinned"
   | "trash"
@@ -7,6 +8,7 @@ export type Route =
 
 const VALID_ROUTES: ReadonlySet<string> = new Set<Route>([
   "sessions",
+  "usage",
   "insights",
   "pinned",
   "trash",

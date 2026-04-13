@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -61,6 +62,26 @@ func main() {
 		log.Fatalf("opening db: %v", err)
 	}
 	defer database.Close()
+
+	// Seed model pricing for usage page e2e tests.
+	if err := database.UpsertModelPricing([]db.ModelPricing{
+		{
+			ModelPattern:         "claude-sonnet-4-20250514",
+			InputPerMTok:         3.0,
+			OutputPerMTok:        15.0,
+			CacheCreationPerMTok: 3.75,
+			CacheReadPerMTok:     0.30,
+		},
+		{
+			ModelPattern:         "claude-opus-4-20250514",
+			InputPerMTok:         15.0,
+			OutputPerMTok:        75.0,
+			CacheCreationPerMTok: 18.75,
+			CacheReadPerMTok:     1.50,
+		},
+	}); err != nil {
+		log.Fatalf("seeding model pricing: %v", err)
+	}
 
 	// Use a recent base date so fixture data stays within the
 	// default 1-year analytics window.
@@ -123,12 +144,19 @@ func createSessionFixture(
 		return nil
 	}
 
+	model := "claude-sonnet-4-20250514"
+	if index%3 == 1 {
+		model = "claude-opus-4-20250514"
+	}
+
 	var msgs []db.Message
 	if spec.suffix == "mixed-content-7" {
-		msgs = generateMixedContentMessages(sessionID, startedAt)
+		msgs = generateMixedContentMessages(
+			sessionID, startedAt, model,
+		)
 	} else {
 		msgs = generateMessages(
-			sessionID, spec.msgCount, startedAt,
+			sessionID, spec.msgCount, startedAt, model,
 		)
 	}
 	if err := database.InsertMessages(msgs); err != nil {
@@ -138,7 +166,8 @@ func createSessionFixture(
 }
 
 func generateMessages(
-	sessionID string, count int, start time.Time,
+	sessionID string, count int,
+	start time.Time, model string,
 ) []db.Message {
 	msgs := make([]db.Message, 0, count)
 	for i := range count {
@@ -150,7 +179,7 @@ func generateMessages(
 		ts := start.Add(time.Duration(i) * time.Minute)
 		content := generateContent(role, i, count)
 
-		msgs = append(msgs, db.Message{
+		msg := db.Message{
 			SessionID:     sessionID,
 			Ordinal:       i,
 			Role:          role,
@@ -159,13 +188,33 @@ func generateMessages(
 			HasThinking:   role == "assistant" && i%5 == 0,
 			HasToolUse:    role == "assistant" && i%3 == 0,
 			ContentLength: len(content),
-		})
+		}
+
+		if role == "assistant" && model != "" {
+			msg.Model = model
+			inputTok := 500 + (i*137)%2000
+			outputTok := 200 + (i*89)%800
+			cacheCr := 50 + (i*31)%200
+			cacheRd := 1000 + (i*53)%4000
+			msg.TokenUsage = json.RawMessage(
+				fmt.Sprintf(
+					`{"input_tokens":%d,`+
+						`"output_tokens":%d,`+
+						`"cache_creation_input_tokens":%d,`+
+						`"cache_read_input_tokens":%d}`,
+					inputTok, outputTok,
+					cacheCr, cacheRd,
+				),
+			)
+		}
+
+		msgs = append(msgs, msg)
 	}
 	return msgs
 }
 
 func generateMixedContentMessages(
-	sessionID string, start time.Time,
+	sessionID string, start time.Time, model string,
 ) []db.Message {
 	type spec struct {
 		role        string
@@ -215,7 +264,7 @@ func generateMixedContentMessages(
 	msgs := make([]db.Message, 0, len(specs))
 	for i, s := range specs {
 		ts := start.Add(time.Duration(i) * time.Minute)
-		msgs = append(msgs, db.Message{
+		msg := db.Message{
 			SessionID:     sessionID,
 			Ordinal:       i,
 			Role:          s.role,
@@ -224,7 +273,25 @@ func generateMixedContentMessages(
 			HasThinking:   s.hasThinking,
 			HasToolUse:    s.hasToolUse,
 			ContentLength: len(s.content),
-		})
+		}
+		if s.role == "assistant" && model != "" {
+			msg.Model = model
+			inputTok := 400 + (i*113)%1500
+			outputTok := 150 + (i*67)%600
+			cacheCr := 30 + (i*23)%150
+			cacheRd := 800 + (i*41)%3000
+			msg.TokenUsage = json.RawMessage(
+				fmt.Sprintf(
+					`{"input_tokens":%d,`+
+						`"output_tokens":%d,`+
+						`"cache_creation_input_tokens":%d,`+
+						`"cache_read_input_tokens":%d}`,
+					inputTok, outputTok,
+					cacheCr, cacheRd,
+				),
+			)
+		}
+		msgs = append(msgs, msg)
 	}
 	return msgs
 }

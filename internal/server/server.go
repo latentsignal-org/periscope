@@ -198,6 +198,11 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /api/v1/analytics/tools", s.withTimeout(s.handleAnalyticsTools))
 	s.mux.Handle("GET /api/v1/analytics/top-sessions", s.withTimeout(s.handleAnalyticsTopSessions))
 
+	s.mux.Handle("GET /api/v1/usage/summary",
+		s.withTimeout(s.handleUsageSummary))
+	s.mux.Handle("GET /api/v1/usage/top-sessions",
+		s.withTimeout(s.handleUsageTopSessions))
+
 	s.mux.Handle("GET /api/v1/insights", s.withTimeout(s.handleListInsights))
 	s.mux.Handle("GET /api/v1/insights/{id}", s.withTimeout(s.handleGetInsight))
 	s.mux.Handle("DELETE /api/v1/insights/{id}", s.withTimeout(s.handleDeleteInsight))

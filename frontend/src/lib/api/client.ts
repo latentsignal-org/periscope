@@ -32,6 +32,10 @@ import type {
   GenerateInsightRequest,
   PinsResponse,
   TrashResponse,
+  UsageSummaryResponse,
+  TopUsageSessionsResponse,
+  UsageParams,
+  UsageTopSessionsParams,
 } from "./types.js";
 import type { SessionActivityResponse } from "./types/session-activity.js";
 
@@ -1080,4 +1084,18 @@ export async function unpinMessage(
     const body = await res.text();
     throw new ApiError(res.status, apiErrorMessage(res.status, body));
   }
+}
+
+/* Usage */
+
+export function getUsageSummary(
+  params: UsageParams,
+): Promise<UsageSummaryResponse> {
+  return fetchJSON(`/usage/summary${buildQuery({ ...params })}`);
+}
+
+export function getUsageTopSessions(
+  params: UsageTopSessionsParams,
+): Promise<TopUsageSessionsResponse> {
+  return fetchJSON(`/usage/top-sessions${buildQuery({ ...params })}`);
 }

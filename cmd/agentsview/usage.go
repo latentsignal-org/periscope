@@ -176,10 +176,11 @@ func runUsageStatusline(args []string) {
 	}
 
 	if *agent != "" {
-		fmt.Printf("$%.2f today (%s)\n",
-			result.Totals.TotalCost, *agent)
+		fmt.Printf("%s today (%s)\n",
+			fmtCost(result.Totals.TotalCost), *agent)
 	} else {
-		fmt.Printf("$%.2f today\n", result.Totals.TotalCost)
+		fmt.Printf("%s today\n",
+			fmtCost(result.Totals.TotalCost))
 	}
 }
 
@@ -307,26 +308,26 @@ func printDailyTable(
 
 	for _, day := range result.Daily {
 		models := joinModels(day.ModelsUsed)
-		fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%d\t$%.4f\t%s\n",
+		fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%d\t%s\t%s\n",
 			day.Date,
 			day.InputTokens,
 			day.OutputTokens,
 			day.CacheCreationTokens,
 			day.CacheReadTokens,
-			day.TotalCost,
+			fmtCost(day.TotalCost),
 			models,
 		)
 
 		if breakdown {
 			for _, mb := range day.ModelBreakdowns {
 				fmt.Fprintf(w,
-					"  %s\t%d\t%d\t%d\t%d\t$%.4f\t\n",
+					"  %s\t%d\t%d\t%d\t%d\t%s\t\n",
 					mb.ModelName,
 					mb.InputTokens,
 					mb.OutputTokens,
 					mb.CacheCreationTokens,
 					mb.CacheReadTokens,
-					mb.Cost,
+					fmtCost(mb.Cost),
 				)
 			}
 		}
@@ -334,12 +335,12 @@ func printDailyTable(
 
 	fmt.Fprintln(w,
 		"----\t-----\t------\t--------\t--------\t----\t------")
-	fmt.Fprintf(w, "TOTAL\t%d\t%d\t%d\t%d\t$%.4f\t\n",
+	fmt.Fprintf(w, "TOTAL\t%d\t%d\t%d\t%d\t%s\t\n",
 		result.Totals.InputTokens,
 		result.Totals.OutputTokens,
 		result.Totals.CacheCreationTokens,
 		result.Totals.CacheReadTokens,
-		result.Totals.TotalCost,
+		fmtCost(result.Totals.TotalCost),
 	)
 
 	w.Flush()
@@ -348,6 +349,17 @@ func printDailyTable(
 // localTimezone returns the IANA name of the system's local timezone.
 func localTimezone() string {
 	return time.Now().Location().String()
+}
+
+// fmtCost formats a dollar amount with two decimal places,
+// matching conventional currency display. Non-zero values
+// under half a cent would otherwise round to "$0.00" and
+// read as "free", so they render as "<$0.01" instead.
+func fmtCost(v float64) string {
+	if v > 0 && v < 0.005 {
+		return "<$0.01"
+	}
+	return fmt.Sprintf("$%.2f", v)
 }
 
 func joinModels(models []string) string {

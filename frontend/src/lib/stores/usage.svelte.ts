@@ -1,0 +1,289 @@
+import type {
+  UsageSummaryResponse,
+  TopUsageSessionsResponse,
+  UsageParams,
+} from "../api/types/usage.js";
+import {
+  getUsageSummary,
+  getUsageTopSessions,
+} from "../api/client.js";
+
+export type GroupBy = "project" | "model" | "agent";
+export type TimeSeriesView = "stacked-area" | "bars" | "lines";
+export type AttributionView = "treemap" | "list" | "bars";
+
+interface Toggles {
+  timeSeries: { groupBy: GroupBy; view: TimeSeriesView };
+  attribution: { groupBy: GroupBy; view: AttributionView };
+}
+
+const TOGGLES_KEY = "usage-toggles";
+
+function defaultToggles(): Toggles {
+  return {
+    timeSeries: { groupBy: "project", view: "stacked-area" },
+    attribution: { groupBy: "project", view: "treemap" },
+  };
+}
+
+function loadToggles(): Toggles {
+  try {
+    const raw = localStorage.getItem(TOGGLES_KEY);
+    if (raw) return JSON.parse(raw) as Toggles;
+  } catch {
+    // Corrupted localStorage — fall back to defaults.
+  }
+  return defaultToggles();
+}
+
+function saveToggles(t: Toggles): void {
+  try {
+    localStorage.setItem(TOGGLES_KEY, JSON.stringify(t));
+  } catch {
+    // localStorage full or unavailable — silently skip.
+  }
+}
+
+function localDateStr(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function daysAgo(n: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return localDateStr(d);
+}
+
+function today(): string {
+  return localDateStr(new Date());
+}
+
+type Endpoint = "summary" | "topSessions";
+
+class UsageStore {
+  from: string = $state(daysAgo(30));
+  to: string = $state(today());
+
+  // Excluded items (comma-separated strings). Default is
+  // empty = nothing excluded = show all. The UI shows all items
+  // as checked; clicking one unchecks it (excludes it).
+  // Sent directly to the backend as exclude_project / exclude_agent
+  // / exclude_model query params (NOT IN filtering).
+  excludedProjects: string = $state("");
+  excludedAgents: string = $state("");
+  excludedModels: string = $state("");
+
+  summary = $state<UsageSummaryResponse | null>(null);
+  topSessions = $state<TopUsageSessionsResponse | null>(null);
+
+  loading = $state({ summary: false, topSessions: false });
+  errors = $state<Record<Endpoint, string | null>>({
+    summary: null,
+    topSessions: null,
+  });
+
+  toggles: Toggles = $state(loadToggles());
+
+  private versions: Record<Endpoint, number> = {
+    summary: 0,
+    topSessions: 0,
+  };
+
+  private get timezone(): string {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  }
+
+  private baseParams(): UsageParams {
+    const p: UsageParams = {
+      from: this.from,
+      to: this.to,
+      timezone: this.timezone,
+    };
+    if (this.excludedProjects) {
+      p.exclude_project = this.excludedProjects;
+    }
+    if (this.excludedAgents) {
+      p.exclude_agent = this.excludedAgents;
+    }
+    if (this.excludedModels) {
+      p.exclude_model = this.excludedModels;
+    }
+    return p;
+  }
+
+  setDateRange(from: string, to: string) {
+    this.from = from;
+    this.to = to;
+    this.fetchAll();
+  }
+
+  // Toggle an item's exclusion. Clicking an included item
+  // excludes it; clicking an excluded item re-includes it.
+  toggleProject(name: string): void {
+    this.excludedProjects = this.toggleCsv(
+      this.excludedProjects, name,
+    );
+    this.fetchAll();
+  }
+
+  toggleAgent(name: string): void {
+    this.excludedAgents = this.toggleCsv(
+      this.excludedAgents, name,
+    );
+    this.fetchAll();
+  }
+
+  toggleModel(name: string): void {
+    this.excludedModels = this.toggleCsv(
+      this.excludedModels, name,
+    );
+    this.fetchAll();
+  }
+
+  private toggleCsv(csv: string, name: string): string {
+    const current = csv ? csv.split(",") : [];
+    const idx = current.indexOf(name);
+    if (idx >= 0) {
+      current.splice(idx, 1);
+    } else {
+      current.push(name);
+    }
+    return current.join(",");
+  }
+
+  // An item is "excluded" if it appears in the excluded CSV.
+  // The UI shows a check for items NOT excluded (i.e., visible).
+  isProjectExcluded(name: string): boolean {
+    if (!this.excludedProjects) return false;
+    return this.excludedProjects.split(",").includes(name);
+  }
+
+  isAgentExcluded(name: string): boolean {
+    if (!this.excludedAgents) return false;
+    return this.excludedAgents.split(",").includes(name);
+  }
+
+  isModelExcluded(name: string): boolean {
+    if (!this.excludedModels) return false;
+    return this.excludedModels.split(",").includes(name);
+  }
+
+  selectAllProjects(): void {
+    this.excludedProjects = "";
+    this.fetchAll();
+  }
+
+  deselectAllProjects(all: string[]): void {
+    this.excludedProjects = all.join(",");
+    this.fetchAll();
+  }
+
+  selectAllAgents(): void {
+    this.excludedAgents = "";
+    this.fetchAll();
+  }
+
+  deselectAllAgents(all: string[]): void {
+    this.excludedAgents = all.join(",");
+    this.fetchAll();
+  }
+
+  selectAllModels(): void {
+    this.excludedModels = "";
+    this.fetchAll();
+  }
+
+  deselectAllModels(all: string[]): void {
+    this.excludedModels = all.join(",");
+    this.fetchAll();
+  }
+
+  clearFilters(): void {
+    this.excludedProjects = "";
+    this.excludedAgents = "";
+    this.excludedModels = "";
+    this.fetchAll();
+  }
+
+  get hasActiveFilters(): boolean {
+    return (
+      this.excludedProjects !== "" ||
+      this.excludedAgents !== "" ||
+      this.excludedModels !== ""
+    );
+  }
+
+  setTimeSeriesGroupBy(g: GroupBy) {
+    this.toggles.timeSeries.groupBy = g;
+    saveToggles(this.toggles);
+  }
+
+  setTimeSeriesView(v: TimeSeriesView) {
+    this.toggles.timeSeries.view = v;
+    saveToggles(this.toggles);
+  }
+
+  setAttributionGroupBy(g: GroupBy) {
+    this.toggles.attribution.groupBy = g;
+    saveToggles(this.toggles);
+  }
+
+  setAttributionView(v: AttributionView) {
+    this.toggles.attribution.view = v;
+    saveToggles(this.toggles);
+  }
+
+  async fetchAll() {
+    await Promise.all([
+      this.fetchSummary(),
+      this.fetchTopSessions(),
+    ]);
+  }
+
+  async fetchSummary() {
+    const v = ++this.versions.summary;
+    this.loading.summary = true;
+    this.errors.summary = null;
+    try {
+      const data = await getUsageSummary(this.baseParams());
+      if (this.versions.summary === v) {
+        this.summary = data;
+      }
+    } catch (e) {
+      if (this.versions.summary === v) {
+        this.errors.summary =
+          e instanceof Error ? e.message : "Failed to load";
+      }
+    } finally {
+      if (this.versions.summary === v) {
+        this.loading.summary = false;
+      }
+    }
+  }
+
+  async fetchTopSessions() {
+    const v = ++this.versions.topSessions;
+    this.loading.topSessions = true;
+    this.errors.topSessions = null;
+    try {
+      const data = await getUsageTopSessions(this.baseParams());
+      if (this.versions.topSessions === v) {
+        this.topSessions = data;
+      }
+    } catch (e) {
+      if (this.versions.topSessions === v) {
+        this.errors.topSessions =
+          e instanceof Error ? e.message : "Failed to load";
+      }
+    } finally {
+      if (this.versions.topSessions === v) {
+        this.loading.topSessions = false;
+      }
+    }
+  }
+}
+
+export const usage = new UsageStore();
