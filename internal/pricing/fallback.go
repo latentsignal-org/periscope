@@ -1,8 +1,12 @@
 package pricing
 
+// FallbackVersion must be bumped whenever FallbackPricing
+// rates change so the startup seeder knows to re-upsert.
+const FallbackVersion = "2026-04-13"
+
 // FallbackPricing returns hardcoded pricing for key Claude
 // models. Used when the LiteLLM fetch fails.
-// Prices in USD per million tokens, current as of 2025-05.
+// Prices in USD per million tokens, current as of 2026-04.
 func FallbackPricing() []ModelPricing {
 	return []ModelPricing{
 		// Current model names (used by Claude Code / Codex)
@@ -15,10 +19,10 @@ func FallbackPricing() []ModelPricing {
 		},
 		{
 			ModelPattern:         "claude-opus-4-6",
-			InputPerMTok:         15.0,
-			OutputPerMTok:        75.0,
-			CacheCreationPerMTok: 18.75,
-			CacheReadPerMTok:     1.50,
+			InputPerMTok:         5.0,
+			OutputPerMTok:        25.0,
+			CacheCreationPerMTok: 6.25,
+			CacheReadPerMTok:     0.50,
 		},
 		{
 			ModelPattern:         "claude-haiku-4-5-20251001",
@@ -47,6 +51,11 @@ func FallbackPricing() []ModelPricing {
 			ModelPattern:  "gpt-5.4-mini",
 			InputPerMTok:  0.75,
 			OutputPerMTok: 4.50,
+		},
+		{
+			ModelPattern:  "gpt-5.4-nano",
+			InputPerMTok:  0.20,
+			OutputPerMTok: 1.25,
 		},
 		{
 			ModelPattern:  "gpt-5.1-codex-max",

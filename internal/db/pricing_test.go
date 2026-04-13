@@ -116,6 +116,44 @@ func TestUpsertModelPricingOverwrites(t *testing.T) {
 	}
 }
 
+func TestPricingMeta(t *testing.T) {
+	d := testDB(t)
+
+	// Initially empty.
+	got, err := d.GetPricingMeta("_fallback_version")
+	requireNoError(t, err, "GetPricingMeta empty")
+	if got != "" {
+		t.Fatalf("expected empty, got %q", got)
+	}
+
+	// Set and read back.
+	requireNoError(t,
+		d.SetPricingMeta("_fallback_version", "v1"),
+		"SetPricingMeta v1")
+	got, err = d.GetPricingMeta("_fallback_version")
+	requireNoError(t, err, "GetPricingMeta v1")
+	if got != "v1" {
+		t.Fatalf("expected %q, got %q", "v1", got)
+	}
+
+	// Update overwrites.
+	requireNoError(t,
+		d.SetPricingMeta("_fallback_version", "v2"),
+		"SetPricingMeta v2")
+	got, err = d.GetPricingMeta("_fallback_version")
+	requireNoError(t, err, "GetPricingMeta v2")
+	if got != "v2" {
+		t.Fatalf("expected %q, got %q", "v2", got)
+	}
+
+	// Sentinel row does not interfere with model lookups.
+	p, err := d.GetModelPricing("_fallback_version")
+	requireNoError(t, err, "GetModelPricing sentinel")
+	if p != nil && p.InputPerMTok != 0 {
+		t.Errorf("sentinel should have zero pricing, got %+v", p)
+	}
+}
+
 func TestGetModelPricingNotFound(t *testing.T) {
 	d := testDB(t)
 

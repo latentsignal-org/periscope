@@ -199,7 +199,8 @@ func (db *DB) loadPricingMap(
 		`SELECT model_pattern,
 			input_per_mtok, output_per_mtok,
 			cache_creation_per_mtok, cache_read_per_mtok
-		 FROM model_pricing`)
+		 FROM model_pricing
+		 WHERE model_pattern NOT LIKE '\_%' ESCAPE '\'`)
 	if err != nil {
 		return nil, err
 	}

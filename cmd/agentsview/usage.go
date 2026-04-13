@@ -261,32 +261,31 @@ func ensureFreshData(
 	engine.SyncAllSince(ctx, since, func(sync.Progress) {})
 }
 
-// seedPricingIfEmpty populates the model_pricing table on first
-// run when the server starts. Without this, a fresh install
-// that only ever opens the web dashboard sees $0 across the
-// board because no CLI command has fetched LiteLLM rates yet.
-// It is safe to call repeatedly: it only seeds when the table
-// is empty so curated rates from a prior `agentsview usage`
-// run are never overwritten.
+// seedPricing ensures fallback rates are present in
+// model_pricing, then kicks off a background LiteLLM refresh.
 //
-// The seed runs in two stages:
-//
-//  1. Synchronous upsert of the hardcoded fallback rates so the
-//     dashboard and any startup-waiting CLI probes observe a
-//     populated table as soon as the server accepts requests.
-//  2. Background LiteLLM refresh so the full multi-provider
-//     catalog lands shortly after startup without holding the
-//     listen socket behind a 30-second HTTP timeout.
-func seedPricingIfEmpty(database *db.DB) {
-	n, err := database.CountModelPricing()
+// Fallback rates are only upserted when the stored seed
+// version differs from pricing.FallbackVersion (or is
+// absent). This avoids overwriting live LiteLLM rates on
+// every restart while still propagating corrected fallback
+// rates when the binary is upgraded.
+func seedPricing(database *db.DB) {
+	const metaKey = "_fallback_version"
+	stored, err := database.GetPricingMeta(metaKey)
 	if err != nil {
 		log.Printf("pricing seed: %v", err)
-		return
 	}
-	if n > 0 {
-		return
+	if stored != pricing.FallbackVersion {
+		if err := upsertPricing(
+			database, pricing.FallbackPricing(),
+		); err != nil {
+			log.Printf("pricing seed: %v", err)
+		} else if err := database.SetPricingMeta(
+			metaKey, pricing.FallbackVersion,
+		); err != nil {
+			log.Printf("pricing seed: %v", err)
+		}
 	}
-	upsertPricing(database, pricing.FallbackPricing())
 	go refreshPricingFromLiteLLM(database)
 }
 
@@ -302,7 +301,9 @@ func refreshPricingFromLiteLLM(database *db.DB) {
 		)
 		return
 	}
-	upsertPricing(database, prices)
+	if err := upsertPricing(database, prices); err != nil {
+		log.Printf("pricing refresh: upsert failed: %v", err)
+	}
 }
 
 func ensurePricing(database *db.DB, offline bool) {
@@ -321,16 +322,19 @@ func ensurePricing(database *db.DB, offline bool) {
 		}
 	}
 
-	upsertPricing(database, prices)
+	if err := upsertPricing(database, prices); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"warning: pricing upsert failed: %v\n", err)
+	}
 }
 
 // upsertPricing copies pricing rows into the db.ModelPricing
 // shape and upserts them. Shared by ensurePricing (CLI),
-// seedPricingIfEmpty (sync fallback), and
+// seedPricing (startup fallback), and
 // refreshPricingFromLiteLLM (async refresh).
 func upsertPricing(
 	database *db.DB, prices []pricing.ModelPricing,
-) {
+) error {
 	dbPrices := make([]db.ModelPricing, len(prices))
 	for i, p := range prices {
 		dbPrices[i] = db.ModelPricing{
@@ -341,9 +345,7 @@ func upsertPricing(
 			CacheReadPerMTok:     p.CacheReadPerMTok,
 		}
 	}
-	if err := database.UpsertModelPricing(dbPrices); err != nil {
-		log.Printf("pricing upsert: %v", err)
-	}
+	return database.UpsertModelPricing(dbPrices)
 }
 
 func printDailyTable(

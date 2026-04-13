@@ -15,13 +15,13 @@ func TestFallbackPricing_Opus46Rates(t *testing.T) {
 		t.Fatal("claude-opus-4-6 entry missing from FallbackPricing")
 	}
 
-	// Source: https://www.anthropic.com/pricing — Opus tier.
+	// Source: https://claude.com/pricing — Opus 4.5/4.6 tier.
 	want := ModelPricing{
 		ModelPattern:         "claude-opus-4-6",
-		InputPerMTok:         15.0,
-		OutputPerMTok:        75.0,
-		CacheCreationPerMTok: 18.75,
-		CacheReadPerMTok:     1.50,
+		InputPerMTok:         5.0,
+		OutputPerMTok:        25.0,
+		CacheCreationPerMTok: 6.25,
+		CacheReadPerMTok:     0.50,
 	}
 	if *got != want {
 		t.Errorf("claude-opus-4-6 pricing = %+v, want %+v", *got, want)
