@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/wesm/agentsview/internal/config"
 )
 
 func TestMustLoadConfig(t *testing.T) {
@@ -78,6 +80,66 @@ func TestMustLoadConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPrepareServeRuntimeConfigPortZeroUsesAssignedPort(t *testing.T) {
+	cfg := config.Config{
+		Host: "127.0.0.1",
+		Port: 0,
+	}
+
+	var err error
+	out := captureStdout(t, func() {
+		cfg, err = prepareServeRuntimeConfig(
+			cfg,
+			serveRuntimeOptions{
+				Mode:          "serve",
+				RequestedPort: 0,
+			},
+		)
+	})
+	if err != nil {
+		t.Fatalf("prepareServeRuntimeConfig: %v", err)
+	}
+	if cfg.Port == 0 {
+		t.Fatal("Port remained literal 0")
+	}
+	if strings.Contains(out, "Port 0 in use") {
+		t.Fatalf("unexpected literal port 0 fallback message: %q", out)
+	}
+	if !strings.Contains(out, "Using available port") {
+		t.Fatalf("missing ephemeral port message: %q", out)
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	t.Cleanup(func() {
+		os.Stdout = orig
+	})
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stdout pipe writer: %v", err)
+	}
+	os.Stdout = orig
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout pipe: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close stdout pipe reader: %v", err)
+	}
+	return string(data)
 }
 
 func TestSetupLogFile(t *testing.T) {

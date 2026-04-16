@@ -789,6 +789,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // FindAvailablePort finds an available port starting from the
 // given port, binding to the specified host.
 func FindAvailablePort(host string, start int) int {
+	if start == 0 {
+		addr := net.JoinHostPort(host, "0")
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			defer ln.Close()
+			if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok {
+				return tcpAddr.Port
+			}
+		}
+		return start
+	}
+
 	for port := start; port < start+100; port++ {
 		addr := net.JoinHostPort(host, strconv.Itoa(port))
 		ln, err := net.Listen("tcp", addr)

@@ -2953,3 +2953,22 @@ func TestFindAvailablePortSkipsOccupied(t *testing.T) {
 	}
 	ln2.Close()
 }
+
+func TestFindAvailablePortZeroReturnsAssignedPort(t *testing.T) {
+	got := server.FindAvailablePort("127.0.0.1", 0)
+	if got == 0 {
+		t.Fatal("FindAvailablePort returned literal port 0")
+	}
+
+	// The returned ephemeral port should be bindable on the same host.
+	ln, err := net.Listen(
+		"tcp",
+		fmt.Sprintf("127.0.0.1:%d", got),
+	)
+	if err != nil {
+		t.Fatalf(
+			"returned port %d not bindable: %v", got, err,
+		)
+	}
+	ln.Close()
+}
