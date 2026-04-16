@@ -54,6 +54,7 @@ type Store interface {
 	GetAnalyticsTools(ctx context.Context, f AnalyticsFilter) (ToolsAnalyticsResponse, error)
 	GetAnalyticsVelocity(ctx context.Context, f AnalyticsFilter) (VelocityResponse, error)
 	GetAnalyticsTopSessions(ctx context.Context, f AnalyticsFilter, metric string) (TopSessionsResponse, error)
+	GetAnalyticsSignals(ctx context.Context, f AnalyticsFilter) (SignalsAnalyticsResponse, error)
 
 	// Usage (token cost).
 	GetDailyUsage(ctx context.Context, f UsageFilter) (DailyUsageResult, error)

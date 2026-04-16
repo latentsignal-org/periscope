@@ -407,6 +407,11 @@ type ParsedSession struct {
 	ParentSessionID  string
 	RelationshipType RelationshipType
 	Cwd              string
+	GitBranch        string
+	SourceSessionID  string
+	SourceVersion    string
+	MalformedLines   int
+	IsTruncated      bool
 	FirstMessage     string
 	DisplayName      string
 	StartedAt        time.Time
@@ -484,6 +489,13 @@ type ParsedMessage struct {
 	// Claude parser; empty for all other agents.
 	ClaudeMessageID string
 	ClaudeRequestID string
+
+	SourceType        string
+	SourceSubtype     string
+	SourceUUID        string
+	SourceParentUUID  string
+	IsSidechain       bool
+	IsCompactBoundary bool
 
 	// tokenPresenceKnown marks per-message token coverage as
 	// parser-owned and authoritative.

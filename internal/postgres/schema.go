@@ -44,6 +44,20 @@ CREATE TABLE IF NOT EXISTS sessions (
     has_total_output_tokens BOOLEAN NOT NULL DEFAULT FALSE,
     has_peak_context_tokens BOOLEAN NOT NULL DEFAULT FALSE,
     is_automated       BOOLEAN NOT NULL DEFAULT FALSE,
+    tool_failure_signal_count INT NOT NULL DEFAULT 0,
+    tool_retry_count          INT NOT NULL DEFAULT 0,
+    edit_churn_count          INT NOT NULL DEFAULT 0,
+    consecutive_failure_max   INT NOT NULL DEFAULT 0,
+    outcome                   TEXT NOT NULL DEFAULT 'unknown',
+    outcome_confidence        TEXT NOT NULL DEFAULT 'low',
+    ended_with_role           TEXT NOT NULL DEFAULT '',
+    final_failure_streak      INT NOT NULL DEFAULT 0,
+    signals_pending_since     TEXT,
+    compaction_count          INT NOT NULL DEFAULT 0,
+    mid_task_compaction_count INT NOT NULL DEFAULT 0,
+    context_pressure_max      DOUBLE PRECISION,
+    health_score              INT,
+    health_grade              TEXT,
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -65,6 +79,12 @@ CREATE TABLE IF NOT EXISTS messages (
     has_output_tokens  BOOLEAN NOT NULL DEFAULT FALSE,
     claude_message_id  TEXT NOT NULL DEFAULT '',
     claude_request_id  TEXT NOT NULL DEFAULT '',
+    source_type        TEXT NOT NULL DEFAULT '',
+    source_subtype     TEXT NOT NULL DEFAULT '',
+    source_uuid        TEXT NOT NULL DEFAULT '',
+    source_parent_uuid TEXT NOT NULL DEFAULT '',
+    is_sidechain       BOOLEAN NOT NULL DEFAULT FALSE,
+    is_compact_boundary BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (session_id, ordinal),
     FOREIGN KEY (session_id)
         REFERENCES sessions(id) ON DELETE CASCADE
@@ -269,6 +289,209 @@ func EnsureSchema(
 			 BOOLEAN NOT NULL DEFAULT FALSE`,
 			"adding sessions.is_automated",
 		},
+		{
+			"sessions", "tool_failure_signal_count",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS tool_failure_signal_count
+			 INT NOT NULL DEFAULT 0`,
+			"adding sessions.tool_failure_signal_count",
+		},
+		{
+			"sessions", "tool_retry_count",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS tool_retry_count
+			 INT NOT NULL DEFAULT 0`,
+			"adding sessions.tool_retry_count",
+		},
+		{
+			"sessions", "edit_churn_count",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS edit_churn_count
+			 INT NOT NULL DEFAULT 0`,
+			"adding sessions.edit_churn_count",
+		},
+		{
+			"sessions", "consecutive_failure_max",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS consecutive_failure_max
+			 INT NOT NULL DEFAULT 0`,
+			"adding sessions.consecutive_failure_max",
+		},
+		{
+			"sessions", "outcome",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS outcome
+			 TEXT NOT NULL DEFAULT 'unknown'`,
+			"adding sessions.outcome",
+		},
+		{
+			"sessions", "outcome_confidence",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS outcome_confidence
+			 TEXT NOT NULL DEFAULT 'low'`,
+			"adding sessions.outcome_confidence",
+		},
+		{
+			"sessions", "ended_with_role",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS ended_with_role
+			 TEXT NOT NULL DEFAULT ''`,
+			"adding sessions.ended_with_role",
+		},
+		{
+			"sessions", "final_failure_streak",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS final_failure_streak
+			 INT NOT NULL DEFAULT 0`,
+			"adding sessions.final_failure_streak",
+		},
+		{
+			"sessions", "signals_pending_since",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS signals_pending_since
+			 TEXT`,
+			"adding sessions.signals_pending_since",
+		},
+		{
+			"sessions", "compaction_count",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS compaction_count
+			 INT NOT NULL DEFAULT 0`,
+			"adding sessions.compaction_count",
+		},
+		{
+			"sessions", "mid_task_compaction_count",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS mid_task_compaction_count
+			 INT NOT NULL DEFAULT 0`,
+			"adding sessions.mid_task_compaction_count",
+		},
+		{
+			"sessions", "context_pressure_max",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS context_pressure_max
+			 DOUBLE PRECISION`,
+			"adding sessions.context_pressure_max",
+		},
+		{
+			"sessions", "health_score",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS health_score
+			 INT`,
+			"adding sessions.health_score",
+		},
+		{
+			"sessions", "health_grade",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS health_grade
+			 TEXT`,
+			"adding sessions.health_grade",
+		},
+		{
+			"sessions", "has_tool_calls",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS has_tool_calls
+			 BOOLEAN NOT NULL DEFAULT FALSE`,
+			"adding sessions.has_tool_calls",
+		},
+		{
+			"sessions", "has_context_data",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS has_context_data
+			 BOOLEAN NOT NULL DEFAULT FALSE`,
+			"adding sessions.has_context_data",
+		},
+		{
+			"sessions", "data_version",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS data_version
+			 INT NOT NULL DEFAULT 0`,
+			"adding sessions.data_version",
+		},
+		{
+			"sessions", "cwd",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS cwd
+			 TEXT NOT NULL DEFAULT ''`,
+			"adding sessions.cwd",
+		},
+		{
+			"sessions", "git_branch",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS git_branch
+			 TEXT NOT NULL DEFAULT ''`,
+			"adding sessions.git_branch",
+		},
+		{
+			"sessions", "source_session_id",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS source_session_id
+			 TEXT NOT NULL DEFAULT ''`,
+			"adding sessions.source_session_id",
+		},
+		{
+			"sessions", "source_version",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS source_version
+			 TEXT NOT NULL DEFAULT ''`,
+			"adding sessions.source_version",
+		},
+		{
+			"sessions", "parser_malformed_lines",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS parser_malformed_lines
+			 INT NOT NULL DEFAULT 0`,
+			"adding sessions.parser_malformed_lines",
+		},
+		{
+			"sessions", "is_truncated",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS is_truncated
+			 BOOLEAN NOT NULL DEFAULT FALSE`,
+			"adding sessions.is_truncated",
+		},
+		{
+			"messages", "source_type",
+			`ALTER TABLE messages
+			 ADD COLUMN IF NOT EXISTS source_type
+			 TEXT NOT NULL DEFAULT ''`,
+			"adding messages.source_type",
+		},
+		{
+			"messages", "source_subtype",
+			`ALTER TABLE messages
+			 ADD COLUMN IF NOT EXISTS source_subtype
+			 TEXT NOT NULL DEFAULT ''`,
+			"adding messages.source_subtype",
+		},
+		{
+			"messages", "source_uuid",
+			`ALTER TABLE messages
+			 ADD COLUMN IF NOT EXISTS source_uuid
+			 TEXT NOT NULL DEFAULT ''`,
+			"adding messages.source_uuid",
+		},
+		{
+			"messages", "source_parent_uuid",
+			`ALTER TABLE messages
+			 ADD COLUMN IF NOT EXISTS source_parent_uuid
+			 TEXT NOT NULL DEFAULT ''`,
+			"adding messages.source_parent_uuid",
+		},
+		{
+			"messages", "is_sidechain",
+			`ALTER TABLE messages
+			 ADD COLUMN IF NOT EXISTS is_sidechain
+			 BOOLEAN NOT NULL DEFAULT FALSE`,
+			"adding messages.is_sidechain",
+		},
+		{
+			"messages", "is_compact_boundary",
+			`ALTER TABLE messages
+			 ADD COLUMN IF NOT EXISTS is_compact_boundary
+			 BOOLEAN NOT NULL DEFAULT FALSE`,
+			"adding messages.is_compact_boundary",
+		},
 	}
 	tokenCoverageColumnsAdded := false
 	for _, a := range alters {
@@ -285,6 +508,9 @@ func EnsureSchema(
 	if err := backfillIsAutomatedPG(ctx, db); err != nil {
 		return err
 	}
+	if err := createPartialIndexesPG(ctx, db); err != nil {
+		return err
+	}
 	runRepair, err := shouldRunTokenCoverageRepair(
 		ctx, db, tokenCoverageColumnsAdded,
 	)
@@ -299,6 +525,27 @@ func EnsureSchema(
 	}
 	if err := markTokenCoverageRepairDone(ctx, db); err != nil {
 		return err
+	}
+	return nil
+}
+
+// createPartialIndexesPG creates partial indexes on the PG schema.
+// Idempotent via IF NOT EXISTS.
+func createPartialIndexesPG(ctx context.Context, db *sql.DB) error {
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_sessions_cwd
+		 ON sessions(cwd) WHERE cwd != ''`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_compact_boundary
+		 ON messages(session_id, ordinal) WHERE is_compact_boundary = TRUE`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_sidechain
+		 ON messages(session_id) WHERE is_sidechain = TRUE`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_source_uuid
+		 ON messages(source_uuid) WHERE source_uuid != ''`,
+	}
+	for _, ddl := range indexes {
+		if _, err := db.ExecContext(ctx, ddl); err != nil {
+			return fmt.Errorf("creating PG index: %w", err)
+		}
 	}
 	return nil
 }

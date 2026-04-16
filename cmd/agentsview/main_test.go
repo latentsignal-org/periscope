@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/wesm/agentsview/internal/config"
+	"github.com/wesm/agentsview/internal/sync"
 )
 
 func TestMustLoadConfig(t *testing.T) {
@@ -274,5 +275,53 @@ func TestTruncateLogFileSymlink(t *testing.T) {
 			"symlink target was truncated: size=%d, want 1024",
 			len(data),
 		)
+	}
+}
+
+func TestResyncCoversSignals(t *testing.T) {
+	tests := []struct {
+		name     string
+		stats    sync.SyncStats
+		fellBack bool
+		want     bool
+	}{
+		{
+			name:  "clean resync no orphans covers signals",
+			stats: sync.SyncStats{Synced: 5},
+			want:  true,
+		},
+		{
+			name: "fell back to incremental sync needs backfill",
+			stats: sync.SyncStats{
+				Synced: 2, Aborted: true,
+			},
+			fellBack: true,
+			want:     false,
+		},
+		{
+			name: "orphans copied need backfill",
+			stats: sync.SyncStats{
+				Synced: 5, OrphanedCopied: 3,
+			},
+			want: false,
+		},
+		{
+			name: "orphans copied even with fallback false",
+			stats: sync.SyncStats{
+				Synced: 0, OrphanedCopied: 1,
+			},
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resyncCoversSignals(tc.stats, tc.fellBack)
+			if got != tc.want {
+				t.Errorf(
+					"resyncCoversSignals = %v, want %v",
+					got, tc.want,
+				)
+			}
+		})
 	}
 }

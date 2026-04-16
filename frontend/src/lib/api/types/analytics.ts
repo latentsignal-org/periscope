@@ -166,3 +166,64 @@ export interface ToolsAnalyticsResponse {
   by_agent: ToolAgentBreakdown[];
   trend: ToolTrendEntry[];
 }
+
+export interface SignalsToolHealth {
+  total_failure_signals: number;
+  total_retries: number;
+  total_edit_churn: number;
+  sessions_with_failures: number;
+  /** Already a percentage 0-100; do not multiply by 100. */
+  failure_rate: number;
+}
+
+export interface SignalsContextHealth {
+  avg_compaction_count: number;
+  sessions_with_compaction: number;
+  mid_task_compaction_count: number;
+  sessions_with_mid_task_compaction: number;
+  sessions_with_context_data: number;
+  avg_context_pressure: number | null;
+  high_pressure_sessions: number;
+}
+
+export interface SignalsTrendBucket {
+  date: string;
+  session_count: number;
+  avg_health_score: number | null;
+  completed: number;
+  errored: number;
+  abandoned: number;
+  avg_failure_signals: number;
+}
+
+export interface SignalsAgentRow {
+  agent: string;
+  session_count: number;
+  avg_health_score: number | null;
+  /** Already a percentage 0-100; do not multiply by 100. */
+  completed_rate: number;
+  avg_failure_signals: number;
+}
+
+export interface SignalsProjectRow {
+  project: string;
+  session_count: number;
+  avg_health_score: number | null;
+  /** Already a percentage 0-100; do not multiply by 100. */
+  completed_rate: number;
+  avg_failure_signals: number;
+}
+
+export interface SignalsAnalyticsResponse {
+  scored_sessions: number;
+  unscored_sessions: number;
+  grade_distribution: Record<string, number>;
+  avg_health_score: number | null;
+  outcome_distribution: Record<string, number>;
+  outcome_confidence_distribution: Record<string, number>;
+  tool_health: SignalsToolHealth;
+  context_health: SignalsContextHealth;
+  trend: SignalsTrendBucket[];
+  by_agent: SignalsAgentRow[];
+  by_project: SignalsProjectRow[];
+}

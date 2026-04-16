@@ -338,6 +338,28 @@ func (s *Server) handleAnalyticsVelocity(
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (s *Server) handleAnalyticsSignals(
+	w http.ResponseWriter, r *http.Request,
+) {
+	f, ok := parseAnalyticsFilter(w, r)
+	if !ok {
+		return
+	}
+
+	result, err := s.db.GetAnalyticsSignals(r.Context(), f)
+	if err != nil {
+		if handleContextError(w, err) {
+			return
+		}
+		log.Printf("analytics signals error: %v", err)
+		writeError(w, http.StatusInternalServerError,
+			"internal server error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) handleAnalyticsTopSessions(
 	w http.ResponseWriter, r *http.Request,
 ) {

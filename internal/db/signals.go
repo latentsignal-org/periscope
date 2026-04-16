@@ -1,0 +1,234 @@
+package db
+
+import (
+	"context"
+	"fmt"
+	"log"
+)
+
+const signalsBackfillMarker = "session_signals_v1"
+
+// SessionSignalUpdate holds computed signal values to persist
+// on the sessions table.
+type SessionSignalUpdate struct {
+	ToolFailureSignalCount int
+	ToolRetryCount         int
+	EditChurnCount         int
+	ConsecutiveFailureMax  int
+	Outcome                string
+	OutcomeConfidence      string
+	EndedWithRole          string
+	FinalFailureStreak     int
+	SignalsPendingSince    *string
+	CompactionCount        int
+	MidTaskCompactionCount int
+	ContextPressureMax     *float64
+	HealthScore            *int
+	HealthGrade            *string
+	HasToolCalls           bool
+	HasContextData         bool
+}
+
+// UpdateSessionSignals persists computed signal values on the
+// sessions table. Bumps local_modified_at so the session is
+// re-selected by the next pg push -- a recomputed signal column
+// is a change to the row from PG's perspective, even when the
+// inline write path didn't touch anything else (e.g. a one-time
+// BackfillSignals run after a schema migration).
+func (db *DB) UpdateSessionSignals(
+	sessionID string, u SessionSignalUpdate,
+) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.getWriter().Exec(`
+		UPDATE sessions SET
+			tool_failure_signal_count = ?,
+			tool_retry_count = ?,
+			edit_churn_count = ?,
+			consecutive_failure_max = ?,
+			outcome = ?,
+			outcome_confidence = ?,
+			ended_with_role = ?,
+			final_failure_streak = ?,
+			signals_pending_since = ?,
+			compaction_count = ?,
+			mid_task_compaction_count = ?,
+			context_pressure_max = ?,
+			health_score = ?,
+			health_grade = ?,
+			has_tool_calls = ?,
+			has_context_data = ?,
+			local_modified_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		WHERE id = ?`,
+		u.ToolFailureSignalCount,
+		u.ToolRetryCount,
+		u.EditChurnCount,
+		u.ConsecutiveFailureMax,
+		u.Outcome,
+		u.OutcomeConfidence,
+		u.EndedWithRole,
+		u.FinalFailureStreak,
+		u.SignalsPendingSince,
+		u.CompactionCount,
+		u.MidTaskCompactionCount,
+		u.ContextPressureMax,
+		u.HealthScore,
+		u.HealthGrade,
+		u.HasToolCalls,
+		u.HasContextData,
+		sessionID,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"updating session signals for %s: %w",
+			sessionID, err,
+		)
+	}
+	return nil
+}
+
+// PendingSignalSessions returns session IDs whose
+// signals_pending_since is non-NULL and older than cutoff.
+func (db *DB) PendingSignalSessions(
+	ctx context.Context, cutoff string,
+) ([]string, error) {
+	rows, err := db.getReader().QueryContext(ctx, `
+		SELECT id FROM sessions
+		WHERE signals_pending_since IS NOT NULL
+		  AND signals_pending_since < ?`, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"querying pending signal sessions: %w", err,
+		)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf(
+				"scanning pending signal session: %w", err,
+			)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// BackfillSignals runs a one-time computation of session
+// signals for all sessions. Guarded by a stats marker so it
+// only runs once. computeFn returns nil on success or an
+// error to signal that the per-session recompute could not
+// be completed (e.g. the DB connection went away during a
+// concurrent resync swap). The completion marker is only set
+// when every session was processed successfully -- partial
+// runs leave the marker unset so the next startup retries.
+func (db *DB) BackfillSignals(
+	ctx context.Context,
+	computeFn func(ctx context.Context, sessionID string) error,
+) error {
+	db.mu.Lock()
+	var done int
+	if err := db.getWriter().QueryRow(
+		`SELECT count(*)
+		 FROM stats
+		 WHERE key = ? AND value != 0`,
+		signalsBackfillMarker,
+	).Scan(&done); err != nil {
+		db.mu.Unlock()
+		return fmt.Errorf(
+			"probing signals backfill marker: %w", err,
+		)
+	}
+	if done > 0 {
+		db.mu.Unlock()
+		return nil
+	}
+	db.mu.Unlock()
+
+	log.Println("backfill: computing session signals...")
+
+	rows, err := db.getReader().QueryContext(ctx,
+		`SELECT id FROM sessions WHERE message_count > 0`)
+	if err != nil {
+		return fmt.Errorf(
+			"querying backfill candidates: %w", err,
+		)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf(
+				"scanning backfill candidate: %w", err,
+			)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	var failed int
+	for i, id := range ids {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := computeFn(ctx, id); err != nil {
+			failed++
+			log.Printf(
+				"backfill: %s: %v", id, err,
+			)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if (i+1)%100 == 0 {
+			log.Printf(
+				"backfill: %d/%d sessions", i+1, len(ids),
+			)
+		}
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	if failed > 0 {
+		return fmt.Errorf(
+			"backfill incomplete: %d/%d sessions failed; "+
+				"marker not set, next startup will retry",
+			failed, len(ids),
+		)
+	}
+
+	log.Printf(
+		"backfill: completed %d sessions", len(ids),
+	)
+
+	return db.MarkSignalsBackfillDone()
+}
+
+// MarkSignalsBackfillDone records that legacy signal backfill is
+// no longer needed for this database. Set after a fresh resync,
+// where every session is rewritten through the inline signal
+// path, so the post-resync BackfillSignals call is a no-op.
+func (db *DB) MarkSignalsBackfillDone() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	_, err := db.getWriter().Exec(
+		`INSERT INTO stats (key, value) VALUES (?, 1)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		signalsBackfillMarker,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"storing signals backfill marker: %w", err,
+		)
+	}
+	return nil
+}

@@ -126,6 +126,9 @@ func (d *DB) CopyOrphanedDataFrom(
 		"output_tokens", "has_context_tokens",
 		"has_output_tokens",
 		"claude_message_id", "claude_request_id",
+		"source_type", "source_subtype",
+		"source_uuid", "source_parent_uuid",
+		"is_sidechain", "is_compact_boundary",
 	} {
 		if oldDBHasColumn(ctx, tx, "messages", c) {
 			msgCols.WriteString(", " + c)
@@ -419,6 +422,19 @@ func orphanSessionCols(ctx context.Context, tx *sql.Tx) string {
 	for _, c := range []string{
 		"total_output_tokens", "peak_context_tokens",
 		"has_total_output_tokens", "has_peak_context_tokens",
+		"is_automated",
+		"tool_failure_signal_count", "tool_retry_count",
+		"edit_churn_count", "consecutive_failure_max",
+		"outcome", "outcome_confidence",
+		"ended_with_role", "final_failure_streak",
+		"signals_pending_since", "compaction_count",
+		"mid_task_compaction_count",
+		"context_pressure_max", "health_score",
+		"health_grade", "has_tool_calls",
+		"has_context_data", "data_version",
+		"cwd", "git_branch", "source_session_id",
+		"source_version", "parser_malformed_lines",
+		"is_truncated",
 	} {
 		if oldDBHasColumn(ctx, tx, "sessions", c) {
 			cols = append(cols, c)

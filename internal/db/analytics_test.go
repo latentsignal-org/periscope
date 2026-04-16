@@ -689,6 +689,10 @@ func TestAnalyticsCanceledContext(t *testing.T) {
 			)
 			return err
 		}},
+		{"Signals", func() error {
+			_, err := d.GetAnalyticsSignals(ctx, f)
+			return err
+		}},
 	}
 
 	for _, tt := range tests {
@@ -2064,6 +2068,226 @@ func TestActivityExcludesSystemUserMessages(t *testing.T) {
 		t.Errorf("AssistantMessages = %d, want 1",
 			entry.AssistantMessages)
 	}
+}
+
+func TestGetAnalyticsSignals(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	t.Run("EmptyDB", func(t *testing.T) {
+		resp, err := d.GetAnalyticsSignals(ctx, baseFilter())
+		if err != nil {
+			t.Fatalf("GetAnalyticsSignals: %v", err)
+		}
+		assertEq(t, "ScoredSessions", resp.ScoredSessions, 0)
+		assertEq(t, "UnscoredSessions",
+			resp.UnscoredSessions, 0)
+		assertEq(t, "len(Trend)", len(resp.Trend), 0)
+		assertEq(t, "len(ByAgent)", len(resp.ByAgent), 0)
+		assertEq(t, "len(ByProject)", len(resp.ByProject), 0)
+	})
+
+	// Seed sessions with signal data.
+	// UpsertSession only writes core fields; signal columns
+	// are written by UpdateSessionSignals.
+	insertSession(t, d, "sig1", "alpha", func(s *Session) {
+		s.StartedAt = Ptr("2024-06-01T09:00:00Z")
+		s.MessageCount = 10
+		s.Agent = "claude"
+	})
+	cp1 := 0.6
+	updateSignals(t, d, "sig1", SessionSignalUpdate{
+		HealthScore:            Ptr(85),
+		HealthGrade:            Ptr("B"),
+		Outcome:                "completed",
+		OutcomeConfidence:      "high",
+		ToolFailureSignalCount: 2,
+		ToolRetryCount:         1,
+		CompactionCount:        1,
+		ContextPressureMax:     &cp1,
+	})
+	insertSession(t, d, "sig2", "alpha", func(s *Session) {
+		s.StartedAt = Ptr("2024-06-01T14:00:00Z")
+		s.MessageCount = 5
+		s.Agent = "codex"
+	})
+	cp2 := 0.9
+	updateSignals(t, d, "sig2", SessionSignalUpdate{
+		HealthScore:            Ptr(45),
+		HealthGrade:            Ptr("D"),
+		Outcome:                "errored",
+		OutcomeConfidence:      "medium",
+		ToolFailureSignalCount: 5,
+		ToolRetryCount:         3,
+		EditChurnCount:         2,
+		ContextPressureMax:     &cp2,
+	})
+	insertSession(t, d, "sig3", "beta", func(s *Session) {
+		s.StartedAt = Ptr("2024-06-02T10:00:00Z")
+		s.MessageCount = 8
+		s.Agent = "claude"
+	})
+	updateSignals(t, d, "sig3", SessionSignalUpdate{
+		Outcome:           "abandoned",
+		OutcomeConfidence: "low",
+		CompactionCount:   3,
+		// No health score (unscored)
+	})
+
+	t.Run("ScoredVsUnscored", func(t *testing.T) {
+		resp, err := d.GetAnalyticsSignals(ctx, baseFilter())
+		if err != nil {
+			t.Fatalf("GetAnalyticsSignals: %v", err)
+		}
+		assertEq(t, "ScoredSessions", resp.ScoredSessions, 2)
+		assertEq(t, "UnscoredSessions",
+			resp.UnscoredSessions, 1)
+	})
+
+	t.Run("GradeDistribution", func(t *testing.T) {
+		resp, err := d.GetAnalyticsSignals(ctx, baseFilter())
+		if err != nil {
+			t.Fatalf("GetAnalyticsSignals: %v", err)
+		}
+		assertEq(t, "grade B", resp.GradeDistribution["B"], 1)
+		assertEq(t, "grade D", resp.GradeDistribution["D"], 1)
+	})
+
+	t.Run("AvgHealthScore", func(t *testing.T) {
+		resp, err := d.GetAnalyticsSignals(ctx, baseFilter())
+		if err != nil {
+			t.Fatalf("GetAnalyticsSignals: %v", err)
+		}
+		if resp.AvgHealthScore == nil {
+			t.Fatal("AvgHealthScore is nil")
+		}
+		// (85 + 45) / 2 = 65.0
+		assertEq(t, "AvgHealthScore",
+			*resp.AvgHealthScore, 65.0)
+	})
+
+	t.Run("OutcomeDistribution", func(t *testing.T) {
+		resp, err := d.GetAnalyticsSignals(ctx, baseFilter())
+		if err != nil {
+			t.Fatalf("GetAnalyticsSignals: %v", err)
+		}
+		assertEq(t, "completed",
+			resp.OutcomeDistribution["completed"], 1)
+		assertEq(t, "errored",
+			resp.OutcomeDistribution["errored"], 1)
+		assertEq(t, "abandoned",
+			resp.OutcomeDistribution["abandoned"], 1)
+	})
+
+	t.Run("ToolHealth", func(t *testing.T) {
+		resp, err := d.GetAnalyticsSignals(ctx, baseFilter())
+		if err != nil {
+			t.Fatalf("GetAnalyticsSignals: %v", err)
+		}
+		// 2 + 5 + 0 = 7
+		assertEq(t, "TotalFailureSignals",
+			resp.ToolHealth.TotalFailureSignals, 7)
+		// 1 + 3 + 0 = 4
+		assertEq(t, "TotalRetries",
+			resp.ToolHealth.TotalRetries, 4)
+		// 0 + 2 + 0 = 2
+		assertEq(t, "TotalEditChurn",
+			resp.ToolHealth.TotalEditChurn, 2)
+		// sig1 and sig2 have failures
+		assertEq(t, "SessionsWithFailures",
+			resp.ToolHealth.SessionsWithFailures, 2)
+	})
+
+	t.Run("ContextHealth", func(t *testing.T) {
+		resp, err := d.GetAnalyticsSignals(ctx, baseFilter())
+		if err != nil {
+			t.Fatalf("GetAnalyticsSignals: %v", err)
+		}
+		// sig1 (1) and sig3 (3) have compaction > 0
+		assertEq(t, "SessionsWithCompaction",
+			resp.ContextHealth.SessionsWithCompaction, 2)
+		// sig1 and sig2 have context_pressure_max
+		assertEq(t, "SessionsWithContextData",
+			resp.ContextHealth.SessionsWithContextData, 2)
+		// sig2 has pressure >= 0.8
+		assertEq(t, "HighPressureSessions",
+			resp.ContextHealth.HighPressureSessions, 1)
+	})
+
+	t.Run("Trend", func(t *testing.T) {
+		resp, err := d.GetAnalyticsSignals(ctx, baseFilter())
+		if err != nil {
+			t.Fatalf("GetAnalyticsSignals: %v", err)
+		}
+		// 2 dates: 2024-06-01 (2 sessions), 2024-06-02 (1)
+		assertEq(t, "len(Trend)", len(resp.Trend), 2)
+		// Sorted by date
+		assertEq(t, "Trend[0].Date",
+			resp.Trend[0].Date, "2024-06-01")
+		assertEq(t, "Trend[0].SessionCount",
+			resp.Trend[0].SessionCount, 2)
+		assertEq(t, "Trend[0].Completed",
+			resp.Trend[0].Completed, 1)
+		assertEq(t, "Trend[0].Errored",
+			resp.Trend[0].Errored, 1)
+		assertEq(t, "Trend[1].Date",
+			resp.Trend[1].Date, "2024-06-02")
+		assertEq(t, "Trend[1].Abandoned",
+			resp.Trend[1].Abandoned, 1)
+	})
+
+	t.Run("ByAgent", func(t *testing.T) {
+		resp, err := d.GetAnalyticsSignals(ctx, baseFilter())
+		if err != nil {
+			t.Fatalf("GetAnalyticsSignals: %v", err)
+		}
+		// 2 agents: claude (2 sessions), codex (1)
+		assertEq(t, "len(ByAgent)", len(resp.ByAgent), 2)
+		// Alphabetical: claude first
+		assertEq(t, "ByAgent[0].Agent",
+			resp.ByAgent[0].Agent, "claude")
+		assertEq(t, "ByAgent[0].SessionCount",
+			resp.ByAgent[0].SessionCount, 2)
+		assertEq(t, "ByAgent[1].Agent",
+			resp.ByAgent[1].Agent, "codex")
+	})
+
+	t.Run("ByProject", func(t *testing.T) {
+		resp, err := d.GetAnalyticsSignals(ctx, baseFilter())
+		if err != nil {
+			t.Fatalf("GetAnalyticsSignals: %v", err)
+		}
+		// 2 projects: alpha (2), beta (1)
+		// Sorted by session count desc
+		assertEq(t, "len(ByProject)", len(resp.ByProject), 2)
+		assertEq(t, "ByProject[0].Project",
+			resp.ByProject[0].Project, "alpha")
+		assertEq(t, "ByProject[0].SessionCount",
+			resp.ByProject[0].SessionCount, 2)
+	})
+
+	t.Run("ProjectFilter", func(t *testing.T) {
+		f := baseFilter()
+		f.Project = "beta"
+		resp, err := d.GetAnalyticsSignals(ctx, f)
+		if err != nil {
+			t.Fatalf("GetAnalyticsSignals: %v", err)
+		}
+		assertEq(t, "ScoredSessions", resp.ScoredSessions, 0)
+		assertEq(t, "UnscoredSessions",
+			resp.UnscoredSessions, 1)
+		assertEq(t, "len(ByProject)", len(resp.ByProject), 1)
+	})
+
+	t.Run("EmptyDateRange", func(t *testing.T) {
+		resp, err := d.GetAnalyticsSignals(
+			ctx, emptyFilter(),
+		)
+		if err != nil {
+			t.Fatalf("GetAnalyticsSignals: %v", err)
+		}
+		assertEq(t, "ScoredSessions", resp.ScoredSessions, 0)
+	})
 }
 
 func TestLocalTime(t *testing.T) {

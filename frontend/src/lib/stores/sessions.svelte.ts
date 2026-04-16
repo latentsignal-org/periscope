@@ -147,6 +147,19 @@ class SessionsStore {
   loading: boolean = $state(false);
   filters: Filters = $state(loadSavedFilters());
 
+  private signalDetailCache = new Map<
+    string,
+    {
+      basis: string[] | null;
+      penalties: Record<string, number> | null;
+    }
+  >();
+  private signalDetailInflight = new Map<
+    string,
+    Promise<void>
+  >();
+  signalDetailLoading = $state(false);
+
   private loadVersion: number = 0;
   private projectsLoaded: boolean = false;
   private projectsPromise: Promise<void> | null = null;
@@ -468,6 +481,61 @@ class SessionsStore {
         return;
       }
       this.childSessions = new Map();
+    }
+  }
+
+  getSignalDetail(id: string) {
+    return this.signalDetailCache.get(id) ?? null;
+  }
+
+  async fetchSignalDetail(id: string) {
+    if (this.signalDetailCache.has(id)) {
+      this.mergeDetailIntoList(id);
+      return;
+    }
+    const inflight = this.signalDetailInflight.get(id);
+    if (inflight) return inflight;
+    const promise = this.doFetchSignalDetail(id);
+    this.signalDetailInflight.set(id, promise);
+    await promise;
+  }
+
+  private async doFetchSignalDetail(id: string) {
+    this.signalDetailLoading = true;
+    try {
+      const session = await api.getSession(id);
+      this.signalDetailCache.set(id, {
+        basis: session.health_score_basis ?? null,
+        penalties: session.health_penalties ?? null,
+      });
+      this.mergeDetailIntoList(id);
+    } catch {
+      // Signal detail is non-critical
+    } finally {
+      this.signalDetailInflight.delete(id);
+      this.signalDetailLoading =
+        this.signalDetailInflight.size > 0;
+    }
+  }
+
+  private mergeDetailIntoList(id: string) {
+    const detail = this.signalDetailCache.get(id);
+    if (!detail) return;
+    const idx = this.sessions.findIndex(
+      (s) => s.id === id,
+    );
+    if (idx >= 0) {
+      const s = this.sessions[idx]!;
+      if (
+        s.health_score_basis === undefined &&
+        detail.basis != null
+      ) {
+        this.sessions[idx] = {
+          ...s,
+          health_score_basis: detail.basis,
+          health_penalties: detail.penalties,
+        };
+      }
     }
   }
 

@@ -36,6 +36,7 @@ export const ALL_BLOCK_TYPES: BlockType[] = [
 const BLOCK_FILTER_KEY = "agentsview-block-filters";
 const TRANSCRIPT_MODE_KEY = "agentsview-transcript-mode";
 const MINIMAP_KEY = "agentsview-activity-minimap";
+const SIGNAL_PANEL_KEY = "agentsview-signal-panel";
 
 function readBlockFilters(): Set<BlockType> {
   try {
@@ -173,6 +174,9 @@ class UIStore {
   activityMinimapOpen: boolean = $state(
     readStoredBool(MINIMAP_KEY, false),
   );
+  signalPanelOpen: boolean = $state(
+    readStoredBool(SIGNAL_PANEL_KEY, false),
+  );
 
   /** Set of block types currently visible. */
   visibleBlocks: Set<BlockType> = $state(readBlockFilters());
@@ -250,6 +254,17 @@ class UIStore {
           localStorage?.setItem(
             MINIMAP_KEY,
             String(this.activityMinimapOpen),
+          );
+        } catch {
+          // ignore
+        }
+      });
+
+      $effect(() => {
+        try {
+          localStorage?.setItem(
+            SIGNAL_PANEL_KEY,
+            String(this.signalPanelOpen),
           );
         } catch {
           // ignore
@@ -411,6 +426,10 @@ class UIStore {
 
   toggleActivityMinimap() {
     this.activityMinimapOpen = !this.activityMinimapOpen;
+  }
+
+  toggleSignalPanel() {
+    this.signalPanelOpen = !this.signalPanelOpen;
   }
 
   closeAll() {

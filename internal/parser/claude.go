@@ -67,8 +67,14 @@ func ParseClaudeSession(
 		hasAnyUUID      bool
 		allHaveUUID     bool
 		parentSessionID string
+		sourceSessionID string
+		sourceVersion   string
+		cwd             string
+		gitBranch       string
 		foundParentSID  bool
 		lineIndex       int
+		malformedLines  int
+		lastLine        string
 		subagentMap     = map[string]string{}
 		globalStart     time.Time
 		globalEnd       time.Time
@@ -81,11 +87,20 @@ func ParseClaudeSession(
 		if !ok {
 			break
 		}
+		lastLine = line
 		if !gjson.Valid(line) {
+			malformedLines++
 			continue
 		}
 
 		entryType := gjson.Get(line, "type").Str
+
+		// Extract source version from first line that has it.
+		if sourceVersion == "" {
+			if v := gjson.Get(line, "version").Str; v != "" {
+				sourceVersion = v
+			}
+		}
 
 		// Track global timestamps from all lines for session
 		// bounds, including non-message events.
@@ -139,10 +154,23 @@ func ParseClaudeSession(
 			continue
 		}
 
-		// Check parentSessionID from first user/assistant entry.
+		// Extract cwd and gitBranch from user entries.
+		if entryType == "user" {
+			if cwd == "" {
+				cwd = gjson.Get(line, "cwd").Str
+			}
+			if gitBranch == "" {
+				gitBranch = gjson.Get(line, "gitBranch").Str
+			}
+		}
+
+		// Capture sourceSessionID from first sessionId seen,
+		// then check whether it differs from the file-derived
+		// ID to detect parent sessions.
 		if !foundParentSID {
 			if sid := gjson.Get(line, "sessionId").Str; sid != "" {
 				foundParentSID = true
+				sourceSessionID = sid
 				if sid != sessionID {
 					parentSessionID = sid
 				}
@@ -175,6 +203,15 @@ func ParseClaudeSession(
 		return nil, fmt.Errorf("reading %s: %w", path, err)
 	}
 
+	// Detect truncation: last line is non-empty, invalid JSON,
+	// AND the file did not end with a newline. A newline-
+	// terminated invalid line is just a complete malformed
+	// record, not a truncated write.
+	isTruncated := lastLine != "" &&
+		strings.TrimSpace(lastLine) != "" &&
+		!gjson.Valid(lastLine) &&
+		!fileEndsWithNewline(f, info.Size())
+
 	// Collapse consecutive assistant entries that share the same
 	// message.id — these are streaming progress snapshots of a
 	// single response. Keep only the last entry per message.id
@@ -187,12 +224,21 @@ func ParseClaudeSession(
 		Mtime: info.ModTime().UnixNano(),
 	}
 
+	meta := claudeSessionMeta{
+		sourceSessionID: sourceSessionID,
+		sourceVersion:   sourceVersion,
+		cwd:             cwd,
+		gitBranch:       gitBranch,
+		malformedLines:  malformedLines,
+		isTruncated:     isTruncated,
+	}
+
 	// If all user/assistant entries have uuids, use DAG-aware processing.
 	if hasAnyUUID && allHaveUUID {
 		return parseDAG(
 			entries, sessionID, project, machine,
 			parentSessionID, fileInfo, subagentMap,
-			globalStart, globalEnd,
+			globalStart, globalEnd, meta,
 		)
 	}
 
@@ -200,7 +246,7 @@ func ParseClaudeSession(
 	return parseLinear(
 		entries, sessionID, project, machine,
 		parentSessionID, fileInfo, subagentMap,
-		globalStart, globalEnd,
+		globalStart, globalEnd, meta,
 	)
 }
 
@@ -326,9 +372,32 @@ func extractMessagesFrom(
 			endedAt = e.timestamp
 		}
 
+		// Detect compact summaries before the user/assistant
+		// gates: Claude can emit isCompactSummary=true with
+		// either top-level type, and the record must always
+		// be persisted as a system boundary regardless.
+		if gjson.Get(e.line, "isCompactSummary").Bool() {
+			summary := extractCompactSummary(e.line)
+			messages = append(messages, ParsedMessage{
+				Ordinal:           ordinal,
+				Role:              RoleAssistant,
+				Content:           summary,
+				Timestamp:         e.timestamp,
+				IsSystem:          true,
+				ContentLength:     len(summary),
+				SourceType:        "system",
+				SourceSubtype:     "compact_boundary",
+				SourceUUID:        e.uuid,
+				SourceParentUUID:  e.parentUuid,
+				IsSidechain:       gjson.Get(e.line, "isSidechain").Bool(),
+				IsCompactBoundary: true,
+			})
+			ordinal++
+			continue
+		}
+
 		if e.entryType == "user" {
-			if gjson.Get(e.line, "isMeta").Bool() ||
-				gjson.Get(e.line, "isCompactSummary").Bool() {
+			if gjson.Get(e.line, "isMeta").Bool() {
 				continue
 			}
 		}
@@ -368,6 +437,10 @@ func extractMessagesFrom(
 			ContentLength:      len(text),
 			ToolCalls:          tcs,
 			ToolResults:        trs,
+			SourceType:         e.entryType,
+			SourceUUID:         e.uuid,
+			SourceParentUUID:   e.parentUuid,
+			IsSidechain:        gjson.Get(e.line, "isSidechain").Bool(),
 			tokenPresenceKnown: e.entryType == "assistant",
 		}
 
@@ -382,6 +455,27 @@ func extractMessagesFrom(
 	return messages, startedAt, endedAt
 }
 
+// claudeSessionMeta holds source metadata extracted during the
+// main parse loop and applied to all resulting ParsedSessions.
+type claudeSessionMeta struct {
+	sourceSessionID string
+	sourceVersion   string
+	cwd             string
+	gitBranch       string
+	malformedLines  int
+	isTruncated     bool
+}
+
+// applyTo sets source metadata fields on a ParsedSession.
+func (m claudeSessionMeta) applyTo(sess *ParsedSession) {
+	sess.SourceSessionID = m.sourceSessionID
+	sess.SourceVersion = m.sourceVersion
+	sess.Cwd = m.cwd
+	sess.GitBranch = m.gitBranch
+	sess.MalformedLines = m.malformedLines
+	sess.IsTruncated = m.isTruncated
+}
+
 // parseLinear processes entries sequentially without DAG awareness.
 func parseLinear(
 	entries []dagEntry,
@@ -389,6 +483,7 @@ func parseLinear(
 	fileInfo FileInfo,
 	subagentMap map[string]string,
 	globalStart, globalEnd time.Time,
+	meta claudeSessionMeta,
 ) ([]ParseResult, error) {
 	messages, startedAt, endedAt := extractMessages(entries)
 	startedAt = earlierTime(globalStart, startedAt)
@@ -421,6 +516,7 @@ func parseLinear(
 		UserMessageCount: userCount,
 		File:             fileInfo,
 	}
+	meta.applyTo(&sess)
 	accumulateMessageTokenUsage(&sess, messages)
 
 	return []ParseResult{{Session: sess, Messages: messages}}, nil
@@ -435,6 +531,7 @@ func parseDAG(
 	fileInfo FileInfo,
 	subagentMap map[string]string,
 	globalStart, globalEnd time.Time,
+	meta claudeSessionMeta,
 ) ([]ParseResult, error) {
 	// Build parent -> children ordered by line position and
 	// collect the set of all uuids for connectivity checks.
@@ -459,7 +556,7 @@ func parseDAG(
 		return parseLinear(
 			entries, sessionID, project, machine,
 			parentSessionID, fileInfo, subagentMap,
-			globalStart, globalEnd,
+			globalStart, globalEnd, meta,
 		)
 	}
 	for _, e := range entries {
@@ -468,7 +565,7 @@ func parseDAG(
 				return parseLinear(
 					entries, sessionID, project, machine,
 					parentSessionID, fileInfo, subagentMap,
-					globalStart, globalEnd,
+					globalStart, globalEnd, meta,
 				)
 			}
 		}
@@ -597,6 +694,7 @@ func parseDAG(
 			UserMessageCount: userCount,
 			File:             fileInfo,
 		}
+		meta.applyTo(&sess)
 		accumulateMessageTokenUsage(&sess, messages)
 
 		results = append(results, ParseResult{
@@ -688,10 +786,33 @@ func extractMessages(entries []dagEntry) (
 			endedAt = e.timestamp
 		}
 
+		// Detect compact summaries before the user/assistant
+		// gates: Claude can emit isCompactSummary=true with
+		// either top-level type, and the record must always
+		// be persisted as a system boundary regardless.
+		if gjson.Get(e.line, "isCompactSummary").Bool() {
+			summary := extractCompactSummary(e.line)
+			messages = append(messages, ParsedMessage{
+				Ordinal:           ordinal,
+				Role:              RoleAssistant,
+				Content:           summary,
+				Timestamp:         e.timestamp,
+				IsSystem:          true,
+				ContentLength:     len(summary),
+				SourceType:        "system",
+				SourceSubtype:     "compact_boundary",
+				SourceUUID:        e.uuid,
+				SourceParentUUID:  e.parentUuid,
+				IsSidechain:       gjson.Get(e.line, "isSidechain").Bool(),
+				IsCompactBoundary: true,
+			})
+			ordinal++
+			continue
+		}
+
 		// Tier 1: skip system-injected user entries.
 		if e.entryType == "user" {
-			if gjson.Get(e.line, "isMeta").Bool() ||
-				gjson.Get(e.line, "isCompactSummary").Bool() {
+			if gjson.Get(e.line, "isMeta").Bool() {
 				continue
 			}
 		}
@@ -731,6 +852,10 @@ func extractMessages(entries []dagEntry) (
 			ContentLength:      len(text),
 			ToolCalls:          tcs,
 			ToolResults:        trs,
+			SourceType:         e.entryType,
+			SourceUUID:         e.uuid,
+			SourceParentUUID:   e.parentUuid,
+			IsSidechain:        gjson.Get(e.line, "isSidechain").Bool(),
 			tokenPresenceKnown: e.entryType == "assistant",
 		}
 
@@ -970,6 +1095,40 @@ func isCommandEnvelope(content string) bool {
 	}
 	stripped := xmlCmdStripRe.ReplaceAllString(trimmed, "")
 	return strings.TrimSpace(stripped) == ""
+}
+
+// fileEndsWithNewline returns true when the byte at size-1
+// is '\n'. Used to distinguish a fully-flushed final line
+// from a truncated write. Empty files return true (no
+// dangling content).
+func fileEndsWithNewline(f *os.File, size int64) bool {
+	if size <= 0 {
+		return true
+	}
+	var b [1]byte
+	if _, err := f.ReadAt(b[:], size-1); err != nil {
+		return false
+	}
+	return b[0] == '\n'
+}
+
+// extractCompactSummary extracts text from a Claude compact
+// summary JSONL entry. Content is usually an array of content
+// blocks in message.content, but Claude also emits compact
+// summaries with content as a plain string — handle both.
+func extractCompactSummary(line string) string {
+	content := gjson.Get(line, "message.content")
+	if content.IsArray() {
+		var parts []string
+		content.ForEach(func(_, v gjson.Result) bool {
+			if v.Get("type").Str == "text" {
+				parts = append(parts, v.Get("text").Str)
+			}
+			return true
+		})
+		return strings.Join(parts, "\n")
+	}
+	return content.Str
 }
 
 // isClaudeSystemMessage returns true if the content matches

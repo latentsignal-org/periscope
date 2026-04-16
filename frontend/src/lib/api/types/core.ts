@@ -28,6 +28,23 @@ export interface Session {
   has_total_output_tokens?: boolean;
   has_peak_context_tokens?: boolean;
   is_automated: boolean;
+  // Session signals (from backend computation)
+  health_score?: number | null;
+  health_grade?: string | null;
+  outcome?: string;
+  outcome_confidence?: string;
+  ended_with_role?: string;
+  tool_failure_signal_count?: number;
+  tool_retry_count?: number;
+  edit_churn_count?: number;
+  consecutive_failure_max?: number;
+  final_failure_streak?: number;
+  compaction_count?: number;
+  mid_task_compaction_count?: number;
+  context_pressure_max?: number | null;
+  // Detail-only fields (from enriched detail response)
+  health_score_basis?: string[] | null;
+  health_penalties?: Record<string, number> | null;
   created_at: string;
 }
 
@@ -89,6 +106,8 @@ export interface Message {
   has_output_tokens?: boolean;
   tool_calls?: ToolCall[];
   is_system: boolean;
+  is_compact_boundary?: boolean;
+  source_subtype?: string;
 }
 
 /** Matches Go SearchResult struct in internal/db/search.go */

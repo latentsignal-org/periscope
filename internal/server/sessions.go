@@ -3,9 +3,18 @@ package server
 import (
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/wesm/agentsview/internal/db"
+	"github.com/wesm/agentsview/internal/signals"
 )
+
+type sessionDetailResponse struct {
+	db.Session
+	HealthScoreBasis []string       `json:"health_score_basis,omitempty"`
+	HealthPenalties  map[string]int `json:"health_penalties,omitempty"`
+}
 
 func (s *Server) handleListSessions(
 	w http.ResponseWriter, r *http.Request,
@@ -77,6 +86,21 @@ func (s *Server) handleListSessions(
 		Cursor:           q.Get("cursor"),
 		Limit:            limit,
 	}
+	if v := q.Get("outcome"); v != "" {
+		filter.Outcome = strings.Split(v, ",")
+	}
+	if v := q.Get("health_grade"); v != "" {
+		filter.HealthGrade = strings.Split(v, ",")
+	}
+	if v := q.Get("min_tool_failures"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest,
+				"invalid min_tool_failures parameter")
+			return
+		}
+		filter.MinToolFailures = &n
+	}
 
 	page, err := s.db.ListSessions(r.Context(), filter)
 	if err != nil {
@@ -110,7 +134,25 @@ func (s *Server) handleGetSession(
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, session)
+	resp := sessionDetailResponse{Session: *session}
+	if session.HealthScore != nil {
+		result := signals.ComputeHealthScore(signals.ScoreInput{
+			Outcome:                session.Outcome,
+			OutcomeConfidence:      session.OutcomeConfidence,
+			HasToolCalls:           session.HasToolCalls,
+			FailureSignalCount:     session.ToolFailureSignalCount,
+			RetryCount:             session.ToolRetryCount,
+			EditChurnCount:         session.EditChurnCount,
+			ConsecutiveFailMax:     session.ConsecutiveFailureMax,
+			HasContextData:         session.HasContextData,
+			CompactionCount:        session.CompactionCount,
+			MidTaskCompactionCount: session.MidTaskCompactionCount,
+			PressureMax:            session.ContextPressureMax,
+		})
+		resp.HealthScoreBasis = result.Basis
+		resp.HealthPenalties = result.Penalties
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleGetChildSessions(

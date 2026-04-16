@@ -24,6 +24,7 @@ import type {
   VelocityResponse,
   ToolsAnalyticsResponse,
   TopSessionsResponse,
+  SignalsAnalyticsResponse,
   Granularity,
   HeatmapMetric,
   TopSessionsMetric,
@@ -741,6 +742,14 @@ export function getAnalyticsTopSessions(
   },
 ): Promise<TopSessionsResponse> {
   return fetchJSON(`/analytics/top-sessions${buildQuery({ ...params })}`);
+}
+
+export function getAnalyticsSignals(
+  params: AnalyticsParams,
+): Promise<SignalsAnalyticsResponse> {
+  return fetchJSON(
+    `/analytics/signals${buildQuery({ ...params })}`,
+  );
 }
 
 /* Insights */

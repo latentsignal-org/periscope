@@ -62,6 +62,7 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(newTokenUseCommand())
 	root.AddCommand(newImportCommand())
 	root.AddCommand(newProjectsCommand())
+	root.AddCommand(newHealthCommand())
 	root.AddCommand(newUsageCommand())
 	root.AddCommand(newPGCommand())
 	root.AddCommand(newVersionCommand())
@@ -232,6 +233,30 @@ func newProjectsCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON array")
+	return cmd
+}
+
+func newHealthCommand() *cobra.Command {
+	var cfg HealthConfig
+	cmd := &cobra.Command{
+		Use:   "health [session-id]",
+		Short: "Show session health and signals",
+		Long: "Without arguments, lists the most recent " +
+			"sessions with grade and outcome columns. " +
+			"With a session ID, prints detailed signal " +
+			"counts for that session.",
+		GroupID:      groupCore,
+		SilenceUsage: true,
+		Args:         cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			runHealth(args, cfg)
+		},
+	}
+	cmd.Flags().BoolVar(&cfg.JSON, "json", false,
+		"Output as JSON")
+	cmd.Flags().IntVar(&cfg.Limit, "limit",
+		defaultHealthLimit,
+		"Number of sessions to list (max 500)")
 	return cmd
 }
 

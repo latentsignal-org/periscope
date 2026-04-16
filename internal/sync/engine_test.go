@@ -837,6 +837,14 @@ func TestShouldSkipFileWithIDPrefix(t *testing.T) {
 	if err := database.UpsertSession(sess); err != nil {
 		t.Fatal(err)
 	}
+	// data_version is no longer persisted by UpsertSession;
+	// stamp it explicitly so the skip check sees a current
+	// row.
+	if err := database.SetSessionDataVersion(
+		sess.ID, db.CurrentDataVersion(),
+	); err != nil {
+		t.Fatal(err)
+	}
 
 	// Engine with IDPrefix should find the session.
 	e := &Engine{
@@ -880,6 +888,11 @@ func TestShouldSkipByPathWithRewriter(t *testing.T) {
 		),
 	}
 	if err := database.UpsertSession(sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetSessionDataVersion(
+		sess.ID, db.CurrentDataVersion(),
+	); err != nil {
 		t.Fatal(err)
 	}
 

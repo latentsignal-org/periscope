@@ -18,6 +18,7 @@ import (
 	"github.com/wesm/agentsview/internal/db"
 	"github.com/wesm/agentsview/internal/parser"
 	"github.com/wesm/agentsview/internal/server"
+	"github.com/wesm/agentsview/internal/signals"
 	"github.com/wesm/agentsview/internal/sync"
 )
 
@@ -106,7 +107,26 @@ func runServe(cfg config.Config) {
 		})
 
 		if database.NeedsResync() {
-			runInitialResync(ctx, engine)
+			signalsCovered := runInitialResync(ctx, engine)
+			if ctx.Err() == nil {
+				if err := database.Vacuum(); err != nil {
+					log.Printf("vacuum after resync: %v", err)
+				}
+				// Only short-circuit BackfillSignals when resync
+				// rewrote every session through the inline signal
+				// path. Aborted resyncs fall back to incremental
+				// sync (existing rows untouched) and orphans are
+				// copied as-is from the previous DB without
+				// recompute -- both leave sessions that still
+				// need backfill.
+				if signalsCovered {
+					if err := database.MarkSignalsBackfillDone(); err != nil {
+						log.Printf(
+							"mark signals backfill done: %v", err,
+						)
+					}
+				}
+			}
 		} else {
 			runInitialSync(ctx, engine)
 		}
@@ -117,7 +137,25 @@ func runServe(cfg config.Config) {
 		stopWatcher, unwatchedDirs := startFileWatcher(cfg, engine)
 		defer stopWatcher()
 
-		go startPeriodicSync(engine)
+		// Backfill runs in the background. On a large DB (e.g.
+		// after copying tens of thousands of orphaned sessions
+		// during a resync), walking every row to recompute
+		// signals would otherwise block the HTTP server from
+		// listening for minutes. Backfill is idempotent and
+		// guarded by a one-shot marker, so concurrent writes
+		// from the file watcher and periodic sync are safe.
+		go func() {
+			if err := database.BackfillSignals(
+				ctx,
+				func(bCtx context.Context, id string) error {
+					return engine.RecomputeSignals(bCtx, id)
+				},
+			); err != nil && ctx.Err() == nil {
+				log.Printf("signals backfill: %v", err)
+			}
+		}()
+
+		go startPeriodicSync(engine, database)
 		if len(unwatchedDirs) > 0 {
 			go startUnwatchedPoll(engine)
 		}
@@ -293,23 +331,52 @@ func runInitialSync(
 	printSyncSummary(stats, t)
 }
 
+// runInitialResync runs ResyncAll, falling back to incremental
+// sync when the resync aborts. Returns true only when every
+// session in the resulting DB went through the inline signal
+// path -- see resyncCoversSignals.
 func runInitialResync(
 	ctx context.Context, engine *sync.Engine,
-) {
+) bool {
 	fmt.Println("Data version changed, running full resync...")
 	t := time.Now()
 	stats := engine.ResyncAll(ctx, printSyncProgress)
 	printSyncSummary(stats, t)
 
-	// If resync was aborted due to data issues (not
-	// cancellation), fall back to an incremental sync so
-	// the server starts with current data.
+	fellBack := false
 	if stats.Aborted && ctx.Err() == nil {
 		fmt.Println("Resync incomplete, running incremental sync...")
 		t = time.Now()
 		fallback := engine.SyncAll(ctx, printSyncProgress)
 		printSyncSummary(fallback, t)
+		fellBack = true
 	}
+
+	if ctx.Err() != nil {
+		return false
+	}
+	return resyncCoversSignals(stats, fellBack)
+}
+
+// resyncCoversSignals returns true only when every session in
+// the resulting DB went through the inline signal path:
+//   - resync completed cleanly (no abort fallback to incremental
+//     sync, which leaves existing rows untouched), AND
+//   - no orphaned sessions were copied from the previous DB
+//     (CopyOrphanedDataFrom carries existing signal columns
+//     verbatim, which may be stale or missing).
+//
+// When false, the caller must run BackfillSignals.
+func resyncCoversSignals(
+	stats sync.SyncStats, fellBack bool,
+) bool {
+	if fellBack {
+		return false
+	}
+	if stats.OrphanedCopied > 0 {
+		return false
+	}
+	return true
 }
 
 func printSyncSummary(stats sync.SyncStats, t time.Time) {
@@ -431,12 +498,42 @@ func startFileWatcher(
 	return watcher.Stop, unwatchedDirs
 }
 
-func startPeriodicSync(engine *sync.Engine) {
+func startPeriodicSync(
+	engine *sync.Engine, database *db.DB,
+) {
 	ticker := time.NewTicker(periodicSyncInterval)
 	defer ticker.Stop()
 	for range ticker.C {
 		log.Println("Running scheduled sync...")
 		engine.SyncAll(context.Background(), nil)
+		recomputePendingSessions(engine, database)
+	}
+}
+
+func recomputePendingSessions(
+	engine *sync.Engine, database *db.DB,
+) {
+	cutoff := time.Now().Add(-signals.RecencyWindow).
+		UTC().Format(time.RFC3339)
+	ids, err := database.PendingSignalSessions(
+		context.Background(), cutoff,
+	)
+	if err != nil {
+		log.Printf("deferred recompute query: %v", err)
+		return
+	}
+	if len(ids) == 0 {
+		return
+	}
+	log.Printf(
+		"recomputing signals for %d deferred sessions",
+		len(ids),
+	)
+	for _, id := range ids {
+		// Errors are already logged by RecomputeSignals; the
+		// deferred-recompute loop is best-effort, the next
+		// pass will retry any that failed.
+		_ = engine.RecomputeSignals(context.Background(), id)
 	}
 }
 

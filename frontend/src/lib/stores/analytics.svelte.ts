@@ -11,6 +11,7 @@ import type {
   Granularity,
   HeatmapMetric,
   TopSessionsMetric,
+  SignalsAnalyticsResponse,
 } from "../api/types.js";
 import {
   getAnalyticsSummary,
@@ -22,6 +23,7 @@ import {
   getAnalyticsVelocity,
   getAnalyticsTools,
   getAnalyticsTopSessions,
+  getAnalyticsSignals,
   type AnalyticsParams,
 } from "../api/client.js";
 import { sessions } from "./sessions.svelte.js";
@@ -54,7 +56,8 @@ type Panel =
   | "sessionShape"
   | "velocity"
   | "tools"
-  | "topSessions";
+  | "topSessions"
+  | "signals";
 
 class AnalyticsStore {
   from: string = $state(daysAgo(365));
@@ -80,6 +83,7 @@ class AnalyticsStore {
   velocity = $state<VelocityResponse | null>(null);
   tools = $state<ToolsAnalyticsResponse | null>(null);
   topSessions = $state<TopSessionsResponse | null>(null);
+  signals = $state<SignalsAnalyticsResponse | null>(null);
   topMetric: TopSessionsMetric = $state("messages");
 
   loading = $state({
@@ -92,6 +96,7 @@ class AnalyticsStore {
     velocity: false,
     tools: false,
     topSessions: false,
+    signals: false,
   });
 
   errors = $state<Record<Panel, string | null>>({
@@ -104,6 +109,7 @@ class AnalyticsStore {
     velocity: null,
     tools: null,
     topSessions: null,
+    signals: null,
   });
 
   private versions: Record<Panel, number> = {
@@ -116,6 +122,7 @@ class AnalyticsStore {
     velocity: 0,
     tools: 0,
     topSessions: 0,
+    signals: 0,
   };
 
   get timezone(): string {
@@ -223,6 +230,7 @@ class AnalyticsStore {
     this.fetchVelocity();
     this.fetchTools();
     this.fetchTopSessions();
+    this.fetchSignals();
   }
 
   clearProject() {
@@ -244,6 +252,7 @@ class AnalyticsStore {
     this.fetchVelocity();
     this.fetchTools();
     this.fetchTopSessions();
+    this.fetchSignals();
   }
 
   private baseParams(
@@ -366,6 +375,7 @@ class AnalyticsStore {
       this.fetchVelocity(),
       this.fetchTools(),
       this.fetchTopSessions(),
+      this.fetchSignals(),
     ]);
   }
 
@@ -477,6 +487,16 @@ class AnalyticsStore {
     );
   }
 
+  async fetchSignals() {
+    await this.executeFetch(
+      "signals",
+      () => getAnalyticsSignals(this.filterParams()),
+      (data) => {
+        this.signals = data;
+      },
+    );
+  }
+
   setTopMetric(m: TopSessionsMetric) {
     this.topMetric = m;
     this.fetchTopSessions();
@@ -503,6 +523,7 @@ class AnalyticsStore {
     this.fetchVelocity();
     this.fetchTools();
     this.fetchTopSessions();
+    this.fetchSignals();
   }
 
   setGranularity(g: Granularity) {
@@ -532,6 +553,7 @@ class AnalyticsStore {
     this.fetchVelocity();
     this.fetchTools();
     this.fetchTopSessions();
+    this.fetchSignals();
   }
 
   setProject(name: string) {

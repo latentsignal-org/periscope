@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	stdlibsync "sync"
 	"testing"
@@ -739,6 +740,60 @@ func TestGetSession_NotFound(t *testing.T) {
 
 	w := te.get(t, "/api/v1/sessions/nonexistent")
 	assertStatus(t, w, http.StatusNotFound)
+}
+
+// TestGetSession_HealthBreakdownIncludesMidTaskCompactions
+// guards against a regression where the recomputed
+// health_penalties / health_score_basis on the session detail
+// response omitted MidTaskCompactionCount, so a session
+// penalized for mid-task compactions would show a breakdown
+// inconsistent with its persisted health_score.
+func TestGetSession_HealthBreakdownIncludesMidTaskCompactions(
+	t *testing.T,
+) {
+	te := setup(t)
+	te.seedSession(t, "mt-1", "demo", 12)
+	score := 82
+	grade := "B"
+	if err := te.db.UpdateSessionSignals("mt-1", db.SessionSignalUpdate{
+		Outcome:                "completed",
+		OutcomeConfidence:      "medium",
+		EndedWithRole:          "assistant",
+		HasToolCalls:           true,
+		HasContextData:         true,
+		CompactionCount:        2,
+		MidTaskCompactionCount: 2,
+		HealthScore:            &score,
+		HealthGrade:            &grade,
+	}); err != nil {
+		t.Fatalf("UpdateSessionSignals: %v", err)
+	}
+
+	w := te.get(t, "/api/v1/sessions/mt-1")
+	assertStatus(t, w, http.StatusOK)
+
+	var resp struct {
+		HealthScoreBasis []string       `json:"health_score_basis"`
+		HealthPenalties  map[string]int `json:"health_penalties"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+
+	got, ok := resp.HealthPenalties["mid_task_compactions"]
+	if !ok {
+		t.Fatalf("mid_task_compactions missing from penalties: %+v",
+			resp.HealthPenalties)
+	}
+	// 2 mid-task compactions * 8 = 16 (cap is 18).
+	if got != 16 {
+		t.Errorf("mid_task_compactions penalty = %d, want 16", got)
+	}
+
+	if !slices.Contains(resp.HealthScoreBasis, "context_pressure") {
+		t.Errorf("basis missing context_pressure: %v",
+			resp.HealthScoreBasis)
+	}
 }
 
 func TestGetChildSessions_Found(t *testing.T) {

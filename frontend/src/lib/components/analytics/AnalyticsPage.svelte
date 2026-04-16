@@ -10,6 +10,7 @@
   import VelocityMetrics from "./VelocityMetrics.svelte";
   import ToolUsage from "./ToolUsage.svelte";
   import AgentComparison from "./AgentComparison.svelte";
+  import SessionHealthSection from "./SessionHealthSection.svelte";
   import TopSessions from "./TopSessions.svelte";
   import ActiveFilters from "./ActiveFilters.svelte";
   import { analytics } from "../../stores/analytics.svelte.js";
@@ -187,6 +188,8 @@
         <AgentComparison />
       </div>
     </div>
+
+    <SessionHealthSection />
   </div>
 </div>
 

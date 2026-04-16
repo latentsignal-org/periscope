@@ -278,6 +278,7 @@ func TestAnalyticsErrorRedaction(t *testing.T) {
 		"velocity",
 		"tools",
 		"top-sessions",
+		"signals",
 	}
 	for _, ep := range endpoints {
 		t.Run(ep, func(t *testing.T) {
@@ -305,6 +306,7 @@ func TestAnalyticsEndpoints_DefaultParams(t *testing.T) {
 		"velocity",
 		"tools",
 		"top-sessions",
+		"signals",
 	}
 
 	for _, ep := range endpoints {

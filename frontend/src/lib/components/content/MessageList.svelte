@@ -6,6 +6,7 @@
   import { sessions } from "../../stores/sessions.svelte.js";
   import { createVirtualizer } from "../../virtual/createVirtualizer.svelte.js";
   import MessageContent from "./MessageContent.svelte";
+  import CompactBoundaryDivider from "./CompactBoundaryDivider.svelte";
   import ToolCallGroup from "./ToolCallGroup.svelte";
   import type { Message } from "../../api/types.js";
   import {
@@ -378,6 +379,8 @@
                 highlightQuery={highlightQuery}
                 isCurrentHighlight={item.ordinals.includes(inSessionSearch.currentOrdinal ?? -1)}
               />
+            {:else if item.message.is_compact_boundary}
+              <CompactBoundaryDivider message={item.message} />
             {:else}
               <MessageContent
                 message={item.message}

@@ -151,6 +151,17 @@ func insertSession(
 	}
 }
 
+// updateSignals is a helper that updates session signal columns
+// and fails the test on error.
+func updateSignals(
+	t *testing.T, d *DB, id string, u SessionSignalUpdate,
+) {
+	t.Helper()
+	if err := d.UpdateSessionSignals(id, u); err != nil {
+		t.Fatalf("updateSignals %s: %v", id, err)
+	}
+}
+
 // insertMessages is a helper that inserts messages and fails
 // the test on error.
 func insertMessages(t *testing.T, d *DB, msgs ...Message) {
@@ -1375,6 +1386,122 @@ func TestReplaceSessionMessagesDropsPinsForRemovedOrdinals(t *testing.T) {
 	}
 }
 
+// TestReplaceSessionMessagesPinSourceUUIDFollowsRow verifies that a
+// pin tracks its message by source_uuid even when the message's
+// ordinal shifts on rewrite (e.g. when a new compact-boundary row
+// is inserted earlier in the stream). The pin must follow the
+// content, not the position.
+func TestReplaceSessionMessagesPinSourceUUIDFollowsRow(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	insertSession(t, d, "s1", "p")
+	insertMessages(t, d,
+		Message{
+			SessionID: "s1", Ordinal: 0, Role: "user",
+			Content: "first", Timestamp: tsZero,
+			SourceUUID: "uuid-first",
+		},
+		Message{
+			SessionID: "s1", Ordinal: 1, Role: "assistant",
+			Content: "answer", Timestamp: tsZero,
+			SourceUUID: "uuid-answer",
+		},
+	)
+
+	msgs, err := d.GetAllMessages(ctx, "s1")
+	if err != nil {
+		t.Fatalf("GetAllMessages: %v", err)
+	}
+	note := "important"
+	if _, err := d.PinMessage("s1", msgs[1].ID, &note); err != nil {
+		t.Fatalf("PinMessage: %v", err)
+	}
+
+	// Rewrite: a compact-boundary row is now ordinal 1, pushing
+	// "answer" to ordinal 2. The pin should follow uuid-answer
+	// to its new ordinal, not stay on ordinal 1 (the boundary).
+	if err := d.ReplaceSessionMessages("s1", []Message{
+		{
+			SessionID: "s1", Ordinal: 0, Role: "user",
+			Content: "first", Timestamp: tsZero,
+			SourceUUID: "uuid-first",
+		},
+		{
+			SessionID: "s1", Ordinal: 1, Role: "user",
+			Content: "[compact]", Timestamp: tsZero,
+			SourceUUID:        "uuid-boundary",
+			IsCompactBoundary: true,
+		},
+		{
+			SessionID: "s1", Ordinal: 2, Role: "assistant",
+			Content: "answer", Timestamp: tsZero,
+			SourceUUID: "uuid-answer",
+		},
+	}); err != nil {
+		t.Fatalf("ReplaceSessionMessages: %v", err)
+	}
+
+	pins, err := d.ListPinnedMessages(ctx, "s1", "")
+	if err != nil {
+		t.Fatalf("ListPinnedMessages: %v", err)
+	}
+	if len(pins) != 1 {
+		t.Fatalf("want 1 pin, got %d", len(pins))
+	}
+	if pins[0].Ordinal != 2 {
+		t.Errorf(
+			"pin ordinal = %d, want 2 (followed source_uuid)",
+			pins[0].Ordinal,
+		)
+	}
+	if pins[0].Note == nil || *pins[0].Note != note {
+		t.Errorf("pin note = %v, want %q", pins[0].Note, note)
+	}
+}
+
+// TestReplaceSessionMessagesPinFallsBackToOrdinal verifies that
+// when a pin's source_uuid is empty (legacy row from before the
+// column existed) the restore falls back to ordinal matching.
+func TestReplaceSessionMessagesPinFallsBackToOrdinal(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	insertSession(t, d, "s1", "p")
+	// Messages without source_uuid (legacy).
+	insertMessages(t, d,
+		userMsg("s1", 0, "msg0"),
+		asstMsg("s1", 1, "msg1"),
+	)
+
+	msgs, err := d.GetAllMessages(ctx, "s1")
+	if err != nil {
+		t.Fatalf("GetAllMessages: %v", err)
+	}
+	if _, err := d.PinMessage("s1", msgs[1].ID, nil); err != nil {
+		t.Fatalf("PinMessage: %v", err)
+	}
+
+	// Replace with the same ordinals (and still no source_uuid).
+	if err := d.ReplaceSessionMessages("s1", []Message{
+		userMsg("s1", 0, "msg0-v2"),
+		asstMsg("s1", 1, "msg1-v2"),
+	}); err != nil {
+		t.Fatalf("ReplaceSessionMessages: %v", err)
+	}
+
+	pins, err := d.ListPinnedMessages(ctx, "s1", "")
+	if err != nil {
+		t.Fatalf("ListPinnedMessages: %v", err)
+	}
+	if len(pins) != 1 {
+		t.Fatalf("want 1 pin, got %d", len(pins))
+	}
+	if pins[0].Ordinal != 1 {
+		t.Errorf("pin ordinal = %d, want 1", pins[0].Ordinal)
+	}
+}
+
 func TestGetSessionFilePath(t *testing.T) {
 	d := testDB(t)
 
@@ -2225,19 +2352,21 @@ func TestGetSessionFull(t *testing.T) {
 			return
 		}
 		want := &Session{
-			ID:           "full-1",
-			Project:      "proj",
-			MessageCount: 5,
-			FilePath:     Ptr("/tmp/session.jsonl"),
-			FileSize:     Ptr(int64(2048)),
-			FileMtime:    Ptr(int64(1700000000)),
-			FileHash:     Ptr("abc123"),
-			FirstMessage: Ptr("hello"),
-			StartedAt:    Ptr(tsZero),
-			EndedAt:      Ptr(tsHour1),
-			Machine:      defaultMachine,
-			Agent:        defaultAgent,
-			CreatedAt:    got.CreatedAt,
+			ID:                "full-1",
+			Project:           "proj",
+			MessageCount:      5,
+			FilePath:          Ptr("/tmp/session.jsonl"),
+			FileSize:          Ptr(int64(2048)),
+			FileMtime:         Ptr(int64(1700000000)),
+			FileHash:          Ptr("abc123"),
+			FirstMessage:      Ptr("hello"),
+			StartedAt:         Ptr(tsZero),
+			EndedAt:           Ptr(tsHour1),
+			Machine:           defaultMachine,
+			Agent:             defaultAgent,
+			Outcome:           "unknown",
+			OutcomeConfidence: "low",
+			CreatedAt:         got.CreatedAt,
 		}
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Errorf("GetSessionFull mismatch (-want +got):\n%s", diff)
@@ -2256,12 +2385,14 @@ func TestGetSessionFull(t *testing.T) {
 			return
 		}
 		want := &Session{
-			ID:           "full-2",
-			Project:      "proj",
-			MessageCount: 1,
-			Machine:      defaultMachine,
-			Agent:        defaultAgent,
-			CreatedAt:    got.CreatedAt,
+			ID:                "full-2",
+			Project:           "proj",
+			MessageCount:      1,
+			Machine:           defaultMachine,
+			Agent:             defaultAgent,
+			Outcome:           "unknown",
+			OutcomeConfidence: "low",
+			CreatedAt:         got.CreatedAt,
 		}
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Errorf("GetSessionFull mismatch (-want +got):\n%s", diff)

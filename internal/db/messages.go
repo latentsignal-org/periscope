@@ -18,14 +18,18 @@ const (
 		is_system,
 		model, token_usage, context_tokens, output_tokens,
 		has_context_tokens, has_output_tokens,
-		claude_message_id, claude_request_id`
+		claude_message_id, claude_request_id,
+		source_type, source_subtype, source_uuid,
+		source_parent_uuid, is_sidechain, is_compact_boundary`
 
 	insertMessageCols = `session_id, ordinal, role, content,
 		timestamp, has_thinking, has_tool_use, content_length,
 		is_system,
 		model, token_usage, context_tokens, output_tokens,
 		has_context_tokens, has_output_tokens,
-		claude_message_id, claude_request_id`
+		claude_message_id, claude_request_id,
+		source_type, source_subtype, source_uuid,
+		source_parent_uuid, is_sidechain, is_compact_boundary`
 
 	// DefaultMessageLimit is the default number of messages returned.
 	DefaultMessageLimit = 100
@@ -75,26 +79,32 @@ type ToolResultEvent struct {
 
 // Message represents a row in the messages table.
 type Message struct {
-	ID               int64           `json:"id"`
-	SessionID        string          `json:"session_id"`
-	Ordinal          int             `json:"ordinal"`
-	Role             string          `json:"role"`
-	Content          string          `json:"content"`
-	Timestamp        string          `json:"timestamp"`
-	HasThinking      bool            `json:"has_thinking"`
-	HasToolUse       bool            `json:"has_tool_use"`
-	ContentLength    int             `json:"content_length"`
-	Model            string          `json:"model"`
-	TokenUsage       json.RawMessage `json:"token_usage,omitempty"`
-	ContextTokens    int             `json:"context_tokens"`
-	OutputTokens     int             `json:"output_tokens"`
-	HasContextTokens bool            `json:"has_context_tokens"`
-	HasOutputTokens  bool            `json:"has_output_tokens"`
-	ClaudeMessageID  string          `json:"claude_message_id,omitempty"`
-	ClaudeRequestID  string          `json:"claude_request_id,omitempty"`
-	ToolCalls        []ToolCall      `json:"tool_calls,omitempty"`
-	ToolResults      []ToolResult    `json:"-"`         // transient, for pairing
-	IsSystem         bool            `json:"is_system"` // persisted, filters search/analytics
+	ID                int64           `json:"id"`
+	SessionID         string          `json:"session_id"`
+	Ordinal           int             `json:"ordinal"`
+	Role              string          `json:"role"`
+	Content           string          `json:"content"`
+	Timestamp         string          `json:"timestamp"`
+	HasThinking       bool            `json:"has_thinking"`
+	HasToolUse        bool            `json:"has_tool_use"`
+	ContentLength     int             `json:"content_length"`
+	Model             string          `json:"model"`
+	TokenUsage        json.RawMessage `json:"token_usage,omitempty"`
+	ContextTokens     int             `json:"context_tokens"`
+	OutputTokens      int             `json:"output_tokens"`
+	HasContextTokens  bool            `json:"has_context_tokens"`
+	HasOutputTokens   bool            `json:"has_output_tokens"`
+	ClaudeMessageID   string          `json:"claude_message_id,omitempty"`
+	ClaudeRequestID   string          `json:"claude_request_id,omitempty"`
+	ToolCalls         []ToolCall      `json:"tool_calls,omitempty"`
+	ToolResults       []ToolResult    `json:"-"`         // transient, for pairing
+	IsSystem          bool            `json:"is_system"` // persisted, filters search/analytics
+	SourceType        string          `json:"source_type,omitempty"`
+	SourceSubtype     string          `json:"source_subtype,omitempty"`
+	SourceUUID        string          `json:"source_uuid,omitempty"`
+	SourceParentUUID  string          `json:"source_parent_uuid,omitempty"`
+	IsSidechain       bool            `json:"is_sidechain,omitempty"`
+	IsCompactBoundary bool            `json:"is_compact_boundary,omitempty"`
 }
 
 // TokenPresence reports whether context/output token fields were
@@ -182,7 +192,7 @@ func (db *DB) insertMessagesTx(
 ) ([]int64, error) {
 	stmt, err := tx.Prepare(fmt.Sprintf(`
 		INSERT INTO messages (%s)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, insertMessageCols))
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, insertMessageCols))
 	if err != nil {
 		return nil, fmt.Errorf("preparing insert: %w", err)
 	}
@@ -198,6 +208,8 @@ func (db *DB) insertMessagesTx(
 			m.ContextTokens, m.OutputTokens,
 			m.HasContextTokens, m.HasOutputTokens,
 			m.ClaudeMessageID, m.ClaudeRequestID,
+			m.SourceType, m.SourceSubtype, m.SourceUUID,
+			m.SourceParentUUID, m.IsSidechain, m.IsCompactBoundary,
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -364,13 +376,16 @@ func (db *DB) MaxOrdinal(sessionID string) int {
 }
 
 // savedPin captures the minimal pin state needed to re-attach a pin
-// after a full message replacement. The ordinal acts as a stable key
-// because session files are append-only and message ordinals never
-// change for existing messages.
+// after a full message replacement. source_uuid is the preferred
+// identifier because it survives rewrites where the ordinal stream
+// shifts (e.g. when newly-emitted compact-boundary messages are
+// inserted between previously-seen rows). The ordinal is kept as a
+// fallback for legacy pins on rows that lack a source_uuid.
 type savedPin struct {
-	ordinal   int
-	note      *string
-	createdAt string
+	sourceUUID string
+	ordinal    int
+	note       *string
+	createdAt  string
 }
 
 // ReplaceSessionMessages deletes existing and inserts new messages
@@ -402,9 +417,15 @@ func (db *DB) ReplaceSessionMessages(
 
 	// Save existing pins before deletion. The ON DELETE CASCADE on
 	// pinned_messages.message_id would otherwise wipe them when
-	// messages are deleted below.
-	pinRows, err := tx.Query(
-		"SELECT ordinal, note, created_at FROM pinned_messages WHERE session_id = ?",
+	// messages are deleted below. source_uuid comes from the joined
+	// message row; LEFT JOIN keeps pins on legacy rows whose
+	// message_id no longer resolves cleanly.
+	pinRows, err := tx.Query(`
+		SELECT p.ordinal, COALESCE(m.source_uuid, ''),
+			p.note, p.created_at
+		FROM pinned_messages p
+		LEFT JOIN messages m ON m.id = p.message_id
+		WHERE p.session_id = ?`,
 		sessionID,
 	)
 	if err != nil {
@@ -414,7 +435,9 @@ func (db *DB) ReplaceSessionMessages(
 	var pins []savedPin
 	for pinRows.Next() {
 		var sp savedPin
-		if err := pinRows.Scan(&sp.ordinal, &sp.note, &sp.createdAt); err != nil {
+		if err := pinRows.Scan(
+			&sp.ordinal, &sp.sourceUUID, &sp.note, &sp.createdAt,
+		); err != nil {
 			return fmt.Errorf("scanning pin: %w", err)
 		}
 		pins = append(pins, sp)
@@ -459,10 +482,30 @@ func (db *DB) ReplaceSessionMessages(
 		}
 	}
 
-	// Re-attach saved pins by matching ordinal to the newly inserted
-	// messages. Pins for ordinals that no longer exist are silently
-	// dropped (the message was removed from the session).
+	// Re-attach saved pins. Prefer source_uuid (stable across
+	// ordinal-shifting rewrites) and fall back to ordinal for
+	// legacy pins whose source row predates the source_uuid column.
+	// Pins whose row no longer exists by either key are silently
+	// dropped.
 	for _, sp := range pins {
+		if sp.sourceUUID != "" {
+			res, err := tx.Exec(`
+				INSERT OR IGNORE INTO pinned_messages
+					(session_id, message_id, ordinal, note, created_at)
+				SELECT ?, m.id, m.ordinal, ?, ?
+				FROM messages m
+				WHERE m.session_id = ? AND m.source_uuid = ?`,
+				sessionID, sp.note, sp.createdAt, sessionID, sp.sourceUUID,
+			)
+			if err != nil {
+				return fmt.Errorf(
+					"restoring pin uuid=%s: %w", sp.sourceUUID, err,
+				)
+			}
+			if n, _ := res.RowsAffected(); n > 0 {
+				continue
+			}
+		}
 		if _, err := tx.Exec(`
 			INSERT OR IGNORE INTO pinned_messages
 				(session_id, message_id, ordinal, note, created_at)
@@ -699,6 +742,8 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 			&m.ContextTokens, &m.OutputTokens,
 			&m.HasContextTokens, &m.HasOutputTokens,
 			&m.ClaudeMessageID, &m.ClaudeRequestID,
+			&m.SourceType, &m.SourceSubtype, &m.SourceUUID,
+			&m.SourceParentUUID, &m.IsSidechain, &m.IsCompactBoundary,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scanning message: %w", err)
@@ -735,12 +780,15 @@ func (db *DB) MessageContentFingerprint(sessionID string) (sum, max, min int64, 
 // MessageTokenFingerprint returns an exact ordered fingerprint of
 // stored token metadata for a session's messages. Used by PG push
 // fast-paths to detect token metadata changes without rewriting
-// unchanged sessions.
+// unchanged sessions. Includes the source-tracking columns so
+// metadata-only changes invalidate the fast path.
 func (db *DB) MessageTokenFingerprint(sessionID string) (string, error) {
 	rows, err := db.getReader().Query(
 		`SELECT ordinal, model, token_usage, context_tokens,
 			output_tokens, has_context_tokens, has_output_tokens,
-			claude_message_id, claude_request_id
+			claude_message_id, claude_request_id,
+			source_type, source_subtype, source_uuid,
+			source_parent_uuid, is_sidechain, is_compact_boundary
 		 FROM messages
 		 WHERE session_id = ?
 		 ORDER BY ordinal ASC`,
@@ -757,20 +805,31 @@ func (db *DB) MessageTokenFingerprint(sessionID string) (string, error) {
 		var model, tokenUsage string
 		var hasContextTokens, hasOutputTokens bool
 		var claudeMsgID, claudeReqID string
+		var srcType, srcSubtype, srcUUID, srcParentUUID string
+		var isSidechain, isCompactBoundary bool
 		if err := rows.Scan(
 			&ordinal, &model, &tokenUsage, &contextTokens,
 			&outputTokens, &hasContextTokens, &hasOutputTokens,
 			&claudeMsgID, &claudeReqID,
+			&srcType, &srcSubtype, &srcUUID, &srcParentUUID,
+			&isSidechain, &isCompactBoundary,
 		); err != nil {
 			return "", err
 		}
-		fmt.Fprintf(&b, "%d|%d:%s|%d:%s|%d|%d|%t|%t|%s|%s;",
+		fmt.Fprintf(&b,
+			"%d|%d:%s|%d:%s|%d|%d|%t|%t|%s|%s|"+
+				"%d:%s|%d:%s|%d:%s|%d:%s|%t|%t;",
 			ordinal,
 			len(model), model,
 			len(tokenUsage), tokenUsage,
 			contextTokens, outputTokens,
 			hasContextTokens, hasOutputTokens,
 			claudeMsgID, claudeReqID,
+			len(srcType), srcType,
+			len(srcSubtype), srcSubtype,
+			len(srcUUID), srcUUID,
+			len(srcParentUUID), srcParentUUID,
+			isSidechain, isCompactBoundary,
 		)
 	}
 	return b.String(), rows.Err()
@@ -841,6 +900,8 @@ func (db *DB) GetMessageByOrdinal(
 		&m.ContextTokens, &m.OutputTokens,
 		&m.HasContextTokens, &m.HasOutputTokens,
 		&m.ClaudeMessageID, &m.ClaudeRequestID,
+		&m.SourceType, &m.SourceSubtype, &m.SourceUUID,
+		&m.SourceParentUUID, &m.IsSidechain, &m.IsCompactBoundary,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil

@@ -33,6 +33,18 @@ const pgSessionCols = `id, project, machine, agent,
 	total_output_tokens, peak_context_tokens,
 	has_total_output_tokens, has_peak_context_tokens,
 	is_automated,
+	tool_failure_signal_count, tool_retry_count,
+	edit_churn_count, consecutive_failure_max,
+	outcome, outcome_confidence,
+	ended_with_role, final_failure_streak,
+	signals_pending_since,
+	compaction_count, mid_task_compaction_count,
+	context_pressure_max,
+	health_score, health_grade,
+	has_tool_calls, has_context_data,
+	data_version,
+	cwd, git_branch, source_session_id, source_version,
+	parser_malformed_lines, is_truncated,
 	deleted_at`
 
 // paramBuilder generates numbered PostgreSQL placeholders.
@@ -64,6 +76,19 @@ func scanPGSession(
 		&s.TotalOutputTokens, &s.PeakContextTokens,
 		&s.HasTotalOutputTokens, &s.HasPeakContextTokens,
 		&s.IsAutomated,
+		&s.ToolFailureSignalCount, &s.ToolRetryCount,
+		&s.EditChurnCount, &s.ConsecutiveFailureMax,
+		&s.Outcome, &s.OutcomeConfidence,
+		&s.EndedWithRole, &s.FinalFailureStreak,
+		&s.SignalsPendingSince,
+		&s.CompactionCount, &s.MidTaskCompactionCount,
+		&s.ContextPressureMax,
+		&s.HealthScore, &s.HealthGrade,
+		&s.HasToolCalls, &s.HasContextData,
+		&s.DataVersion,
+		&s.Cwd, &s.GitBranch,
+		&s.SourceSessionID, &s.SourceVersion,
+		&s.ParserMalformedLines, &s.IsTruncated,
 		&deletedAt,
 	)
 	if err != nil {
@@ -219,6 +244,30 @@ func buildPGSessionFilter(
 	if f.ExcludeAutomated {
 		filterPreds = append(filterPreds,
 			"is_automated = FALSE")
+	}
+
+	if len(f.Outcome) > 0 {
+		phs := make([]string, len(f.Outcome))
+		for i, v := range f.Outcome {
+			phs[i] = pb.add(v)
+		}
+		filterPreds = append(filterPreds,
+			"outcome IN ("+strings.Join(phs, ",")+")")
+	}
+	if len(f.HealthGrade) > 0 {
+		phs := make([]string, len(f.HealthGrade))
+		for i, v := range f.HealthGrade {
+			phs[i] = pb.add(v)
+		}
+		filterPreds = append(filterPreds,
+			"health_grade IN ("+
+				strings.Join(phs, ",")+
+				")")
+	}
+	if f.MinToolFailures != nil {
+		filterPreds = append(filterPreds,
+			"tool_failure_signal_count >= "+
+				pb.add(*f.MinToolFailures))
 	}
 
 	hasFilters := len(filterPreds) > 0 || oneShotPred != ""

@@ -26,12 +26,11 @@ import (
 // trigger a non-destructive re-sync (mtime reset + skip cache
 // clear) so existing session data is preserved.
 //
-// Bumped to 11: codex incremental parser was not seeding
-// currentModel from prior turn_context lines, causing all
-// incrementally parsed messages to store an empty model
-// string. The usage query filters these out, so codex cost
-// tracking froze after the initial full parse.
-const dataVersion = 11
+// Bumped to 13: track mid-task compaction count (boundaries
+// where post-boundary tools repeat pre-boundary work — a
+// context-loss signal that scores heavier than ordinary
+// compactions).
+const dataVersion = 13
 
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 
@@ -322,6 +321,30 @@ func (db *DB) migrateColumns() error {
 			"ALTER TABLE messages ADD COLUMN claude_request_id TEXT NOT NULL DEFAULT ''",
 		},
 		{
+			"messages", "source_type",
+			"ALTER TABLE messages ADD COLUMN source_type TEXT NOT NULL DEFAULT ''",
+		},
+		{
+			"messages", "source_subtype",
+			"ALTER TABLE messages ADD COLUMN source_subtype TEXT NOT NULL DEFAULT ''",
+		},
+		{
+			"messages", "source_uuid",
+			"ALTER TABLE messages ADD COLUMN source_uuid TEXT NOT NULL DEFAULT ''",
+		},
+		{
+			"messages", "source_parent_uuid",
+			"ALTER TABLE messages ADD COLUMN source_parent_uuid TEXT NOT NULL DEFAULT ''",
+		},
+		{
+			"messages", "is_sidechain",
+			"ALTER TABLE messages ADD COLUMN is_sidechain INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			"messages", "is_compact_boundary",
+			"ALTER TABLE messages ADD COLUMN is_compact_boundary INTEGER NOT NULL DEFAULT 0",
+		},
+		{
 			"sessions", "total_output_tokens",
 			"ALTER TABLE sessions ADD COLUMN total_output_tokens INTEGER NOT NULL DEFAULT 0",
 		},
@@ -344,6 +367,98 @@ func (db *DB) migrateColumns() error {
 		{
 			"sessions", "is_automated",
 			"ALTER TABLE sessions ADD COLUMN is_automated INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			"sessions", "tool_failure_signal_count",
+			"ALTER TABLE sessions ADD COLUMN tool_failure_signal_count INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			"sessions", "tool_retry_count",
+			"ALTER TABLE sessions ADD COLUMN tool_retry_count INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			"sessions", "edit_churn_count",
+			"ALTER TABLE sessions ADD COLUMN edit_churn_count INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			"sessions", "consecutive_failure_max",
+			"ALTER TABLE sessions ADD COLUMN consecutive_failure_max INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			"sessions", "outcome",
+			"ALTER TABLE sessions ADD COLUMN outcome TEXT NOT NULL DEFAULT 'unknown'",
+		},
+		{
+			"sessions", "outcome_confidence",
+			"ALTER TABLE sessions ADD COLUMN outcome_confidence TEXT NOT NULL DEFAULT 'low'",
+		},
+		{
+			"sessions", "ended_with_role",
+			"ALTER TABLE sessions ADD COLUMN ended_with_role TEXT NOT NULL DEFAULT ''",
+		},
+		{
+			"sessions", "final_failure_streak",
+			"ALTER TABLE sessions ADD COLUMN final_failure_streak INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			"sessions", "signals_pending_since",
+			"ALTER TABLE sessions ADD COLUMN signals_pending_since TEXT",
+		},
+		{
+			"sessions", "compaction_count",
+			"ALTER TABLE sessions ADD COLUMN compaction_count INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			"sessions", "context_pressure_max",
+			"ALTER TABLE sessions ADD COLUMN context_pressure_max REAL",
+		},
+		{
+			"sessions", "health_score",
+			"ALTER TABLE sessions ADD COLUMN health_score INTEGER",
+		},
+		{
+			"sessions", "health_grade",
+			"ALTER TABLE sessions ADD COLUMN health_grade TEXT",
+		},
+		{
+			"sessions", "has_tool_calls",
+			"ALTER TABLE sessions ADD COLUMN has_tool_calls INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			"sessions", "has_context_data",
+			"ALTER TABLE sessions ADD COLUMN has_context_data INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			"sessions", "data_version",
+			"ALTER TABLE sessions ADD COLUMN data_version INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			"sessions", "mid_task_compaction_count",
+			"ALTER TABLE sessions ADD COLUMN mid_task_compaction_count INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			"sessions", "cwd",
+			"ALTER TABLE sessions ADD COLUMN cwd TEXT NOT NULL DEFAULT ''",
+		},
+		{
+			"sessions", "git_branch",
+			"ALTER TABLE sessions ADD COLUMN git_branch TEXT NOT NULL DEFAULT ''",
+		},
+		{
+			"sessions", "source_session_id",
+			"ALTER TABLE sessions ADD COLUMN source_session_id TEXT NOT NULL DEFAULT ''",
+		},
+		{
+			"sessions", "source_version",
+			"ALTER TABLE sessions ADD COLUMN source_version TEXT NOT NULL DEFAULT ''",
+		},
+		{
+			"sessions", "parser_malformed_lines",
+			"ALTER TABLE sessions ADD COLUMN parser_malformed_lines INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			"sessions", "is_truncated",
+			"ALTER TABLE sessions ADD COLUMN is_truncated INTEGER NOT NULL DEFAULT 0",
 		},
 	}
 
@@ -372,6 +487,9 @@ func (db *DB) migrateColumns() error {
 				m.table, m.column,
 			)
 		}
+	}
+	if err := db.createPartialIndexesLocked(w); err != nil {
+		return err
 	}
 	if err := db.backfillIsAutomatedLocked(w); err != nil {
 		return err
@@ -402,6 +520,27 @@ func (db *DB) migrateColumns() error {
 	}
 	if err := db.markTokenCoverageRepairDoneLocked(w); err != nil {
 		return err
+	}
+	return nil
+}
+
+// createPartialIndexesLocked creates partial indexes that are not
+// covered by the initial schema DDL. Idempotent via IF NOT EXISTS.
+func (db *DB) createPartialIndexesLocked(w *sql.DB) error {
+	indexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_sessions_cwd
+		 ON sessions(cwd) WHERE cwd != ''`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_compact_boundary
+		 ON messages(session_id, ordinal) WHERE is_compact_boundary = 1`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_sidechain
+		 ON messages(session_id) WHERE is_sidechain = 1`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_source_uuid
+		 ON messages(source_uuid) WHERE source_uuid != ''`,
+	}
+	for _, ddl := range indexes {
+		if _, err := w.Exec(ddl); err != nil {
+			return fmt.Errorf("creating index: %w", err)
+		}
 	}
 	return nil
 }
@@ -855,6 +994,19 @@ func (db *DB) applySessionCoverageUpdates(
 // rather than an incremental sync.
 func (db *DB) NeedsResync() bool {
 	return db.dataStale
+}
+
+// CurrentDataVersion returns the current parser data version.
+func CurrentDataVersion() int {
+	return dataVersion
+}
+
+// Vacuum runs VACUUM on the database to reclaim space.
+func (db *DB) Vacuum() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	_, err := db.getWriter().Exec("VACUUM")
+	return err
 }
 
 func dropDatabase(path string) error {

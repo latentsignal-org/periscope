@@ -29,6 +29,7 @@ vi.mock("../api/client.js", () => ({
   getAnalyticsVelocity: vi.fn(),
   getAnalyticsTools: vi.fn(),
   getAnalyticsTopSessions: vi.fn(),
+  getAnalyticsSignals: vi.fn(),
 }));
 
 
@@ -134,6 +135,33 @@ function mockAllAPIs() {
   vi.mocked(api.getAnalyticsTopSessions).mockResolvedValue(
     makeTopSessions(),
   );
+  vi.mocked(api.getAnalyticsSignals).mockResolvedValue({
+    scored_sessions: 0,
+    unscored_sessions: 0,
+    grade_distribution: {},
+    avg_health_score: null,
+    outcome_distribution: {},
+    outcome_confidence_distribution: {},
+    tool_health: {
+      total_failure_signals: 0,
+      total_retries: 0,
+      total_edit_churn: 0,
+      sessions_with_failures: 0,
+      failure_rate: 0,
+    },
+    context_health: {
+      avg_compaction_count: 0,
+      sessions_with_compaction: 0,
+      mid_task_compaction_count: 0,
+      sessions_with_mid_task_compaction: 0,
+      sessions_with_context_data: 0,
+      avg_context_pressure: null,
+      high_pressure_sessions: 0,
+    },
+    trend: [],
+    by_agent: [],
+    by_project: [],
+  });
 }
 
 function resetStore() {

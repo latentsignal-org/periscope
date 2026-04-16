@@ -1248,21 +1248,60 @@ mod tests {
             "agentsview-login-shell-{stamp}-{}.sh",
             std::process::id()
         ));
-        fs::write(&script_path, "#!/bin/sh\nhead -c 262144 /dev/zero\n")
-            .expect("write shell script");
+        // Probe absolute paths for the byte-emitting tool. Earlier
+        // versions called bare `head` which silently exited
+        // non-zero on CI runners with a stripped PATH (the
+        // function then returns None and the test panicked with
+        // the unhelpful "expected shell output" message). Fall
+        // back across known coreutils locations and finally to dd
+        // so the test does not depend on PATH or any single
+        // distro layout.
+        let head_candidates = ["/usr/bin/head", "/bin/head", "/usr/local/bin/head"];
+        let dd_candidates = ["/usr/bin/dd", "/bin/dd"];
+        let head = head_candidates
+            .iter()
+            .find(|p| Path::new(p).exists())
+            .copied();
+        let dd = dd_candidates
+            .iter()
+            .find(|p| Path::new(p).exists())
+            .copied();
+        let script_body = match (head, dd) {
+            (Some(h), _) => format!("#!/bin/sh\nexec {h} -c 262144 /dev/zero\n"),
+            (None, Some(d)) => format!(
+                "#!/bin/sh\nexec {d} if=/dev/zero bs=1024 count=256 \
+                 status=none\n"
+            ),
+            (None, None) => {
+                eprintln!(
+                    "skipping: neither head nor dd found in standard \
+                     paths"
+                );
+                return;
+            }
+        };
+        fs::write(&script_path, &script_body).expect("write shell script");
         let mut perms = fs::metadata(&script_path)
             .expect("read shell script metadata")
             .permissions();
         perms.set_mode(0o700);
         fs::set_permissions(&script_path, perms).expect("set executable permissions");
 
+        // 10s gives slow ARM64 CI runners headroom; the script
+        // itself completes in milliseconds.
         let output = run_login_shell_env(
             script_path.to_str().expect("script path utf-8"),
-            Duration::from_secs(2),
+            Duration::from_secs(10),
         );
-        let _ = fs::remove_file(&script_path);
+        let removed = fs::remove_file(&script_path);
 
-        let output = output.expect("expected shell output");
+        let output = output.unwrap_or_else(|| {
+            panic!(
+                "run_login_shell_env returned None\n\
+                 script_path={script_path:?} (removed={removed:?})\n\
+                 script_body={script_body:?}"
+            )
+        });
         assert!(
             output.len() >= 262_144,
             "expected at least 262144 bytes, got {}",

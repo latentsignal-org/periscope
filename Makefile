@@ -17,7 +17,7 @@ AIR_BIN := $(shell if command -v air >/dev/null 2>&1; then command -v air; \
 	elif [ -x "$(GOPATH_FIRST)/bin/air" ]; then printf "%s" "$(GOPATH_FIRST)/bin/air"; \
 	fi)
 
-.PHONY: build build-release install frontend frontend-dev dev check-air air-install desktop-dev desktop-build desktop-macos-app desktop-macos-dmg desktop-windows-installer desktop-linux-appimage desktop-app test test-short test-postgres test-postgres-ci postgres-up postgres-down test-ssh test-ssh-ci ssh-up ssh-down e2e vet lint lint-ci tidy clean release release-darwin-arm64 release-darwin-amd64 release-linux-amd64 install-hooks ensure-embed-dir help
+.PHONY: build build-release install frontend frontend-dev dev check-air air-install desktop-dev desktop-build desktop-macos-app desktop-macos-dmg desktop-windows-installer desktop-linux-appimage desktop-app test test-short test-postgres test-postgres-ci postgres-up postgres-down test-ssh test-ssh-ci ssh-up ssh-down e2e vet lint lint-ci tidy clean release release-darwin-arm64 release-darwin-amd64 release-linux-amd64 install-hooks ensure-embed-dir dev-snapshot help
 
 # Ensure go:embed has at least one file (no-op if frontend is built)
 ensure-embed-dir:
@@ -60,6 +60,62 @@ frontend:
 # Run Vite dev server (use alongside `make dev`)
 frontend-dev:
 	cd frontend && npm run dev
+
+# Build and run agentsview against a fresh snapshot of the prod SQLite DB.
+# Prod DB is never written; sqlite3 .backup is WAL-safe even with prod running.
+# Prod config.toml is NOT copied, so remote PG push is disabled in the snapshot.
+# Overrides:
+#   PROD_DATA_DIR  - source data dir (default: $$HOME/.agentsview)
+#   SNAPSHOT_DIR   - destination dir (default: tmp/prod-snapshot)
+#   RESNAPSHOT=0   - reuse existing snapshot instead of re-cloning
+PROD_DATA_DIR ?= $(HOME)/.agentsview
+SNAPSHOT_DIR ?= tmp/prod-snapshot
+# Resolve SNAPSHOT_DIR so relative and absolute paths both work.
+SNAPSHOT_ABS := $(abspath $(SNAPSHOT_DIR))
+
+# Sentinel file written into a snapshot directory the first time
+# we populate it. Subsequent runs require this marker before
+# touching any contents, so pointing SNAPSHOT_DIR at an
+# unrelated existing directory cannot accidentally delete
+# someone's files. The previous version used rm -rf on the
+# whole directory; that left dangerous edge cases (e.g.
+# SNAPSHOT_DIR=tmp wiping unrelated tmp/ contents) even with a
+# denylist, so we now only ever delete a small set of files we
+# know we wrote.
+SNAPSHOT_MARKER := .agentsview-snapshot
+
+dev-snapshot: build
+	@if [ ! -f "$(PROD_DATA_DIR)/sessions.db" ]; then \
+		echo "error: prod sessions.db not found at $(PROD_DATA_DIR)/sessions.db" >&2; \
+		exit 1; \
+	fi
+	@if [ -z "$(SNAPSHOT_ABS)" ]; then \
+		echo "error: SNAPSHOT_DIR resolved to empty path" >&2; \
+		exit 1; \
+	fi
+	@if [ -d "$(SNAPSHOT_ABS)" ] && [ ! -f "$(SNAPSHOT_ABS)/$(SNAPSHOT_MARKER)" ]; then \
+		if [ -n "$$(ls -A "$(SNAPSHOT_ABS)" 2>/dev/null)" ]; then \
+			echo "error: $(SNAPSHOT_ABS) is non-empty and missing the $(SNAPSHOT_MARKER) marker" >&2; \
+			echo "       refusing to touch a directory we did not create" >&2; \
+			echo "       remove the directory manually if you want to reuse this path" >&2; \
+			exit 1; \
+		fi; \
+	fi
+	@mkdir -p "$(SNAPSHOT_ABS)"
+	@touch "$(SNAPSHOT_ABS)/$(SNAPSHOT_MARKER)"
+	@if [ "$${RESNAPSHOT:-1}" = "1" ] || [ ! -f "$(SNAPSHOT_ABS)/sessions.db" ]; then \
+		echo "Snapshotting $(PROD_DATA_DIR)/sessions.db -> $(SNAPSHOT_ABS)/sessions.db"; \
+		for f in sessions.db sessions.db-wal sessions.db-shm \
+		         config.toml config.json config.json.bak \
+		         debug.log; do \
+			rm -f "$(SNAPSHOT_ABS)/$$f"; \
+		done; \
+		sqlite3 "$(PROD_DATA_DIR)/sessions.db" \
+			".backup $(SNAPSHOT_ABS)/sessions.db"; \
+	else \
+		echo "Reusing existing snapshot at $(SNAPSHOT_ABS)/sessions.db"; \
+	fi
+	AGENT_VIEWER_DATA_DIR="$(SNAPSHOT_ABS)" ./agentsview --port 0
 
 # Ensure air is installed for backend live reload
 check-air:
@@ -274,6 +330,7 @@ help:
 	@echo "  install        - Build and install to ~/.local/bin or GOPATH"
 	@echo ""
 	@echo "  dev            - Run Go server with live reload via air (use with frontend-dev)"
+	@echo "  dev-snapshot   - Run agentsview against a fresh snapshot of prod sessions.db"
 	@echo "  air-install    - Install air for backend live reload"
 	@echo "  frontend       - Build frontend SPA"
 	@echo "  frontend-dev   - Run Vite dev server"

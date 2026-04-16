@@ -641,10 +641,10 @@ func TestGenerateClaude_SuccessNotDiscarded(t *testing.T) {
 
 func TestParseCLIResult(t *testing.T) {
 	tests := []struct {
-		name        string
-		input       string
-		wantResult  string
-		wantModel   string
+		name       string
+		input      string
+		wantResult string
+		wantModel  string
 	}{
 		{
 			name:       "array format with result event",
@@ -659,20 +659,20 @@ func TestParseCLIResult(t *testing.T) {
 			wantModel:  "old-model",
 		},
 		{
-			name:      "array with no result event",
-			input:     `[{"type":"system_prompt","content":"hello"},{"type":"turn","result":""}]`,
+			name:       "array with no result event",
+			input:      `[{"type":"system_prompt","content":"hello"},{"type":"turn","result":""}]`,
 			wantResult: "",
 			wantModel:  "",
 		},
 		{
-			name:      "empty input",
-			input:     ``,
+			name:       "empty input",
+			input:      ``,
 			wantResult: "",
 			wantModel:  "",
 		},
 		{
-			name:      "garbage input",
-			input:     `not json at all`,
+			name:       "garbage input",
+			input:      `not json at all`,
 			wantResult: "",
 			wantModel:  "",
 		},

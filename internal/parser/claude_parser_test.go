@@ -121,14 +121,40 @@ func TestParseClaudeSession_SkippedMessages(t *testing.T) {
 		assert.Equal(t, "real question", sess.FirstMessage)
 	})
 
-	t.Run("skips isCompactSummary user messages", func(t *testing.T) {
+	t.Run("persists isCompactSummary as system message", func(t *testing.T) {
+		compactLine := `{"type":"user","isCompactSummary":true,` +
+			`"message":{"role":"user","content":[` +
+			`{"type":"text","text":"Summary of conversation so far..."}` +
+			`]},"uuid":"compact-uuid","parentUuid":"parent-uuid",` +
+			`"isSidechain":false,"timestamp":"` + tsZero + `"}`
 		content := testjsonl.JoinJSONL(
-			testjsonl.ClaudeMetaUserJSON("summary of prior turns", tsZero, false, true),
+			compactLine,
 			testjsonl.ClaudeUserJSON("actual prompt", tsZeroS1),
 		)
-		sess, _ := runClaudeParserTest(t, "test.jsonl", content)
-		assert.Equal(t, 1, sess.MessageCount)
+		sess, msgs := runClaudeParserTest(t, "test.jsonl", content)
+		// Compact boundary + real user message = 2 messages.
+		assert.Equal(t, 2, sess.MessageCount)
+		// Only real user messages count toward UserMessageCount.
+		assert.Equal(t, 1, sess.UserMessageCount)
+		// FirstMessage is from the first real user message.
 		assert.Equal(t, "actual prompt", sess.FirstMessage)
+
+		// Verify compact boundary message fields.
+		cb := msgs[0]
+		assert.Equal(t, RoleAssistant, cb.Role)
+		assert.True(t, cb.IsSystem)
+		assert.True(t, cb.IsCompactBoundary)
+		assert.Equal(t, "system", cb.SourceType)
+		assert.Equal(t, "compact_boundary", cb.SourceSubtype)
+		assert.Equal(t, "compact-uuid", cb.SourceUUID)
+		assert.Equal(t, "parent-uuid", cb.SourceParentUUID)
+		assert.False(t, cb.IsSidechain)
+		assert.Contains(t, cb.Content, "Summary of conversation so far...")
+		assert.Equal(t, 0, cb.Ordinal)
+
+		// Real user message follows with next ordinal.
+		assert.Equal(t, 1, msgs[1].Ordinal)
+		assert.Equal(t, RoleUser, msgs[1].Role)
 	})
 
 	t.Run("skips content-heuristic system messages", func(t *testing.T) {
@@ -756,4 +782,134 @@ func TestParseClaudeSession_ExtractsMessageIDAndRequestID(t *testing.T) {
 	if m.OutputTokens != 20 {
 		t.Errorf("OutputTokens = %d, want 20", m.OutputTokens)
 	}
+}
+
+func TestParseClaudeSession_CompactBoundary(t *testing.T) {
+	t.Parallel()
+
+	compactEntry := `{"type":"user","isCompactSummary":true,` +
+		`"message":{"role":"user","content":[` +
+		`{"type":"text","text":"Summary of conversation so far..."},` +
+		`{"type":"text","text":"Additional context."}` +
+		`]},"uuid":"compact-uuid","parentUuid":"parent-uuid",` +
+		`"isSidechain":true,"timestamp":"` + tsZeroS1 + `"}`
+
+	t.Run("linear path", func(t *testing.T) {
+		t.Parallel()
+		content := testjsonl.JoinJSONL(
+			testjsonl.ClaudeUserJSON("hello", tsZero),
+			compactEntry,
+			testjsonl.ClaudeUserJSON("after compact", tsZeroS2),
+		)
+		sess, msgs := runClaudeParserTest(
+			t, "test.jsonl", content,
+		)
+
+		require.Len(t, msgs, 3)
+		assert.Equal(t, 3, sess.MessageCount)
+		// Only real user messages count.
+		assert.Equal(t, 2, sess.UserMessageCount)
+		assert.Equal(t, "hello", sess.FirstMessage)
+
+		// Verify compact boundary at ordinal 1.
+		cb := msgs[1]
+		assert.Equal(t, 1, cb.Ordinal)
+		assert.Equal(t, RoleAssistant, cb.Role)
+		assert.True(t, cb.IsSystem)
+		assert.True(t, cb.IsCompactBoundary)
+		assert.Equal(t, "system", cb.SourceType)
+		assert.Equal(t, "compact_boundary", cb.SourceSubtype)
+		assert.Equal(t, "compact-uuid", cb.SourceUUID)
+		assert.Equal(t, "parent-uuid", cb.SourceParentUUID)
+		assert.True(t, cb.IsSidechain)
+		assert.Equal(
+			t,
+			"Summary of conversation so far...\n"+
+				"Additional context.",
+			cb.Content,
+		)
+		assert.Equal(t, len(cb.Content), cb.ContentLength)
+
+		// Following message has ordinal 2.
+		assert.Equal(t, 2, msgs[2].Ordinal)
+		assert.Equal(t, RoleUser, msgs[2].Role)
+	})
+
+	t.Run("DAG path", func(t *testing.T) {
+		t.Parallel()
+		content := testjsonl.JoinJSONL(
+			`{"type":"user","uuid":"u1","parentUuid":"",`+
+				`"timestamp":"`+tsZero+`",`+
+				`"message":{"content":"hello"}}`,
+			`{"type":"user","isCompactSummary":true,`+
+				`"uuid":"u2","parentUuid":"u1",`+
+				`"timestamp":"`+tsZeroS1+`",`+
+				`"isSidechain":false,`+
+				`"message":{"role":"user","content":[`+
+				`{"type":"text","text":"DAG compact summary"}`+
+				`]}}`,
+			`{"type":"user","uuid":"u3","parentUuid":"u2",`+
+				`"timestamp":"`+tsZeroS2+`",`+
+				`"message":{"content":"after compact"}}`,
+		)
+		sess, msgs := runClaudeParserTest(
+			t, "test.jsonl", content,
+		)
+
+		require.Len(t, msgs, 3)
+		assert.Equal(t, 2, sess.UserMessageCount)
+
+		cb := msgs[1]
+		assert.Equal(t, RoleAssistant, cb.Role)
+		assert.True(t, cb.IsSystem)
+		assert.True(t, cb.IsCompactBoundary)
+		assert.Equal(t, "DAG compact summary", cb.Content)
+		assert.Equal(t, "u2", cb.SourceUUID)
+		assert.Equal(t, "u1", cb.SourceParentUUID)
+		assert.False(t, cb.IsSidechain)
+	})
+
+	t.Run("incremental path", func(t *testing.T) {
+		t.Parallel()
+		initial := testjsonl.JoinJSONL(
+			testjsonl.ClaudeUserJSON("first", tsEarly),
+		)
+		path := createTestFile(
+			t, "inc-compact.jsonl", initial,
+		)
+
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		offset := info.Size()
+
+		// Append compact boundary + real message.
+		appended := compactEntry + "\n" +
+			testjsonl.ClaudeUserJSON(
+				"after compact", tsEarlyS5,
+			) + "\n"
+		f, err := os.OpenFile(
+			path, os.O_APPEND|os.O_WRONLY, 0o644,
+		)
+		require.NoError(t, err)
+		_, err = f.WriteString(appended)
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+
+		newMsgs, _, _, err := ParseClaudeSessionFrom(
+			path, offset, 1,
+		)
+		require.NoError(t, err)
+		require.Len(t, newMsgs, 2)
+
+		cb := newMsgs[0]
+		assert.Equal(t, 1, cb.Ordinal)
+		assert.Equal(t, RoleAssistant, cb.Role)
+		assert.True(t, cb.IsSystem)
+		assert.True(t, cb.IsCompactBoundary)
+		assert.Equal(t, "system", cb.SourceType)
+		assert.Equal(t, "compact_boundary", cb.SourceSubtype)
+
+		assert.Equal(t, 2, newMsgs[1].Ordinal)
+		assert.Equal(t, RoleUser, newMsgs[1].Role)
+	})
 }

@@ -623,6 +623,29 @@ func sessionPushFingerprint(sess db.Session) string {
 		int64Value(sess.FileMtime),
 		stringValue(sess.LocalModifiedAt),
 		sess.CreatedAt,
+		fmt.Sprintf("%d", sess.ToolFailureSignalCount),
+		fmt.Sprintf("%d", sess.ToolRetryCount),
+		fmt.Sprintf("%d", sess.EditChurnCount),
+		fmt.Sprintf("%d", sess.ConsecutiveFailureMax),
+		sess.Outcome,
+		sess.OutcomeConfidence,
+		sess.EndedWithRole,
+		fmt.Sprintf("%d", sess.FinalFailureStreak),
+		stringValue(sess.SignalsPendingSince),
+		fmt.Sprintf("%d", sess.CompactionCount),
+		fmt.Sprintf("%d", sess.MidTaskCompactionCount),
+		float64Value(sess.ContextPressureMax),
+		intPtrValue(sess.HealthScore),
+		stringValue(sess.HealthGrade),
+		fmt.Sprintf("%t", sess.HasToolCalls),
+		fmt.Sprintf("%t", sess.HasContextData),
+		fmt.Sprintf("%d", sess.DataVersion),
+		sess.Cwd,
+		sess.GitBranch,
+		sess.SourceSessionID,
+		sess.SourceVersion,
+		fmt.Sprintf("%d", sess.ParserMalformedLines),
+		fmt.Sprintf("%t", sess.IsTruncated),
 	}
 	var b strings.Builder
 	for _, f := range fields {
@@ -639,6 +662,20 @@ func stringValue(value *string) string {
 }
 
 func int64Value(value *int64) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d", *value)
+}
+
+func float64Value(value *float64) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprintf("%g", *value)
+}
+
+func intPtrValue(value *int) string {
 	if value == nil {
 		return ""
 	}
@@ -692,14 +729,35 @@ func (s *Sync) pushSession(
 			message_count, user_message_count,
 			total_output_tokens, peak_context_tokens,
 			has_total_output_tokens, has_peak_context_tokens,
-			is_automated,
+			is_automated, data_version,
+			cwd, git_branch, source_session_id,
+			source_version, parser_malformed_lines,
+			is_truncated,
 			parent_session_id, relationship_type,
+			tool_failure_signal_count, tool_retry_count,
+			edit_churn_count, consecutive_failure_max,
+			outcome, outcome_confidence,
+			ended_with_role, final_failure_streak,
+			signals_pending_since,
+			compaction_count, mid_task_compaction_count,
+			context_pressure_max,
+			health_score, health_grade,
+			has_tool_calls, has_context_data,
 			updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10,
 			$11, $12, $13, $14,
-			$15, $16, $17, $18, $19, NOW()
+			$15, $16, $17, $18,
+			$19, $20, $21, $22, $23, $24,
+			$25, $26,
+			$27, $28, $29, $30,
+			$31, $32, $33, $34,
+			$35,
+			$36, $37,
+			$38,
+			$39, $40, $41, $42,
+			NOW()
 		)
 		ON CONFLICT (id) DO UPDATE SET
 			machine = EXCLUDED.machine,
@@ -718,8 +776,31 @@ func (s *Sync) pushSession(
 			has_total_output_tokens = EXCLUDED.has_total_output_tokens,
 			has_peak_context_tokens = EXCLUDED.has_peak_context_tokens,
 			is_automated = EXCLUDED.is_automated,
+			data_version = EXCLUDED.data_version,
+			cwd = EXCLUDED.cwd,
+			git_branch = EXCLUDED.git_branch,
+			source_session_id = EXCLUDED.source_session_id,
+			source_version = EXCLUDED.source_version,
+			parser_malformed_lines = EXCLUDED.parser_malformed_lines,
+			is_truncated = EXCLUDED.is_truncated,
 			parent_session_id = EXCLUDED.parent_session_id,
 			relationship_type = EXCLUDED.relationship_type,
+			tool_failure_signal_count = EXCLUDED.tool_failure_signal_count,
+			tool_retry_count = EXCLUDED.tool_retry_count,
+			edit_churn_count = EXCLUDED.edit_churn_count,
+			consecutive_failure_max = EXCLUDED.consecutive_failure_max,
+			outcome = EXCLUDED.outcome,
+			outcome_confidence = EXCLUDED.outcome_confidence,
+			ended_with_role = EXCLUDED.ended_with_role,
+			final_failure_streak = EXCLUDED.final_failure_streak,
+			signals_pending_since = EXCLUDED.signals_pending_since,
+			compaction_count = EXCLUDED.compaction_count,
+			mid_task_compaction_count = EXCLUDED.mid_task_compaction_count,
+			context_pressure_max = EXCLUDED.context_pressure_max,
+			health_score = EXCLUDED.health_score,
+			health_grade = EXCLUDED.health_grade,
+			has_tool_calls = EXCLUDED.has_tool_calls,
+			has_context_data = EXCLUDED.has_context_data,
 			updated_at = NOW()
 		WHERE sessions.machine IS DISTINCT FROM EXCLUDED.machine
 			OR sessions.project IS DISTINCT FROM EXCLUDED.project
@@ -737,8 +818,31 @@ func (s *Sync) pushSession(
 			OR sessions.has_total_output_tokens IS DISTINCT FROM EXCLUDED.has_total_output_tokens
 			OR sessions.has_peak_context_tokens IS DISTINCT FROM EXCLUDED.has_peak_context_tokens
 			OR sessions.is_automated IS DISTINCT FROM EXCLUDED.is_automated
+			OR sessions.data_version IS DISTINCT FROM EXCLUDED.data_version
+			OR sessions.cwd IS DISTINCT FROM EXCLUDED.cwd
+			OR sessions.git_branch IS DISTINCT FROM EXCLUDED.git_branch
+			OR sessions.source_session_id IS DISTINCT FROM EXCLUDED.source_session_id
+			OR sessions.source_version IS DISTINCT FROM EXCLUDED.source_version
+			OR sessions.parser_malformed_lines IS DISTINCT FROM EXCLUDED.parser_malformed_lines
+			OR sessions.is_truncated IS DISTINCT FROM EXCLUDED.is_truncated
 			OR sessions.parent_session_id IS DISTINCT FROM EXCLUDED.parent_session_id
-			OR sessions.relationship_type IS DISTINCT FROM EXCLUDED.relationship_type`,
+			OR sessions.relationship_type IS DISTINCT FROM EXCLUDED.relationship_type
+			OR sessions.tool_failure_signal_count IS DISTINCT FROM EXCLUDED.tool_failure_signal_count
+			OR sessions.tool_retry_count IS DISTINCT FROM EXCLUDED.tool_retry_count
+			OR sessions.edit_churn_count IS DISTINCT FROM EXCLUDED.edit_churn_count
+			OR sessions.consecutive_failure_max IS DISTINCT FROM EXCLUDED.consecutive_failure_max
+			OR sessions.outcome IS DISTINCT FROM EXCLUDED.outcome
+			OR sessions.outcome_confidence IS DISTINCT FROM EXCLUDED.outcome_confidence
+			OR sessions.ended_with_role IS DISTINCT FROM EXCLUDED.ended_with_role
+			OR sessions.final_failure_streak IS DISTINCT FROM EXCLUDED.final_failure_streak
+			OR sessions.signals_pending_since IS DISTINCT FROM EXCLUDED.signals_pending_since
+			OR sessions.compaction_count IS DISTINCT FROM EXCLUDED.compaction_count
+			OR sessions.mid_task_compaction_count IS DISTINCT FROM EXCLUDED.mid_task_compaction_count
+			OR sessions.context_pressure_max IS DISTINCT FROM EXCLUDED.context_pressure_max
+			OR sessions.health_score IS DISTINCT FROM EXCLUDED.health_score
+			OR sessions.health_grade IS DISTINCT FROM EXCLUDED.health_grade
+			OR sessions.has_tool_calls IS DISTINCT FROM EXCLUDED.has_tool_calls
+			OR sessions.has_context_data IS DISTINCT FROM EXCLUDED.has_context_data`,
 		sess.ID, s.machine,
 		sanitizePG(sess.Project),
 		sess.Agent,
@@ -751,9 +855,21 @@ func (s *Sync) pushSession(
 		sess.MessageCount, sess.UserMessageCount,
 		sess.TotalOutputTokens, sess.PeakContextTokens,
 		sess.HasTotalOutputTokens, sess.HasPeakContextTokens,
-		isAutomated,
+		isAutomated, sess.DataVersion,
+		sess.Cwd, sess.GitBranch, sess.SourceSessionID,
+		sess.SourceVersion, sess.ParserMalformedLines,
+		sess.IsTruncated,
 		nilStr(sess.ParentSessionID),
 		sess.RelationshipType,
+		sess.ToolFailureSignalCount, sess.ToolRetryCount,
+		sess.EditChurnCount, sess.ConsecutiveFailureMax,
+		sess.Outcome, sess.OutcomeConfidence,
+		sess.EndedWithRole, sess.FinalFailureStreak,
+		nilStr(sess.SignalsPendingSince),
+		sess.CompactionCount, sess.MidTaskCompactionCount,
+		sess.ContextPressureMax,
+		sess.HealthScore, nilStr(sess.HealthGrade),
+		sess.HasToolCalls, sess.HasContextData,
 	)
 	return err
 }
@@ -970,7 +1086,9 @@ func pgMessageTokenFingerprint(
 	rows, err := tx.QueryContext(ctx,
 		`SELECT ordinal, model, token_usage, context_tokens,
 			output_tokens, has_context_tokens, has_output_tokens,
-			claude_message_id, claude_request_id
+			claude_message_id, claude_request_id,
+			source_type, source_subtype, source_uuid,
+			source_parent_uuid, is_sidechain, is_compact_boundary
 		 FROM messages
 		 WHERE session_id = $1
 		 ORDER BY ordinal ASC`,
@@ -987,20 +1105,31 @@ func pgMessageTokenFingerprint(
 		var model, tokenUsage string
 		var hasContextTokens, hasOutputTokens bool
 		var claudeMsgID, claudeReqID string
+		var srcType, srcSubtype, srcUUID, srcParentUUID string
+		var isSidechain, isCompactBoundary bool
 		if err := rows.Scan(
 			&ordinal, &model, &tokenUsage, &contextTokens,
 			&outputTokens, &hasContextTokens, &hasOutputTokens,
 			&claudeMsgID, &claudeReqID,
+			&srcType, &srcSubtype, &srcUUID, &srcParentUUID,
+			&isSidechain, &isCompactBoundary,
 		); err != nil {
 			return "", err
 		}
-		fmt.Fprintf(&b, "%d|%d:%s|%d:%s|%d|%d|%t|%t|%s|%s;",
+		fmt.Fprintf(&b,
+			"%d|%d:%s|%d:%s|%d|%d|%t|%t|%s|%s|"+
+				"%d:%s|%d:%s|%d:%s|%d:%s|%t|%t;",
 			ordinal,
 			len(model), model,
 			len(tokenUsage), tokenUsage,
 			contextTokens, outputTokens,
 			hasContextTokens, hasOutputTokens,
 			claudeMsgID, claudeReqID,
+			len(srcType), srcType,
+			len(srcSubtype), srcSubtype,
+			len(srcUUID), srcUUID,
+			len(srcParentUUID), srcParentUUID,
+			isSidechain, isCompactBoundary,
 		)
 	}
 	return b.String(), rows.Err()
@@ -1024,19 +1153,23 @@ func bulkInsertMessages(
 			content_length, is_system, model, token_usage,
 			context_tokens, output_tokens,
 			has_context_tokens, has_output_tokens,
-			claude_message_id, claude_request_id) VALUES `)
-		args := make([]any, 0, len(batch)*17)
+			claude_message_id, claude_request_id,
+			source_type, source_subtype, source_uuid,
+			source_parent_uuid, is_sidechain,
+			is_compact_boundary) VALUES `)
+		args := make([]any, 0, len(batch)*23)
 		for j, m := range batch {
 			if j > 0 {
 				b.WriteByte(',')
 			}
-			p := j*17 + 1
+			p := j*23 + 1
 			fmt.Fprintf(&b,
-				"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+				"($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
 				p, p+1, p+2, p+3,
 				p+4, p+5, p+6, p+7, p+8,
 				p+9, p+10, p+11, p+12, p+13, p+14,
-				p+15, p+16,
+				p+15, p+16, p+17, p+18, p+19,
+				p+20, p+21, p+22,
 			)
 			var ts any
 			if m.Timestamp != "" {
@@ -1055,6 +1188,9 @@ func bulkInsertMessages(
 				m.ContextTokens, m.OutputTokens,
 				m.HasContextTokens, m.HasOutputTokens,
 				m.ClaudeMessageID, m.ClaudeRequestID,
+				m.SourceType, m.SourceSubtype, m.SourceUUID,
+				m.SourceParentUUID, m.IsSidechain,
+				m.IsCompactBoundary,
 			)
 		}
 		if _, err := tx.ExecContext(

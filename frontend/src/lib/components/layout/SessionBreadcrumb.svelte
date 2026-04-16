@@ -11,6 +11,8 @@
   import { copyToClipboard } from "../../utils/clipboard.js";
   import { agentColor, agentLabel } from "../../utils/agents.js";
   import { formatTokenUsage } from "../../utils/format.js";
+  import { getGradeStyle, getGradeLabel } from "../../utils/grade.js";
+  import SignalPanel from "../content/SignalPanel.svelte";
   import { sessions } from "../../stores/sessions.svelte.js";
   import { router } from "../../stores/router.svelte.js";
   import {
@@ -99,6 +101,16 @@
       ? messagesStore.mainModel
       : "",
   );
+
+  const gradeStyle = $derived(
+    getGradeStyle(session?.health_grade),
+  );
+
+  $effect(() => {
+    if (ui.signalPanelOpen && session?.id) {
+      sessions.fetchSignalDetail(session.id);
+    }
+  });
 
   function sessionDisplayId(id: string): string {
     const idx = id.indexOf(":");
@@ -413,6 +425,16 @@
           )}
         </span>
       {/if}
+      <button
+        class="grade-badge"
+        style:background={gradeStyle.bg}
+        style:color={gradeStyle.text}
+        style:border-color={gradeStyle.border}
+        onclick={() => ui.toggleSignalPanel()}
+        title="Session health"
+      >
+        {getGradeLabel(session.health_grade)}
+      </button>
       {#if showDropdown}
         <span class="open-group">
           <button
@@ -629,6 +651,10 @@
   {/if}
 </div>
 
+{#if ui.signalPanelOpen && session}
+  <SignalPanel {session} />
+{/if}
+
 <style>
   .session-breadcrumb {
     display: flex;
@@ -709,6 +735,22 @@
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     flex-shrink: 0;
+  }
+
+  .grade-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    border: 1px solid;
+    cursor: pointer;
+    line-height: 1.4;
+  }
+
+  .grade-badge:hover {
+    opacity: 0.85;
   }
 
   .open-group {
