@@ -344,18 +344,35 @@ class AnalyticsStore {
     panel: Panel,
     fetchRequest: () => Promise<T>,
     onSuccess: (data: T) => void,
+    hasExistingData: () => boolean = () => false,
   ) {
     const v = ++this.versions[panel];
-    this.loading[panel] = true;
-    this.errors[panel] = null;
+    // Only show the skeleton when we don't already have data to
+    // display. Refetches triggered by live events or filter changes
+    // replace data in place instead of flashing to loading state.
+    const isFirstLoad = !hasExistingData();
+    if (isFirstLoad) this.loading[panel] = true;
+    // On refetch, keep any prior error state in place until we have
+    // a definitive result. First-load clears up front so we start
+    // fresh.
+    if (isFirstLoad) this.errors[panel] = null;
     try {
       const data = await fetchRequest();
       if (this.versions[panel] === v) {
         onSuccess(data);
+        this.errors[panel] = null;
       }
     } catch (e) {
       if (this.versions[panel] === v) {
-        this.errors[panel] = e instanceof Error ? e.message : "Failed to load";
+        // On refetch failure with cached data, swallow the error so
+        // existing values stay visible instead of flipping to an
+        // error state. First-load failures still surface.
+        if (isFirstLoad) {
+          this.errors[panel] =
+            e instanceof Error ? e.message : "Failed to load";
+        } else {
+          console.warn(`analytics.${panel} refetch failed:`, e);
+        }
       }
     } finally {
       if (this.versions[panel] === v) {
@@ -386,6 +403,7 @@ class AnalyticsStore {
       (data) => {
         this.summary = data;
       },
+      () => this.summary !== null,
     );
   }
 
@@ -403,6 +421,7 @@ class AnalyticsStore {
       (data) => {
         this.activity = data;
       },
+      () => this.activity !== null,
     );
   }
 
@@ -417,6 +436,7 @@ class AnalyticsStore {
       (data) => {
         this.heatmap = data;
       },
+      () => this.heatmap !== null,
     );
   }
 
@@ -430,6 +450,7 @@ class AnalyticsStore {
       (data) => {
         this.projects = data;
       },
+      () => this.projects !== null,
     );
   }
 
@@ -440,6 +461,7 @@ class AnalyticsStore {
       (data) => {
         this.hourOfWeek = data;
       },
+      () => this.hourOfWeek !== null,
     );
   }
 
@@ -450,6 +472,7 @@ class AnalyticsStore {
       (data) => {
         this.sessionShape = data;
       },
+      () => this.sessionShape !== null,
     );
   }
 
@@ -460,6 +483,7 @@ class AnalyticsStore {
       (data) => {
         this.velocity = data;
       },
+      () => this.velocity !== null,
     );
   }
 
@@ -470,6 +494,7 @@ class AnalyticsStore {
       (data) => {
         this.tools = data;
       },
+      () => this.tools !== null,
     );
   }
 
@@ -484,6 +509,7 @@ class AnalyticsStore {
       (data) => {
         this.topSessions = data;
       },
+      () => this.topSessions !== null,
     );
   }
 
@@ -494,6 +520,7 @@ class AnalyticsStore {
       (data) => {
         this.signals = data;
       },
+      () => this.signals !== null,
     );
   }
 

@@ -24,6 +24,18 @@ const (
 	maxWorkers = 8
 )
 
+// Emitter is notified after a sync pass writes data. Implementations
+// must be thread-safe; Emit is called from whatever goroutine runs
+// the sync pass (e.g., the file watcher, a periodic timer, or a
+// handler goroutine triggered by POST /api/v1/sync).
+//
+// Emit must not block. A slow implementation can delay the sync
+// pipeline; see server.Broadcaster for the production implementation,
+// which drops events on full per-subscriber buffers.
+type Emitter interface {
+	Emit(scope string)
+}
+
 // EngineConfig holds the configuration needed by the sync
 // engine, replacing per-agent positional parameters.
 type EngineConfig struct {
@@ -42,6 +54,10 @@ type EngineConfig struct {
 	// local sync watermarks or pollute the skipped_files table
 	// with temp-dir paths.
 	Ephemeral bool
+	// Emitter, when non-nil, is called once after each sync pass
+	// that wrote data. Safe to leave nil (e.g., in PG serve mode
+	// where the engine is not run).
+	Emitter Emitter
 }
 
 // Engine orchestrates session file discovery and sync.
@@ -67,6 +83,7 @@ type Engine struct {
 	ephemeral    bool
 	idPrefix     string
 	pathRewriter func(string) string
+	emitter      Emitter
 }
 
 // codexExecMigrationKey is the pg_sync_state flag that
@@ -106,6 +123,7 @@ func NewEngine(
 		ephemeral:               cfg.Ephemeral,
 		idPrefix:                cfg.IDPrefix,
 		pathRewriter:            cfg.PathRewriter,
+		emitter:                 cfg.Emitter,
 	}
 }
 
@@ -224,10 +242,20 @@ func (e *Engine) SyncPaths(paths []string) {
 	}
 
 	e.syncMu.Lock()
+	// Defers run LIFO: the emit closure (declared first) runs AFTER
+	// syncMu.Unlock, so an Emitter implementation cannot widen the
+	// critical section or deadlock by re-entering sync code. The
+	// stats variable is captured by the closure and populated below.
+	var stats SyncStats
+	defer func() {
+		if stats.Synced > 0 {
+			e.emit("sessions")
+		}
+	}()
 	defer e.syncMu.Unlock()
 
 	results := e.startWorkers(context.Background(), files)
-	stats := e.collectAndBatch(
+	stats = e.collectAndBatch(
 		context.Background(), results, len(files), nil,
 	)
 	e.persistSkipCache()
@@ -749,8 +777,14 @@ const resyncTempSuffix = "-resync"
 // deleting hundreds of thousands of messages in place.
 func (e *Engine) ResyncAll(
 	ctx context.Context, onProgress ProgressFunc,
-) SyncStats {
+) (stats SyncStats) {
 	e.syncMu.Lock()
+	// Defers LIFO: Unlock runs before emit.
+	defer func() {
+		if stats.Synced > 0 {
+			e.emit("sync")
+		}
+	}()
 	defer e.syncMu.Unlock()
 
 	origDB := e.db
@@ -792,7 +826,7 @@ func (e *Engine) ResyncAll(
 	if err != nil {
 		log.Printf("resync: open temp db: %v", err)
 		restoreSkipCache()
-		stats := SyncStats{
+		stats = SyncStats{
 			Aborted: true,
 			Warnings: []string{
 				"resync failed: " + err.Error(),
@@ -801,7 +835,7 @@ func (e *Engine) ResyncAll(
 		e.mu.Lock()
 		e.lastSyncStats = stats
 		e.mu.Unlock()
-		return stats
+		return
 	}
 
 	// 2b. Copy excluded session IDs from the old DB so that
@@ -814,7 +848,7 @@ func (e *Engine) ResyncAll(
 
 	// 3. Point engine at newDB and sync into it.
 	e.db = newDB
-	stats := e.syncAllLocked(ctx, onProgress, time.Time{})
+	stats = e.syncAllLocked(ctx, onProgress, time.Time{})
 	e.db = origDB // restore immediately
 
 	// Abort swap when the fresh DB would be worse than the
@@ -992,7 +1026,9 @@ func (e *Engine) ResyncAll(
 	e.lastSyncStats = stats
 	e.mu.Unlock()
 
-	return stats
+	// Emission happens via the deferred closure above, after
+	// syncMu is released.
+	return
 }
 
 // removeTempDB removes a temp database and its WAL/SHM files.
@@ -1033,10 +1069,19 @@ func (e *Engine) LastSyncStartedAt() time.Time {
 // SyncAll discovers and syncs all session files from all agents.
 func (e *Engine) SyncAll(
 	ctx context.Context, onProgress ProgressFunc,
-) SyncStats {
+) (stats SyncStats) {
 	e.syncMu.Lock()
+	// Defers run LIFO: Unlock runs before the emit closure so
+	// Emitter implementations cannot widen the syncMu critical
+	// section or deadlock by re-entering sync code.
+	defer func() {
+		if stats.Synced > 0 {
+			e.emit("sessions")
+		}
+	}()
 	defer e.syncMu.Unlock()
-	return e.syncAllLocked(ctx, onProgress, time.Time{})
+	stats = e.syncAllLocked(ctx, onProgress, time.Time{})
+	return
 }
 
 // SyncAllSince syncs only files whose mtime is at or after
@@ -1048,10 +1093,16 @@ func (e *Engine) SyncAll(
 // files that were being written during a prior sync.
 func (e *Engine) SyncAllSince(
 	ctx context.Context, since time.Time, onProgress ProgressFunc,
-) SyncStats {
+) (stats SyncStats) {
 	e.syncMu.Lock()
+	defer func() {
+		if stats.Synced > 0 {
+			e.emit("sessions")
+		}
+	}()
 	defer e.syncMu.Unlock()
-	return e.syncAllLocked(ctx, onProgress, since)
+	stats = e.syncAllLocked(ctx, onProgress, since)
+	return
 }
 
 func (e *Engine) syncAllLocked(
@@ -1233,6 +1284,8 @@ func (e *Engine) syncAllLocked(
 	e.mu.Unlock()
 
 	e.recordSyncFinished()
+	// Emission happens in SyncAll / SyncAllSince after syncMu is
+	// released; syncAllLocked runs under the caller's lock.
 	return stats
 }
 
@@ -3052,8 +3105,16 @@ func (e *Engine) FindSourceFile(sessionID string) string {
 
 // SyncSingleSession re-syncs a single session by its ID and
 // uses the existing DB project as fallback where applicable.
-func (e *Engine) SyncSingleSession(sessionID string) error {
+func (e *Engine) SyncSingleSession(sessionID string) (err error) {
 	e.syncMu.Lock()
+	// Defers run LIFO: unlock runs first (releasing syncMu), then
+	// emit. Keep emission outside the critical section so a future
+	// Emitter implementation can't widen the lock's scope.
+	defer func() {
+		if err == nil {
+			e.emit("messages")
+		}
+	}()
 	defer e.syncMu.Unlock()
 
 	host, _ := parser.StripHostPrefix(sessionID)
@@ -3544,4 +3605,12 @@ func summarizeToolResultEvents(
 		parts = append(parts, lastAnon)
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// emit fires a refresh event if an emitter is wired. Safe to call
+// with a nil emitter.
+func (e *Engine) emit(scope string) {
+	if e.emitter != nil {
+		e.emitter.Emit(scope)
+	}
 }
