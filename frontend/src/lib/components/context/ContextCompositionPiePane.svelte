@@ -88,13 +88,15 @@
 
   .layout {
     display: grid;
-    gap: 16px;
+    grid-template-columns: max-content minmax(140px, 1fr);
+    gap: 18px;
     align-content: start;
+    align-items: center;
   }
 
   .pie-chart {
-    width: 180px;
-    height: 180px;
+    width: 220px;
+    height: 220px;
     justify-self: center;
   }
 
@@ -115,6 +117,7 @@
     display: grid;
     gap: 6px;
     align-content: start;
+    min-width: 140px;
   }
 
   .legend-row {
@@ -149,5 +152,12 @@
     height: 10px;
     border-radius: 999px;
     display: inline-block;
+  }
+
+  @media (max-width: 900px) {
+    .layout {
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }
   }
 </style>
