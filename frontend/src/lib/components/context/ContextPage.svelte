@@ -79,7 +79,7 @@
   });
 </script>
 
-<div class="context-page">
+<div class="context-page" class:embedded>
   {#if !embedded}
     <div class="context-page-header">
       <div>
@@ -123,6 +123,13 @@
     display: grid;
     gap: 16px;
     padding: 16px;
+  }
+
+  .context-page.embedded {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    align-content: start;
   }
 
   .context-page-header {
