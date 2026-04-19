@@ -195,7 +195,7 @@ func computePressure(
 	if peakContextTokens <= 0 || model == "" {
 		return nil
 	}
-	windowSize := lookupWindowSize(model)
+	windowSize := LookupContextWindowSize(model)
 	if windowSize == 0 {
 		return nil
 	}
@@ -203,9 +203,9 @@ func computePressure(
 	return &ratio
 }
 
-// lookupWindowSize finds context window size for a model. Tries
-// exact match first, then prefix match (longest prefix wins).
-func lookupWindowSize(model string) int {
+// LookupContextWindowSize finds the configured context window size
+// for a model. It tries exact match first, then longest-prefix match.
+func LookupContextWindowSize(model string) int {
 	if size, ok := contextWindowSizes[model]; ok {
 		return size
 	}

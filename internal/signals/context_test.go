@@ -257,10 +257,10 @@ func TestLookupWindowSize(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := lookupWindowSize(tt.model)
+			got := LookupContextWindowSize(tt.model)
 			if got != tt.want {
 				t.Errorf(
-					"lookupWindowSize(%q) = %d, want %d",
+					"LookupContextWindowSize(%q) = %d, want %d",
 					tt.model, got, tt.want,
 				)
 			}

@@ -293,7 +293,7 @@
     <nav class="mobile-nav">
       <button
         class="mobile-nav-btn"
-        class:active={router.route === "sessions"}
+        class:active={router.route === "sessions" || router.route === "context"}
         onclick={() => mobileNav("sessions")}
       >
         <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">

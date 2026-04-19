@@ -46,6 +46,14 @@ describe("parsePath", () => {
     expect(result.params).toEqual({});
   });
 
+  it("parses /context/{id}", () => {
+    setURL("/context/abc-123");
+    const result = parsePath();
+    expect(result.route).toBe("context");
+    expect(result.sessionId).toBe("abc-123");
+    expect(result.params).toEqual({});
+  });
+
   it("parses /sessions/{id} with msg param", () => {
     setURL("/sessions/abc-123?msg=5");
     const result = parsePath();
@@ -181,6 +189,15 @@ describe("RouterStore", () => {
       "/sessions/abc-123",
     );
     expect(window.location.search).toBe("?msg=last");
+  });
+
+  it("navigateToContext updates URL to /context/{id}", () => {
+    setURL("/sessions");
+    store = new RouterStore();
+    store.navigateToContext("abc-123");
+    expect(window.location.pathname).toBe("/context/abc-123");
+    expect(store.route).toBe("context");
+    expect(store.sessionId).toBe("abc-123");
   });
 
   it("navigateFromSession returns to /sessions", () => {

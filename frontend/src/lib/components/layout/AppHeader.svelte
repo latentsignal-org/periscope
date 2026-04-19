@@ -225,7 +225,7 @@
 
     <button
       class="nav-btn"
-      class:active={router.route === "sessions"}
+      class:active={router.route === "sessions" || router.route === "context"}
       onclick={() => router.navigate("sessions")}
       title="Sessions"
       aria-label="Sessions"

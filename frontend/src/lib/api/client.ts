@@ -31,6 +31,8 @@ import type {
   Insight,
   InsightsResponse,
   GenerateInsightRequest,
+  SessionContextResponse,
+  SessionContextTimelineResponse,
   PinsResponse,
   TrashResponse,
   UsageSummaryResponse,
@@ -181,6 +183,26 @@ export function getSessionActivity(
 ): Promise<SessionActivityResponse> {
   return fetchJSON(
     `/sessions/${sessionId}/activity`,
+  );
+}
+
+export function getSessionContext(
+  sessionId: string,
+  init?: RequestInit,
+): Promise<SessionContextResponse> {
+  return fetchJSON(
+    `/sessions/${sessionId}/context`,
+    init,
+  );
+}
+
+export function getSessionContextTimeline(
+  sessionId: string,
+  init?: RequestInit,
+): Promise<SessionContextTimelineResponse> {
+  return fetchJSON(
+    `/sessions/${sessionId}/context/timeline`,
+    init,
   );
 }
 

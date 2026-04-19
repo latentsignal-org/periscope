@@ -21,6 +21,7 @@
   import PinnedPage from "./lib/components/pinned/PinnedPage.svelte";
   import TrashPage from "./lib/components/trash/TrashPage.svelte";
   import SettingsPage from "./lib/components/settings/SettingsPage.svelte";
+  import ContextPage from "./lib/components/context/ContextPage.svelte";
   import { sessions, filtersToParams } from "./lib/stores/sessions.svelte.js";
   import { messages } from "./lib/stores/messages.svelte.js";
   import { sync } from "./lib/stores/sync.svelte.js";
@@ -235,9 +236,11 @@
 
   // Deep-link: select session from URL and handle ?msg param.
   $effect(() => {
+    const route = router.route;
     const sid = router.sessionId;
     const msgParam = router.params["msg"] ?? null;
     untrack(() => {
+      if (route !== "sessions") return;
       if (sid) {
         if (sid !== sessions.activeSessionId) {
           sessions.navigateToSession(sid);
@@ -261,6 +264,22 @@
     });
   });
 
+  function sessionTab(): "transcript" | "context" {
+    return router.params["tab"] === "context"
+      ? "context"
+      : "transcript";
+  }
+
+  function setSessionTab(tab: "transcript" | "context") {
+    const next = { ...router.params };
+    if (tab === "context") {
+      next["tab"] = "context";
+    } else {
+      delete next["tab"];
+    }
+    router.replaceParams(next);
+  }
+
   // Resolve msg=last once messages are loaded.
   $effect(() => {
     const pending = ui.pendingScrollOrdinal;
@@ -283,7 +302,11 @@
       if (router.route !== "sessions") return;
       if (activeId === currentUrlSessionId) return;
       if (activeId) {
-        router.navigateToSession(activeId);
+        const params: Record<string, string> = {};
+        if (router.params["tab"] === "context") {
+          params["tab"] = "context";
+        }
+        router.navigateToSession(activeId, params);
       } else {
         router.navigateFromSession(filtersToParams(sessions.filters));
       }
@@ -409,6 +432,10 @@
   <div class="page-scroll">
     <SettingsPage />
   </div>
+{:else if router.route === "context" && router.sessionId}
+  <div class="page-scroll">
+    <ContextPage sessionId={router.sessionId} />
+  </div>
 {:else}
   <ThreeColumnLayout>
     {#snippet sidebar()}
@@ -422,12 +449,40 @@
           session={session}
           onBack={() => sessions.deselectSession()}
         />
-        {#if ui.activityMinimapOpen && sessions.activeSessionId}
+        <div class="session-tabs">
+          <button
+            class:active={sessionTab() === "transcript"}
+            onclick={() => setSessionTab("transcript")}
+          >
+            Transcript
+          </button>
+          <button
+            class:active={sessionTab() === "context"}
+            onclick={() => setSessionTab("context")}
+          >
+            Context
+          </button>
+          <button
+            class="open-standalone"
+            onclick={() => router.navigateToContext(sessions.activeSessionId!)}
+          >
+            Open Standalone
+          </button>
+        </div>
+        {#if ui.activityMinimapOpen && sessions.activeSessionId && sessionTab() === "transcript"}
           <ActivityMinimap
             sessionId={sessions.activeSessionId}
           />
         {/if}
-        <MessageList bind:this={messageListRef} />
+        {#if sessionTab() === "context"}
+          <ContextPage
+            sessionId={sessions.activeSessionId}
+            embedded={true}
+            session={session}
+          />
+        {:else}
+          <MessageList bind:this={messageListRef} />
+        {/if}
       {:else}
         <AnalyticsPage />
       {/if}
@@ -497,6 +552,32 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+  }
+
+  .session-tabs {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 16px 12px;
+  }
+
+  .session-tabs button {
+    border: 1px solid var(--border-default);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    border-radius: 999px;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+
+  .session-tabs button.active {
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--bg-surface) 82%, #0f766e 18%);
+  }
+
+  .session-tabs .open-standalone {
+    margin-left: auto;
   }
 
   .undo-toast {

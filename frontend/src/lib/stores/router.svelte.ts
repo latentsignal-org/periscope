@@ -1,5 +1,6 @@
 export type Route =
   | "sessions"
+  | "context"
   | "usage"
   | "insights"
   | "pinned"
@@ -8,6 +9,7 @@ export type Route =
 
 const VALID_ROUTES: ReadonlySet<string> = new Set<Route>([
   "sessions",
+  "context",
   "usage",
   "insights",
   "pinned",
@@ -46,7 +48,7 @@ export function parsePath(): {
     : DEFAULT_ROUTE;
 
   let sessionId: string | null = null;
-  if (route === "sessions" && segments.length >= 2) {
+  if ((route === "sessions" || route === "context") && segments.length >= 2) {
     try {
       sessionId = decodeURIComponent(segments[1]!);
     } catch {
@@ -139,6 +141,12 @@ export class RouterStore {
     );
   }
 
+  buildContextHref(id: string): string {
+    return this.#buildUrl(
+      `/context/${encodeURIComponent(id)}`,
+    );
+  }
+
   navigate(
     route: Route,
     params: Record<string, string> = {},
@@ -168,6 +176,21 @@ export class RouterStore {
     );
     this.#updateSticky(params);
     this.route = "sessions";
+    this.params = { ...this.#stickyParams, ...params };
+    this.sessionId = id;
+    window.history.pushState(null, "", url);
+  }
+
+  navigateToContext(
+    id: string,
+    params: Record<string, string> = {},
+  ) {
+    const url = this.#buildUrl(
+      `/context/${encodeURIComponent(id)}`,
+      params,
+    );
+    this.#updateSticky(params);
+    this.route = "context";
     this.params = { ...this.#stickyParams, ...params };
     this.sessionId = id;
     window.history.pushState(null, "", url);
