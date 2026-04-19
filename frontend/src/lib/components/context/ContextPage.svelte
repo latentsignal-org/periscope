@@ -14,7 +14,6 @@
   import { router } from "../../stores/router.svelte.js";
   import ContextSummaryCard from "./ContextSummaryCard.svelte";
   import ContextWindowBlocks from "./ContextWindowBlocks.svelte";
-  import ContextCompositionChart from "./ContextCompositionChart.svelte";
   import ContextTimeline from "./ContextTimeline.svelte";
 
   interface Props {
@@ -113,8 +112,8 @@
       summary={summaryData.summary}
       capacity={summaryData.capacity}
       timeline={timelineData.timeline}
+      composition={summaryData.composition}
     />
-    <ContextCompositionChart composition={summaryData.composition} />
     <ContextTimeline timeline={timelineData.timeline} {sessionId} />
   {/if}
 </div>

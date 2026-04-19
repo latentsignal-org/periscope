@@ -1,15 +1,20 @@
 <script lang="ts">
   import type {
     ContextCapacity,
+    ContextCompositionItem,
     ContextSummary,
     ContextTimelineTurn,
   } from "../../api/types.js";
-  import { formatTokenCount } from "../../utils/format.js";
+  import { CATEGORY_COLORS, categoryLabel } from "./context-utils.js";
+  import ContextCompositionPiePane from "./ContextCompositionPiePane.svelte";
+  import ContextTurnSharesPane from "./ContextTurnSharesPane.svelte";
+  import ContextWindowMapPane from "./ContextWindowMapPane.svelte";
 
   interface Props {
     summary: ContextSummary;
     capacity: ContextCapacity;
     timeline: ContextTimelineTurn[];
+    composition: ContextCompositionItem[];
   }
 
   type Segment = {
@@ -31,7 +36,7 @@
     isFree?: boolean;
   };
 
-  let { summary, capacity, timeline }: Props = $props();
+  let { summary, capacity, timeline, composition }: Props = $props();
 
   const TOTAL_BLOCKS = 200;
   const BLOCK_COLUMNS = 20;
@@ -108,11 +113,6 @@
     ].join(" ");
   }
 
-  function turnShare(turnTokens: number): number {
-    if (capacity.max_tokens <= 0) return 0;
-    return (turnTokens / capacity.max_tokens) * 100;
-  }
-
   function allocateBlocks(values: number[], totalBlocks: number): number[] {
     if (totalBlocks <= 0 || values.length === 0) {
       return values.map(() => 0);
@@ -187,7 +187,6 @@
             blocks: blocks[index] ?? 0,
             color: turnColor(index),
             turn: turn.turn,
-            meta: `${Math.round(turnShare(turnTokens[index] ?? turn.delta_tokens))}% of window`,
           }))
         : cappedTokensInUse > 0
           ? [{
@@ -197,7 +196,6 @@
               blocks: blocks[0] ?? 0,
               color: turnColor(0),
               turn: visibleTurns[0]?.turn,
-              meta: `${Math.round(turnShare(cappedTokensInUse))}% of window`,
             }]
           : [];
 
@@ -210,9 +208,6 @@
         blocks: freeBlockCount,
         color: "var(--bg-inset)",
         isFree: true,
-        meta: `${Math.round(
-          Math.max(0, 100 - summary.percent_consumed),
-        )}% of window`,
       });
     }
 
@@ -253,13 +248,30 @@
       return slice;
     }).filter((segment) => segment.tokens > 0);
   });
+
+  const compositionSegments = $derived.by(() => {
+    const items = composition.filter((item) => item.tokens > 0);
+    let startAngle = 0;
+    return items.map((item) => {
+      const sweep = (item.percentage / 100) * 360;
+      const endAngle = startAngle + sweep;
+      const slice = {
+        ...item,
+        label: categoryLabel(item.category),
+        color: CATEGORY_COLORS[item.category] ?? CATEGORY_COLORS.other,
+        path: describeArc(72, 72, 56, startAngle, endAngle),
+      };
+      startAngle = endAngle;
+      return slice;
+    });
+  });
 </script>
 
 <section class="panel">
   <div class="panel-header">
     <div class="header-main">
-      <div class="eyebrow">Window Map</div>
-      <h3>Visible context accumulated across turns</h3>
+      <div class="eyebrow">Context Overview</div>
+      <h3>Visible context by turn and category</h3>
     </div>
   </div>
 
@@ -269,133 +281,24 @@
     </div>
   {:else}
     <div class="viz-layout">
-      <div class="grid-shell">
-        <div class="summary summary-inline">
-          <strong>{formatTokenCount(summary.tokens_in_use)}</strong>
-          <span>
-            {#if capacity.max_tokens > 0}
-              / {formatTokenCount(capacity.max_tokens)} tokens
-            {:else}
-              capacity unknown
-            {/if}
-          </span>
-        </div>
-        <div
-          class="block-grid"
-          style={`grid-template-columns: repeat(${BLOCK_COLUMNS}, 14px);`}
-          aria-label={`Context window split into ${TOTAL_BLOCKS} equal blocks across ${gridRows} rows`}
-        >
-          {#each blocks as block (block.key)}
-            <button
-              type="button"
-              class:free-block={block.isFree}
-              class="block"
-              title={block.label}
-              style={`background:${block.color};`}
-              onclick={() => jumpToTurn(block.turn)}
-              disabled={block.isFree}
-              aria-label={block.turn
-                ? `${block.label}. Jump to turn ${block.turn}`
-                : block.label}
-            ></button>
-          {/each}
-        </div>
-        <div class="grid-meta">
-          <span>{TOTAL_BLOCKS} equal blocks</span>
-          <span>Each block ≈ {formatTokenCount(Math.round(capacity.max_tokens / TOTAL_BLOCKS))}</span>
-        </div>
-      </div>
-
-      <div class="pie-shell">
-        <div class="pie-header">
-          <div class="pie-title">Turn shares</div>
-          <div class="pie-subtitle">Visible window split by turn</div>
-        </div>
-
-        <div class="pie-layout">
-          <svg
-            class="pie-chart"
-            viewBox="0 0 144 144"
-            role="img"
-            aria-label="Turn distribution of visible context"
-          >
-            <circle
-              cx="72"
-              cy="72"
-              r="56"
-              fill="var(--bg-inset)"
-            />
-            {#each pieSegments as segment (segment.key)}
-              <path
-                d={segment.path}
-                fill={segment.color}
-                class="pie-slice"
-                tabindex={segment.isFree ? undefined : 0}
-                role={segment.isFree ? undefined : "button"}
-                aria-label={segment.turn
-                  ? `${segment.label}. Jump to turn ${segment.turn}`
-                  : segment.label}
-                onclick={() => jumpToTurn(segment.turn)}
-                onkeydown={(event) => {
-                  if (segment.isFree) return;
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    jumpToTurn(segment.turn);
-                  }
-                }}
-              />
-            {/each}
-            <circle
-              cx="72"
-              cy="72"
-              r="28"
-              fill="var(--bg-surface)"
-            />
-            <text x="72" y="68" text-anchor="middle" class="pie-center-label">
-              Used
-            </text>
-            <text x="72" y="84" text-anchor="middle" class="pie-center-value">
-              {Math.round(summary.percent_consumed)}%
-            </text>
-          </svg>
-
-          <div class="pie-meta">
-            {#each segments.filter((segment) => !segment.isFree).slice(0, 6) as segment (segment.key)}
-              <button
-                type="button"
-                class="pie-meta-row"
-                onclick={() => jumpToTurn(segment.turn)}
-              >
-                <div class="pie-meta-name">
-                  <span
-                    class="swatch"
-                    style={`background:${segment.color};`}
-                  ></span>
-                  <span>{segment.turn ? `T${segment.turn}` : segment.label}</span>
-                </div>
-                <div class="pie-meta-value">
-                  {Math.round(turnShare(segment.tokens))}%
-                </div>
-              </button>
-            {/each}
-            {#if segments.length > 6}
-              <div class="pie-more">+{segments.filter((segment) => !segment.isFree).length - 6} more turns</div>
-            {/if}
-            <div class="pie-meta-row free-row">
-              <div class="pie-meta-name">
-                <span
-                  class="swatch free-swatch"
-                  style={`background:var(--bg-inset);`}
-                ></span>
-                <span>Free</span>
-              </div>
-              <div class="pie-meta-value">
-                {Math.max(0, 100 - Math.round(summary.percent_consumed))}%
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+      <ContextWindowMapPane
+        {summary}
+        {capacity}
+        {blocks}
+        totalBlocks={TOTAL_BLOCKS}
+        blockColumns={BLOCK_COLUMNS}
+        {gridRows}
+        onJumpToTurn={jumpToTurn}
+      />
+      <ContextTurnSharesPane
+        segments={pieSegments}
+        usedPercent={summary.percent_consumed}
+        onJumpToTurn={jumpToTurn}
+      />
+      <ContextCompositionPiePane
+        tokensInUse={summary.tokens_in_use}
+        segments={compositionSegments}
+      />
     </div>
   {/if}
 </section>
@@ -435,188 +338,11 @@
     color: var(--text-primary);
   }
 
-  .summary {
-    display: grid;
-    gap: 2px;
-    color: var(--text-muted);
-    font-size: 11px;
-  }
-
-  .summary-inline {
-    justify-self: start;
-    margin-bottom: 2px;
-  }
-
-  .summary strong {
-    font-size: 16px;
-    font-weight: 700;
-    color: var(--text-primary);
-  }
-
-  .grid-shell {
-    display: grid;
-    gap: 8px;
-  }
-
   .viz-layout {
     display: grid;
-    grid-template-columns: max-content max-content;
-    gap: 28px;
-    align-items: start;
-    justify-content: start;
-  }
-
-  .block-grid {
-    display: grid;
-    gap: 4px;
-    justify-content: start;
-  }
-
-  .block {
-    width: 14px;
-    height: 14px;
-    border-radius: 4px;
-    border: 0;
-    padding: 0;
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bg-surface) 72%, transparent);
-    cursor: pointer;
-  }
-
-  .free-block {
-    box-shadow: inset 0 0 0 1px var(--border-muted);
-    cursor: default;
-  }
-
-  .block:hover:not(:disabled) {
-    transform: translateY(-1px);
-    box-shadow:
-      inset 0 0 0 1px color-mix(in srgb, var(--bg-surface) 72%, transparent),
-      0 0 0 1px color-mix(in srgb, var(--text-primary) 12%, transparent);
-  }
-
-  .block:focus-visible {
-    outline: 2px solid var(--accent-blue);
-    outline-offset: 2px;
-  }
-
-  .grid-meta {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
-    font-size: 11px;
-    color: var(--text-muted);
-  }
-
-  .pie-shell {
-    display: grid;
-    gap: 10px;
-    align-content: start;
-  }
-
-  .pie-layout {
-    display: grid;
-    grid-template-columns: max-content max-content;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 16px;
     align-items: start;
-  }
-
-  .pie-header {
-    display: grid;
-    gap: 2px;
-  }
-
-  .pie-title {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-
-  .pie-subtitle {
-    font-size: 11px;
-    color: var(--text-muted);
-  }
-
-  .pie-chart {
-    width: 180px;
-    height: 180px;
-    justify-self: center;
-  }
-
-  .pie-slice {
-    cursor: pointer;
-    transition: opacity 0.12s ease;
-  }
-
-  .pie-slice:hover {
-    opacity: 0.86;
-  }
-
-  .pie-slice:focus-visible {
-    outline: 2px solid var(--accent-blue);
-    outline-offset: 2px;
-  }
-
-  .pie-center-label {
-    font-size: 9px;
-    fill: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  .pie-center-value {
-    font-size: 15px;
-    font-weight: 700;
-    fill: var(--text-primary);
-  }
-
-  .pie-meta {
-    display: grid;
-    gap: 6px;
-    min-width: 140px;
-    align-content: start;
-  }
-
-  .pie-meta-row {
-    display: flex;
-    justify-content: space-between;
-    gap: 10px;
-    align-items: center;
-    color: var(--text-muted);
-    font-size: 11px;
-    border: 0;
-    background: transparent;
-    padding: 0;
-    text-align: left;
-  }
-
-  .pie-meta-name {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text-primary);
-    min-width: 0;
-  }
-
-  .pie-meta-value {
-    color: var(--text-muted);
-    white-space: nowrap;
-  }
-
-  .pie-more {
-    font-size: 11px;
-    color: var(--text-muted);
-  }
-
-  .swatch {
-    width: 10px;
-    height: 10px;
-    border-radius: 999px;
-    display: inline-block;
-  }
-
-  .free-swatch {
-    box-shadow: inset 0 0 0 1px var(--border-muted);
   }
 
   .empty-state {
@@ -636,14 +362,6 @@
 
     .viz-layout {
       grid-template-columns: 1fr;
-    }
-
-    .pie-layout {
-      grid-template-columns: 1fr;
-    }
-
-    .summary {
-      text-align: left;
     }
   }
 </style>
