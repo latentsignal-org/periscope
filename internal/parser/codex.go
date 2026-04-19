@@ -206,6 +206,11 @@ func (b *codexSessionBuilder) handleEventMsg(
 //	input_tokens        → input_tokens
 //	output_tokens       → output_tokens
 //	cached_input_tokens → cache_read_input_tokens
+//
+// Codex reports cached_input_tokens as a subset of input_tokens
+// rather than an additive input budget. Keep the cached value in
+// token_usage for cache/cost analysis, but treat context_tokens as
+// the provider-reported input_tokens only.
 func (b *codexSessionBuilder) applyCodexTokenUsage(
 	msg *ParsedMessage, raw string,
 ) {
@@ -226,7 +231,7 @@ func (b *codexSessionBuilder) applyCodexTokenUsage(
 	msg.TokenUsage = j
 	msg.OutputTokens = output
 	msg.HasOutputTokens = output > 0
-	msg.ContextTokens = input + cached
+	msg.ContextTokens = input
 	msg.HasContextTokens = input > 0 || cached > 0
 }
 
