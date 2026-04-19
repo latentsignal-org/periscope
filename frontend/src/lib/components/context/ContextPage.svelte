@@ -16,6 +16,7 @@
   import ContextWindowBlocks from "./ContextWindowBlocks.svelte";
   import ContextTimeline from "./ContextTimeline.svelte";
   import RewindSignalBanner from "./RewindSignalBanner.svelte";
+  import CompactSignalBanner from "./CompactSignalBanner.svelte";
 
   interface Props {
     sessionId: string;
@@ -105,6 +106,9 @@
   {:else if summaryData && timelineData}
     {#if summaryData.rewind_signal}
       <RewindSignalBanner signal={summaryData.rewind_signal} />
+    {/if}
+    {#if summaryData.compact_signal}
+      <CompactSignalBanner signal={summaryData.compact_signal} />
     {/if}
     <ContextSummaryCard
       summary={summaryData.summary}

@@ -46,6 +46,15 @@ export interface RewindSignal {
   bad_stretch_to?: number;
 }
 
+export interface CompactSignal {
+  should_compact: boolean;
+  confidence: string;
+  reasons: string[];
+  score: number;
+  estimated_reclaimable: number;
+  compact_focus?: string[];
+}
+
 export interface SessionContextResponse {
   summary: ContextSummary;
   capacity: ContextCapacity;
@@ -53,6 +62,7 @@ export interface SessionContextResponse {
   supports: ContextSupports;
   warnings?: string[];
   rewind_signal?: RewindSignal;
+  compact_signal?: CompactSignal;
 }
 
 export interface ContextCategoryValue {

@@ -145,12 +145,13 @@ type contextSupports struct {
 }
 
 type sessionContextResponse struct {
-	Summary      contextSummary           `json:"summary"`
-	Capacity     contextCapacity          `json:"capacity"`
-	Composition  []contextCompositionItem `json:"composition"`
-	Supports     contextSupports          `json:"supports"`
-	Warnings     []string                 `json:"warnings,omitempty"`
-	RewindSignal *signals.RewindSignal    `json:"rewind_signal,omitempty"`
+	Summary       contextSummary           `json:"summary"`
+	Capacity      contextCapacity          `json:"capacity"`
+	Composition   []contextCompositionItem `json:"composition"`
+	Supports      contextSupports          `json:"supports"`
+	Warnings      []string                 `json:"warnings,omitempty"`
+	RewindSignal  *signals.RewindSignal    `json:"rewind_signal,omitempty"`
+	CompactSignal *signals.CompactSignal   `json:"compact_signal,omitempty"`
 }
 
 type sessionContextTimelineResponse struct {
@@ -160,13 +161,14 @@ type sessionContextTimelineResponse struct {
 }
 
 type sessionContextView struct {
-	Summary      contextSummary
-	Capacity     contextCapacity
-	Composition  []contextCompositionItem
-	Timeline     []contextTimelineTurn
-	Supports     contextSupports
-	Warnings     []string
-	RewindSignal *signals.RewindSignal
+	Summary       contextSummary
+	Capacity      contextCapacity
+	Composition   []contextCompositionItem
+	Timeline      []contextTimelineTurn
+	Supports      contextSupports
+	Warnings      []string
+	RewindSignal  *signals.RewindSignal
+	CompactSignal *signals.CompactSignal
 }
 
 type contextRowCalc struct {
@@ -197,12 +199,13 @@ func (s *Server) handleGetSessionContext(
 	}
 
 	writeJSON(w, http.StatusOK, sessionContextResponse{
-		Summary:      view.Summary,
-		Capacity:     view.Capacity,
-		Composition:  view.Composition,
-		Supports:     view.Supports,
-		Warnings:     view.Warnings,
-		RewindSignal: view.RewindSignal,
+		Summary:       view.Summary,
+		Capacity:      view.Capacity,
+		Composition:   view.Composition,
+		Supports:      view.Supports,
+		Warnings:      view.Warnings,
+		RewindSignal:  view.RewindSignal,
+		CompactSignal: view.CompactSignal,
 	})
 }
 
@@ -347,6 +350,14 @@ func computeSessionContextView(
 		rewindPtr = &rewindSig
 	}
 
+	// V2 debug: compute compact signal
+	compactInput := buildCompactInput(timeline, compositionTotals, currentTokens, capacity, compactionTrimmed)
+	compactSig := signals.DetectCompactCandidate(compactInput)
+	var compactPtr *signals.CompactSignal
+	if compactSig.ShouldCompact {
+		compactPtr = &compactSig
+	}
+
 	return sessionContextView{
 		Summary: contextSummary{
 			TokensInUse:         currentTokens,
@@ -371,8 +382,9 @@ func computeSessionContextView(
 			RowGranularity:    "turn",
 			CompactionTrimmed: compactionTrimmed,
 		},
-		Warnings:     warnings,
-		RewindSignal: rewindPtr,
+		Warnings:      warnings,
+		RewindSignal:  rewindPtr,
+		CompactSignal: compactPtr,
 	}
 }
 
@@ -1130,4 +1142,77 @@ func buildRewindTurns(
 func isEditFailureContent(content string) bool {
 	return strings.Contains(content, "FAILED") ||
 		strings.Contains(content, "error")
+}
+
+// buildCompactInput constructs the signals.CompactInput from
+// the timeline, composition, and capacity data already computed.
+func buildCompactInput(
+	timeline []contextTimelineTurn,
+	compositionTotals map[string]int,
+	currentTokens int,
+	capacity contextCapacity,
+	alreadyCompacted bool,
+) signals.CompactInput {
+	turnCount := len(timeline)
+
+	// Split turns into "recent" (last 20%) and "older"
+	recentCount := max(1, turnCount/5)
+	olderCount := turnCount - recentCount
+
+	var recentTokens, olderTokens int
+	for i, turn := range timeline {
+		if i < olderCount {
+			olderTokens += turn.DeltaTokens
+		} else {
+			recentTokens += turn.DeltaTokens
+		}
+	}
+
+	// Compute median delta and recent growth rate
+	medianDelta := 0
+	recentGrowthRate := 0.0
+	if turnCount >= 3 {
+		deltas := make([]int, 0, turnCount)
+		for _, t := range timeline {
+			if t.DeltaTokens > 0 {
+				deltas = append(deltas, t.DeltaTokens)
+			}
+		}
+		if len(deltas) >= 3 {
+			sortIntsSlice(deltas)
+			medianDelta = deltas[len(deltas)/2]
+		}
+
+		// Average delta of last 5 turns (or fewer)
+		if medianDelta > 0 {
+			last := min(5, turnCount)
+			recentSum := 0
+			for i := turnCount - last; i < turnCount; i++ {
+				recentSum += timeline[i].DeltaTokens
+			}
+			avgRecent := float64(recentSum) / float64(last)
+			recentGrowthRate = avgRecent / float64(medianDelta)
+		}
+	}
+
+	return signals.CompactInput{
+		TokensInUse:       currentTokens,
+		MaxContextTokens:  capacity.MaxTokens,
+		Composition:       compositionTotals,
+		TurnCount:         turnCount,
+		AlreadyCompacted:  alreadyCompacted,
+		RecentTurnCount:   recentCount,
+		RecentTurnTokens:  recentTokens,
+		OlderTurnTokens:   olderTokens,
+		MedianDeltaTokens: medianDelta,
+		RecentGrowthRate:  recentGrowthRate,
+	}
+}
+
+func sortIntsSlice(a []int) {
+	for i := 1; i < len(a); i++ {
+		for j := i; j > 0 && a[j] < a[j-1]; j-- {
+			a[j], a[j-1] = a[j-1], a[j]
+		}
+	}
 }
