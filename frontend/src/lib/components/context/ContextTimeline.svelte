@@ -14,6 +14,9 @@
 
   let { timeline, sessionId }: Props = $props();
 
+  let reversed = $state(false);
+  let displayTimeline = $derived(reversed ? [...timeline].reverse() : timeline);
+
   type GroupedItem =
     | { type: "single"; entry: ContextTimelineEntry; key: string }
     | { type: "tool_group"; entries: ContextTimelineEntry[]; key: string };
@@ -118,13 +121,27 @@
 </script>
 
 <section class="panel">
-  <div>
-    <div class="eyebrow">Timeline</div>
-    <h3>Visible history, row by row</h3>
+  <div class="panel-header">
+    <div>
+      <div class="eyebrow">Timeline</div>
+      <h3>Visible history, row by row</h3>
+    </div>
+    <button
+      type="button"
+      class="sort-btn"
+      onclick={() => (reversed = !reversed)}
+      title={reversed ? "Showing newest first — click to show oldest first" : "Showing oldest first — click to show newest first"}
+      aria-label={reversed ? "Sort oldest first" : "Sort newest first"}
+    >
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+        <path d="M4 2a.5.5 0 0 1 .5.5v9.793l2.146-2.147a.5.5 0 0 1 .708.708l-3 3a.5.5 0 0 1-.708 0l-3-3a.5.5 0 0 1 .708-.708L3.5 12.293V2.5A.5.5 0 0 1 4 2zm8 0a.5.5 0 0 1 .354.146l3 3a.5.5 0 0 1-.708.708L12.5 3.707V13.5a.5.5 0 0 1-1 0V3.707l-2.146 2.147a.5.5 0 1 1-.708-.708l3-3A.5.5 0 0 1 12 2z"/>
+      </svg>
+      {reversed ? "Newest first" : "Oldest first"}
+    </button>
   </div>
 
   <div class="rows">
-    {#each timeline as turn (turn.turn)}
+    {#each displayTimeline as turn (turn.turn)}
       <details
         id={`context-turn-${turn.turn}`}
         class:compaction-row={turn.markers?.includes("compaction")}
@@ -176,7 +193,11 @@
                 {/each}
               </div>
             </div>
-            <div class="chevron" aria-hidden="true">▾</div>
+            <div class="chevron" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/>
+              </svg>
+            </div>
           </div>
         </summary>
 
@@ -260,6 +281,35 @@
     padding: 12px;
     display: grid;
     gap: 12px;
+  }
+
+  .panel-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .sort-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    border: 1px solid var(--border-muted);
+    border-radius: var(--radius-md);
+    background: var(--bg-inset);
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.1s, color 0.1s;
+    flex-shrink: 0;
+  }
+
+  .sort-btn:hover {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
   }
 
   .eyebrow {
@@ -378,7 +428,10 @@
     color: var(--text-muted);
     transition: transform 0.15s ease;
     transform-origin: center;
-    padding-top: 3px;
+    padding-top: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   details[open] .chevron {
