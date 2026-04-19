@@ -174,3 +174,29 @@ func TestWorkerEnabled(t *testing.T) {
 		t.Fatalf("Enabled() = false with non-nil client")
 	}
 }
+
+func TestWorkerProcess_PersistsFallbackSummaryOnParseFailure(t *testing.T) {
+	store := &fakeStore{
+		messages: []db.Message{
+			{Ordinal: 1, Role: "user", Content: "Debug the failing test in internal/server/context.go"},
+			{Ordinal: 2, Role: "assistant", Content: "Investigated the failing test."},
+		},
+	}
+	client := &fakeClient{resp: "```json"}
+	w := NewWorker(store, client, WorkerOptions{})
+
+	hadErrors := w.process(context.Background(), "sess-1")
+
+	if hadErrors {
+		t.Fatal("process reported errors, want fallback summary to avoid retry loop")
+	}
+	if len(store.summaries) != 1 {
+		t.Fatalf("summaries = %d, want 1", len(store.summaries))
+	}
+	if store.summaries[0].Summary == "" {
+		t.Fatal("persisted fallback summary is empty")
+	}
+	if store.summaries[0].Model == "" {
+		t.Fatal("persisted fallback model is empty")
+	}
+}
