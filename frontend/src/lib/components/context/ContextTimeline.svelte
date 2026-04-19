@@ -1,5 +1,8 @@
 <script lang="ts">
-  import type { ContextTimelineTurn } from "../../api/types.js";
+  import type {
+    ContextTimelineEntry,
+    ContextTimelineTurn,
+  } from "../../api/types.js";
   import { formatTimestamp, formatTokenCount } from "../../utils/format.js";
   import { CATEGORY_COLORS, categoryLabel } from "./context-utils.js";
   import { router } from "../../stores/router.svelte.js";
@@ -10,6 +13,50 @@
   }
 
   let { timeline, sessionId }: Props = $props();
+
+  type GroupedItem =
+    | { type: "single"; entry: ContextTimelineEntry; key: string }
+    | { type: "tool_group"; entries: ContextTimelineEntry[]; key: string };
+
+  function groupEntries(
+    entries: ContextTimelineEntry[] | undefined,
+  ): GroupedItem[] {
+    if (!entries?.length) return [];
+    const grouped: GroupedItem[] = [];
+    let toolBuffer: ContextTimelineEntry[] = [];
+
+    const flushTools = () => {
+      if (toolBuffer.length === 0) return;
+      grouped.push({
+        type: "tool_group",
+        entries: toolBuffer,
+        key: `tools-${toolBuffer[0].ordinal}-${toolBuffer.length}`,
+      });
+      toolBuffer = [];
+    };
+
+    for (const entry of entries) {
+      if (entry.kind === "tool_call") {
+        toolBuffer.push(entry);
+        continue;
+      }
+      flushTools();
+      // Skip assistant wrappers that only existed to carry tool calls.
+      if (
+        entry.kind === "assistant_message" &&
+        !entry.preview?.trim()
+      ) {
+        continue;
+      }
+      grouped.push({
+        type: "single",
+        entry,
+        key: `${entry.kind}-${entry.ordinal}`,
+      });
+    }
+    flushTools();
+    return grouped;
+  }
 
   function markerLabel(marker: string): string {
     switch (marker) {
@@ -38,6 +85,32 @@
         return "Tool";
       default:
         return kind;
+    }
+  }
+
+  function entryKindClass(kind: string): string {
+    switch (kind) {
+      case "user_message":
+        return "entry-user";
+      case "assistant_message":
+        return "entry-assistant";
+      case "tool_call":
+        return "entry-tool";
+      default:
+        return "entry-other";
+    }
+  }
+
+  function entryIcon(kind: string): string {
+    switch (kind) {
+      case "user_message":
+        return "U";
+      case "assistant_message":
+        return "A";
+      case "tool_call":
+        return "T";
+      default:
+        return "•";
     }
   }
 </script>
@@ -102,21 +175,57 @@
         </summary>
 
         <div class="turn-children">
-          {#each turn.entries ?? [] as entry, i (`${entry.kind}-${entry.ordinal}-${i}`)}
-            <button
-              type="button"
-              class="entry-row"
-              onclick={() => jumpToTranscript(entry.ordinal)}
-            >
-              <div class="entry-kind">{entryKindLabel(entry.kind)}</div>
-              <div class="entry-content">
-                <div class="entry-label">{entry.label}</div>
-                {#if entry.preview}
-                  <div class="entry-preview">{entry.preview}</div>
+          {#each groupEntries(turn.entries) as item (item.key)}
+            {#if item.type === "single"}
+              <button
+                type="button"
+                class={`entry-row ${entryKindClass(item.entry.kind)}`}
+                onclick={() => jumpToTranscript(item.entry.ordinal)}
+              >
+                <div class="entry-header">
+                  <span class="entry-icon">{entryIcon(item.entry.kind)}</span>
+                  <span class="entry-label">{entryKindLabel(item.entry.kind)}</span>
+                  <span class="entry-ordinal">#{item.entry.ordinal}</span>
+                </div>
+                {#if item.entry.preview}
+                  <div class="entry-preview">{item.entry.preview}</div>
                 {/if}
+              </button>
+            {:else}
+              <div class="tool-group">
+                <div class="tool-group-header">
+                  <svg
+                    class="gear-icon"
+                    width="12" height="12" viewBox="0 0 16 16"
+                    fill="var(--accent-amber)"
+                    aria-hidden="true"
+                  >
+                    <path d="M8 4.754a3.246 3.246 0 100 6.492 3.246 3.246 0 000-6.492zM5.754 8a2.246 2.246 0 114.492 0 2.246 2.246 0 01-4.492 0z"/>
+                    <path d="M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 01-1.255.52l-.292-.16c-1.64-.892-3.433.902-2.54 2.541l.159.292a.873.873 0 01-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 01.52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 011.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 011.255-.52l.292.16c1.64.893 3.434-.902 2.54-2.541l-.159-.292a.873.873 0 01.52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 01-.52-1.255l.16-.292c.893-1.64-.902-3.433-2.541-2.54l-.292.159a.873.873 0 01-1.255-.52l-.094-.319z"/>
+                  </svg>
+                  <span class="group-label">
+                    {item.entries.length === 1
+                      ? "1 tool call"
+                      : `${item.entries.length} tool calls`}
+                  </span>
+                </div>
+                <div class="tool-group-body">
+                  {#each item.entries as tool, i (`${tool.ordinal}-${i}`)}
+                    <button
+                      type="button"
+                      class="tool-row"
+                      onclick={() => jumpToTranscript(tool.ordinal)}
+                    >
+                      <span class="tool-chevron" aria-hidden="true">›</span>
+                      <span class="tool-name">{tool.label}</span>
+                      {#if tool.preview}
+                        <span class="tool-snippet">{tool.preview}</span>
+                      {/if}
+                    </button>
+                  {/each}
+                </div>
               </div>
-              <div class="entry-ordinal">#{entry.ordinal}</div>
-            </button>
+            {/if}
           {/each}
 
           {#each turn.annotations ?? [] as annotation}
@@ -190,7 +299,6 @@
   .row-time,
   .marker,
   .category-summary,
-  .entry-kind,
   .entry-ordinal,
   .annotation {
     font-size: 11px;
@@ -271,50 +379,169 @@
 
   .entry-row {
     width: 100%;
-    border: 1px solid var(--border-muted);
+    border: none;
+    border-left: 4px solid var(--border-default);
     background: var(--bg-inset);
     color: var(--text-primary);
-    border-radius: var(--radius-sm);
-    padding: 8px 10px;
+    border-radius: 0 var(--radius-md) var(--radius-md) 0;
+    padding: 10px 14px;
     display: grid;
-    grid-template-columns: 88px minmax(0, 1fr) 52px;
-    gap: 12px;
-    align-items: start;
+    gap: 6px;
     text-align: left;
     cursor: pointer;
-    transition: background 0.1s, border-color 0.1s;
+    transition: filter 0.12s ease;
   }
 
   .entry-row:hover {
-    background: var(--bg-surface-hover);
-    border-color: var(--border-default);
+    filter: brightness(0.97);
   }
 
-  .entry-kind {
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+  :global(.dark) .entry-row:hover {
+    filter: brightness(1.15);
+  }
+
+  .entry-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .entry-icon {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
     font-weight: 700;
-    color: var(--text-secondary);
-  }
-
-  .entry-content {
-    display: grid;
-    gap: 2px;
+    color: white;
+    background: var(--text-muted);
+    flex-shrink: 0;
+    line-height: 1;
   }
 
   .entry-label {
     font-size: 12px;
     font-weight: 600;
+    letter-spacing: 0.01em;
+    color: var(--text-secondary);
+  }
+
+  .entry-tool-name {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-muted);
+    border-radius: var(--radius-sm);
+    padding: 1px 6px;
+  }
+
+  .entry-ordinal {
+    margin-left: auto;
+    text-align: right;
   }
 
   .entry-preview {
     font-size: 12px;
-    line-height: 1.4;
-    color: var(--text-secondary);
+    line-height: 1.45;
+    color: var(--text-primary);
+    padding-left: 28px;
   }
 
-  .entry-ordinal {
-    text-align: right;
+  .entry-user {
+    background: var(--user-bg);
+    border-left-color: var(--accent-blue);
+  }
+  .entry-user .entry-icon { background: var(--accent-blue); }
+  .entry-user .entry-label { color: var(--accent-blue); }
+
+  .entry-assistant {
+    background: var(--assistant-bg);
+    border-left-color: var(--accent-purple);
+  }
+  .entry-assistant .entry-icon { background: var(--accent-purple); }
+  .entry-assistant .entry-label { color: var(--accent-purple); }
+
+  .entry-tool {
+    background: var(--tool-bg);
+    border-left-color: var(--accent-amber);
+  }
+  .entry-tool .entry-icon { background: var(--accent-amber); }
+  .entry-tool .entry-label { color: var(--accent-amber); }
+
+  .tool-group {
+    border-left: 4px solid var(--accent-amber);
+    background: var(--tool-bg);
+    border-radius: 0 var(--radius-md) var(--radius-md) 0;
+    padding: 10px 14px;
+    display: grid;
+    gap: 6px;
+  }
+
+  .tool-group-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .gear-icon {
+    flex-shrink: 0;
+  }
+
+  .group-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent-amber);
+  }
+
+  .tool-group-body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-left: 20px;
+  }
+
+  .tool-row {
+    width: 100%;
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    padding: 3px 6px;
+    border-radius: var(--radius-sm);
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    text-align: left;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    transition: background 0.1s;
+  }
+
+  .tool-row:hover {
+    background: var(--bg-surface-hover);
+  }
+
+  .tool-chevron {
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  .tool-name {
+    color: var(--text-secondary);
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+
+  .tool-snippet {
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
   }
 
   .annotation {
@@ -332,14 +559,6 @@
 
     .turn-children {
       margin-left: 0;
-    }
-
-    .entry-row {
-      grid-template-columns: 1fr;
-    }
-
-    .entry-ordinal {
-      text-align: left;
     }
   }
 </style>

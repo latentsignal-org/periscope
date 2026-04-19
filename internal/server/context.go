@@ -6,11 +6,25 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/wesm/agentsview/internal/db"
 	"github.com/wesm/agentsview/internal/signals"
+)
+
+// toolBlockRE strips inline tool-call markup like
+// "[Bash]\n$ ls" or "[Read /foo]\n..." from assistant prose so
+// previews don't repeat what the tool-call group already shows.
+// Mirrors TOOL_RE in frontend/src/lib/utils/content-parser.ts.
+var toolBlockRE = regexp.MustCompile(
+	`\[(Tool|Read|Write|Edit|Bash|Glob|Grep|Other|TaskCreate|` +
+		`TaskUpdate|TaskGet|TaskList|Task|Agent|Skill|SendMessage|` +
+		`Question|Todo List|Entering Plan Mode|Exiting Plan Mode|` +
+		`exec_command|shell_command|write_stdin|apply_patch|shell|` +
+		`parallel|view_image|request_user_input|update_plan)` +
+		`[^\]]*\][\s\S]*?(?:\n\[|\n\n|$)`,
 )
 
 const (
@@ -902,9 +916,27 @@ func sortedCategoryValues(totals map[string]int) []contextCategoryValue {
 }
 
 func messagePreview(msg db.Message) string {
-	content := strings.TrimSpace(removeThinkingBlocks(msg.Content))
+	content := removeThinkingBlocks(msg.Content)
+	content = stripToolBlocks(content)
+	content = strings.TrimSpace(content)
 	content = strings.Join(strings.Fields(content), " ")
 	return truncatePreview(content, 180)
+}
+
+// stripToolBlocks removes inline tool-call markup from prose
+// while preserving any trailing delimiter (\n[ or \n\n) that
+// separates it from the next block.
+func stripToolBlocks(content string) string {
+	return toolBlockRE.ReplaceAllStringFunc(content, func(m string) string {
+		switch {
+		case strings.HasSuffix(m, "\n["):
+			return "\n["
+		case strings.HasSuffix(m, "\n\n"):
+			return "\n\n"
+		default:
+			return ""
+		}
+	})
 }
 
 func removeThinkingBlocks(content string) string {
