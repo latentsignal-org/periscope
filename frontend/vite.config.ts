@@ -1,6 +1,10 @@
 import { execSync } from "node:child_process";
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
+import {
+  applyDevProxyHeaders,
+  getDevProxyTarget,
+} from "./dev-proxy";
 
 function gitCommit(): string {
   try {
@@ -26,8 +30,13 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:8080",
+        target: getDevProxyTarget(process.env),
         changeOrigin: true,
+        configure(proxy, options) {
+          proxy.on("proxyReq", (proxyReq) => {
+            applyDevProxyHeaders(proxyReq, String(options.target));
+          });
+        },
       },
     },
   },

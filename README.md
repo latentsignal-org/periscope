@@ -151,6 +151,13 @@ make build          # build binary with embedded frontend
 make install        # install to ~/.local/bin
 ```
 
+If `make dev` auto-selects a port other than `8080`, point the Vite proxy at
+that backend before starting the frontend dev server:
+
+```bash
+AGENTSVIEW_DEV_PROXY_TARGET=http://127.0.0.1:8081 make frontend-dev
+```
+
 ```bash
 make test           # Go tests (CGO_ENABLED=1 -tags fts5)
 make lint           # golangci-lint
