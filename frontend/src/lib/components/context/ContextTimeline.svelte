@@ -125,7 +125,11 @@
 
   <div class="rows">
     {#each timeline as turn (turn.turn)}
-      <details class:compaction-row={turn.markers?.includes("compaction")} class="turn-shell">
+      <details
+        id={`context-turn-${turn.turn}`}
+        class:compaction-row={turn.markers?.includes("compaction")}
+        class="turn-shell"
+      >
         <summary class="turn-summary">
           <div class="turn-summary-grid">
             <div class="ordinal">

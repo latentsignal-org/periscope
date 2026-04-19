@@ -13,6 +13,7 @@
   } from "../../api/types.js";
   import { router } from "../../stores/router.svelte.js";
   import ContextSummaryCard from "./ContextSummaryCard.svelte";
+  import ContextWindowBlocks from "./ContextWindowBlocks.svelte";
   import ContextCompositionChart from "./ContextCompositionChart.svelte";
   import ContextTimeline from "./ContextTimeline.svelte";
 
@@ -107,6 +108,11 @@
       capacity={summaryData.capacity}
       session={sessionData}
       warnings={summaryData.warnings ?? []}
+    />
+    <ContextWindowBlocks
+      summary={summaryData.summary}
+      capacity={summaryData.capacity}
+      timeline={timelineData.timeline}
     />
     <ContextCompositionChart composition={summaryData.composition} />
     <ContextTimeline timeline={timelineData.timeline} {sessionId} />
