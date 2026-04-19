@@ -24,6 +24,11 @@
     return `${Math.round(value)}%`;
   }
 
+  let remainingPercent = $derived.by(() => {
+    if (!summary.remaining_known || capacity.max_tokens <= 0) return NaN;
+    return (summary.remaining_tokens / capacity.max_tokens) * 100;
+  });
+
   function provenanceTooltip(value: string): string {
     switch (value) {
       case "measured":
@@ -61,14 +66,16 @@
       </div>
     </div>
     <div class="occupancy">
-      <div class="tokens">{formatTokenCount(summary.tokens_in_use)}</div>
-      <div class="tokens-meta">
+      <div class="tokens">
+        {formatTokenCount(summary.tokens_in_use)}
         {#if capacity.max_tokens > 0}
-          of {formatTokenCount(capacity.max_tokens)} tokens
-        {:else}
-          capacity unknown
+          <span class="tokens-of">of {formatTokenCount(capacity.max_tokens)}</span>
+          <span class="tokens-pct">({percentLabel(summary.percent_consumed)})</span>
         {/if}
       </div>
+      {#if capacity.max_tokens <= 0}
+        <div class="tokens-meta">capacity unknown</div>
+      {/if}
     </div>
   </div>
 
@@ -82,13 +89,19 @@
   <div class="stats-grid">
     <div class="stat" title={provenanceTooltip(summary.tokens_provenance)}>
       <span class="label">Used</span>
-      <strong>{percentLabel(summary.percent_consumed)}</strong>
+      <strong>
+        {formatTokenCount(summary.tokens_in_use)}
+        {#if capacity.max_tokens > 0}
+          <span class="stat-pct">({percentLabel(summary.percent_consumed)})</span>
+        {/if}
+      </strong>
     </div>
     <div class="stat" title={provenanceTooltip(capacity.provenance)}>
       <span class="label">Remaining</span>
       <strong>
         {#if summary.remaining_known}
           {formatTokenCount(summary.remaining_tokens)}
+          <span class="stat-pct">({percentLabel(remainingPercent)})</span>
         {:else}
           —
         {/if}
@@ -185,6 +198,19 @@
     font-size: 11px;
     color: var(--text-muted);
     margin-top: 4px;
+  }
+
+  .tokens-of,
+  .tokens-pct {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-muted);
+  }
+
+  .stat-pct {
+    font-weight: 500;
+    color: var(--text-muted);
+    margin-left: 2px;
   }
 
   .meter-shell {
