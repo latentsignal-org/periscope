@@ -48,7 +48,7 @@
           {sync.serverVersion?.version ?? "unknown"}.
         </p>
         <p class="update-instructions">
-          Run <code>agentsview update</code> on the command
+          Run <code>periscope update</code> on the command
           line to install.
         </p>
       {:else}

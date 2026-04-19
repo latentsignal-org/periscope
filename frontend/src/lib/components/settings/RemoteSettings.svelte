@@ -87,7 +87,7 @@
 
 <SettingsSection
   title="Remote Access"
-  description="Connect to a remote agentsview server or enable remote access for this instance."
+  description="Connect to a remote Periscope server or enable remote access for this instance."
 >
   {#if !isRemote}
     <div class="subsection">
