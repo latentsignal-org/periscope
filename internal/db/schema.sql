@@ -264,6 +264,33 @@ CREATE TABLE IF NOT EXISTS pg_sync_state (
     value TEXT NOT NULL
 );
 
+-- Per-turn LLM summaries (Periscope V2 Phase A).
+-- Content-addressed: the same (session_id, turn_index, content_hash)
+-- only ever has one row, so a resummarise for a changed turn lands in
+-- a different row and both survive.
+CREATE TABLE IF NOT EXISTS context_turn_summaries (
+    id              INTEGER PRIMARY KEY,
+    session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    turn_index      INTEGER NOT NULL,
+    start_ordinal   INTEGER NOT NULL,
+    end_ordinal     INTEGER NOT NULL,
+    content_hash    TEXT NOT NULL,
+    summary         TEXT NOT NULL,
+    intent          TEXT NOT NULL DEFAULT '',
+    outcome         TEXT NOT NULL DEFAULT '',
+    topic           TEXT NOT NULL DEFAULT '',
+    files_touched   TEXT NOT NULL DEFAULT '[]',
+    tags            TEXT NOT NULL DEFAULT '[]',
+    model           TEXT NOT NULL DEFAULT '',
+    prompt_version  INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT NOT NULL
+        DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE(session_id, turn_index, content_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_context_turn_summaries_session
+    ON context_turn_summaries(session_id, turn_index);
+
 -- Model pricing for cost calculation
 CREATE TABLE IF NOT EXISTS model_pricing (
     model_pattern    TEXT PRIMARY KEY,

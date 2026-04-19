@@ -16,9 +16,11 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/wesm/agentsview/internal/config"
 	"github.com/wesm/agentsview/internal/db"
+	"github.com/wesm/agentsview/internal/llm"
 	"github.com/wesm/agentsview/internal/parser"
 	"github.com/wesm/agentsview/internal/server"
 	"github.com/wesm/agentsview/internal/signals"
+	"github.com/wesm/agentsview/internal/summarize"
 	"github.com/wesm/agentsview/internal/sync"
 )
 
@@ -192,6 +194,8 @@ func runServe(cfg config.Config) {
 	}
 	cfg = preparedCfg
 
+	summarizer := startSummarizer(ctx, database, broadcaster)
+
 	srv := server.New(cfg, database, engine,
 		server.WithVersion(server.VersionInfo{
 			Version:   version,
@@ -201,6 +205,7 @@ func runServe(cfg config.Config) {
 		server.WithDataDir(cfg.DataDir),
 		server.WithBaseContext(ctx),
 		server.WithBroadcaster(broadcaster),
+		server.WithSummarizer(summarizer),
 	)
 
 	rt, err := startServerWithOptionalCaddy(ctx, cfg, srv, rtOpts)
@@ -539,6 +544,31 @@ func recomputePendingSessions(
 		// pass will retry any that failed.
 		_ = engine.RecomputeSignals(context.Background(), id)
 	}
+}
+
+// startSummarizer builds the turn-summary worker, starts its run
+// loop, and kicks off a boot-time reconcile over starred sessions.
+// Returns nil when ANTHROPIC_API_KEY is unset — the server then
+// treats summarisation as disabled.
+func startSummarizer(
+	ctx context.Context,
+	database *db.DB,
+	broadcaster *server.Broadcaster,
+) *summarize.Worker {
+	client, ok := llm.NewFromEnv()
+	if !ok {
+		log.Printf(
+			"summarize: ANTHROPIC_API_KEY unset; " +
+				"turn summaries disabled",
+		)
+		return nil
+	}
+	w := summarize.NewWorker(database, client, summarize.WorkerOptions{
+		Notifier: func(string) { broadcaster.Emit("context") },
+	})
+	go w.Run(ctx)
+	go w.ReconcileStarred(ctx)
+	return w
 }
 
 func startUnwatchedPoll(engine *sync.Engine) {

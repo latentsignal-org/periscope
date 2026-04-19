@@ -17,6 +17,7 @@ import (
 	"github.com/wesm/agentsview/internal/config"
 	"github.com/wesm/agentsview/internal/db"
 	"github.com/wesm/agentsview/internal/insight"
+	"github.com/wesm/agentsview/internal/summarize"
 	"github.com/wesm/agentsview/internal/sync"
 	"github.com/wesm/agentsview/internal/web"
 )
@@ -49,6 +50,12 @@ type Server struct {
 	generateStreamFunc insight.GenerateStreamFunc
 	spaFS              fs.FS
 	spaHandler         http.Handler
+
+	// summarizer produces per-turn LLM summaries for starred
+	// sessions. Optional: when nil (no ANTHROPIC_API_KEY), the
+	// star handler skips enqueue and the /context response reports
+	// summary_coverage.status = "disabled".
+	summarizer *summarize.Worker
 
 	// handlerDelay is injected before each timeout-wrapped
 	// handler, used only by tests to guarantee handlers
@@ -112,6 +119,13 @@ func WithDataDir(dir string) Option {
 // exit and unblocking graceful shutdown.
 func WithBaseContext(ctx context.Context) Option {
 	return func(s *Server) { s.baseCtx = ctx }
+}
+
+// WithSummarizer wires a turn-summary worker into the server. When
+// set, starring a session enqueues it for summarisation and the
+// /context response includes summary_coverage metadata.
+func WithSummarizer(w *summarize.Worker) Option {
+	return func(s *Server) { s.summarizer = w }
 }
 
 // WithBroadcaster wires an event broadcaster into the server so the

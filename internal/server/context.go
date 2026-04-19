@@ -145,13 +145,28 @@ type contextSupports struct {
 }
 
 type sessionContextResponse struct {
-	Summary       contextSummary           `json:"summary"`
-	Capacity      contextCapacity          `json:"capacity"`
-	Composition   []contextCompositionItem `json:"composition"`
-	Supports      contextSupports          `json:"supports"`
-	Warnings      []string                 `json:"warnings,omitempty"`
-	RewindSignal  *signals.RewindSignal    `json:"rewind_signal,omitempty"`
-	CompactSignal *signals.CompactSignal   `json:"compact_signal,omitempty"`
+	Summary         contextSummary           `json:"summary"`
+	Capacity        contextCapacity          `json:"capacity"`
+	Composition     []contextCompositionItem `json:"composition"`
+	Supports        contextSupports          `json:"supports"`
+	Warnings        []string                 `json:"warnings,omitempty"`
+	RewindSignal    *signals.RewindSignal    `json:"rewind_signal,omitempty"`
+	CompactSignal   *signals.CompactSignal   `json:"compact_signal,omitempty"`
+	SummaryCoverage *summaryCoverage         `json:"summary_coverage,omitempty"`
+}
+
+// summaryCoverage reports how much of the session has per-turn
+// LLM summaries. Status is one of:
+//   - "disabled": no ANTHROPIC_API_KEY configured, no summaries generated
+//   - "idle":     summariser enabled but session not starred
+//   - "pending":  starred, some (possibly zero) turns summarised
+//   - "complete": every turn has a summary
+type summaryCoverage struct {
+	Status          string `json:"status"`
+	TotalTurns      int    `json:"total_turns"`
+	SummarisedTurns int    `json:"summarised_turns"`
+	Starred         bool   `json:"starred"`
+	LastUpdatedAt   string `json:"last_updated_at,omitempty"`
 }
 
 type sessionContextTimelineResponse struct {
@@ -161,14 +176,15 @@ type sessionContextTimelineResponse struct {
 }
 
 type sessionContextView struct {
-	Summary       contextSummary
-	Capacity      contextCapacity
-	Composition   []contextCompositionItem
-	Timeline      []contextTimelineTurn
-	Supports      contextSupports
-	Warnings      []string
-	RewindSignal  *signals.RewindSignal
-	CompactSignal *signals.CompactSignal
+	Summary         contextSummary
+	Capacity        contextCapacity
+	Composition     []contextCompositionItem
+	Timeline        []contextTimelineTurn
+	Supports        contextSupports
+	Warnings        []string
+	RewindSignal    *signals.RewindSignal
+	CompactSignal   *signals.CompactSignal
+	SummaryCoverage *summaryCoverage
 }
 
 type contextRowCalc struct {
@@ -199,13 +215,14 @@ func (s *Server) handleGetSessionContext(
 	}
 
 	writeJSON(w, http.StatusOK, sessionContextResponse{
-		Summary:       view.Summary,
-		Capacity:      view.Capacity,
-		Composition:   view.Composition,
-		Supports:      view.Supports,
-		Warnings:      view.Warnings,
-		RewindSignal:  view.RewindSignal,
-		CompactSignal: view.CompactSignal,
+		Summary:         view.Summary,
+		Capacity:        view.Capacity,
+		Composition:     view.Composition,
+		Supports:        view.Supports,
+		Warnings:        view.Warnings,
+		RewindSignal:    view.RewindSignal,
+		CompactSignal:   view.CompactSignal,
+		SummaryCoverage: view.SummaryCoverage,
 	})
 }
 
@@ -251,7 +268,49 @@ func (s *Server) buildSessionContextView(
 	if err != nil {
 		return sessionContextView{}, err
 	}
-	return computeSessionContextView(*session, msgs), nil
+	view := computeSessionContextView(*session, msgs)
+	view.SummaryCoverage = s.computeSummaryCoverage(
+		ctx, sessionID, len(view.Timeline),
+	)
+	return view, nil
+}
+
+// computeSummaryCoverage reports how many turns of the session
+// have LLM summaries, and the overall lifecycle status. Returns
+// nil when there are no turns to summarise.
+func (s *Server) computeSummaryCoverage(
+	ctx context.Context, sessionID string, totalTurns int,
+) *summaryCoverage {
+	if totalTurns == 0 {
+		return nil
+	}
+	sc := &summaryCoverage{TotalTurns: totalTurns}
+	if s.summarizer == nil || !s.summarizer.Enabled() {
+		sc.Status = "disabled"
+		return sc
+	}
+	starred, err := s.db.IsSessionStarred(ctx, sessionID)
+	if err == nil {
+		sc.Starred = starred
+	}
+	summaries, err := s.db.ListTurnSummaries(ctx, sessionID)
+	if err == nil {
+		sc.SummarisedTurns = len(summaries)
+		for _, ts := range summaries {
+			if ts.CreatedAt > sc.LastUpdatedAt {
+				sc.LastUpdatedAt = ts.CreatedAt
+			}
+		}
+	}
+	switch {
+	case sc.SummarisedTurns >= sc.TotalTurns && sc.TotalTurns > 0:
+		sc.Status = "complete"
+	case sc.Starred:
+		sc.Status = "pending"
+	default:
+		sc.Status = "idle"
+	}
+	return sc
 }
 
 func computeSessionContextView(

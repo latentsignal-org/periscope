@@ -76,6 +76,28 @@ func (db *DB) ListStarredSessionIDs(
 	return ids, rows.Err()
 }
 
+// IsSessionStarred returns true when the given session has been
+// starred. Used by the /context endpoint to decide whether turn
+// summarisation is expected for this session.
+func (db *DB) IsSessionStarred(
+	ctx context.Context, sessionID string,
+) (bool, error) {
+	var one int
+	err := db.getReader().QueryRowContext(ctx,
+		"SELECT 1 FROM starred_sessions WHERE session_id = ? LIMIT 1",
+		sessionID,
+	).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf(
+			"checking starred for %s: %w", sessionID, err,
+		)
+	}
+	return true, nil
+}
+
 // BulkStarSessions stars multiple sessions in a single transaction.
 // Used for migrating localStorage stars to the database.
 func (db *DB) BulkStarSessions(sessionIDs []string) error {

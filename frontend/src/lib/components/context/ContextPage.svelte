@@ -104,9 +104,36 @@
   {:else if error}
     <div class="empty error">{error}</div>
   {:else if summaryData && timelineData}
-    {#if summaryData.rewind_signal || summaryData.compact_signal}
+    {#if summaryData.rewind_signal || summaryData.compact_signal || summaryData.summary_coverage}
       <div class="signals-group">
-        <div class="signals-eyebrow">Context Guidance</div>
+        <div class="signals-header">
+          <div class="signals-eyebrow">Context Guidance</div>
+          {#if summaryData.summary_coverage}
+            {@const sc = summaryData.summary_coverage}
+            <span
+              class="coverage-pill"
+              class:disabled={sc.status === "disabled"}
+              class:idle={sc.status === "idle"}
+              class:pending={sc.status === "pending"}
+              class:complete={sc.status === "complete"}
+              title={sc.status === "disabled"
+                ? "Set ANTHROPIC_API_KEY to enable turn summaries"
+                : sc.status === "idle"
+                  ? "Star this session to generate turn summaries"
+                  : `${sc.summarised_turns} of ${sc.total_turns} turns summarised`}
+            >
+              {#if sc.status === "disabled"}
+                Summaries · disabled
+              {:else if sc.status === "idle"}
+                Star to summarise
+              {:else if sc.status === "pending"}
+                Summarising · {sc.summarised_turns}/{sc.total_turns}
+              {:else}
+                Summaries · {sc.total_turns}/{sc.total_turns}
+              {/if}
+            </span>
+          {/if}
+        </div>
         {#if summaryData.rewind_signal}
           <RewindSignalBanner signal={summaryData.rewind_signal} />
         {/if}
@@ -195,12 +222,46 @@
     gap: 10px;
   }
 
+  .signals-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
   .signals-eyebrow {
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--text-muted);
+  }
+
+  .coverage-pill {
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border-muted);
+    background: var(--bg-surface);
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  .coverage-pill.pending {
+    color: var(--text-primary);
+    border-color: var(--accent-blue, #3b82f6);
+  }
+
+  .coverage-pill.complete {
+    color: var(--accent-green, #10b981);
+    border-color: var(--accent-green, #10b981);
+  }
+
+  .coverage-pill.idle {
+    color: var(--text-secondary);
   }
 
   .empty {

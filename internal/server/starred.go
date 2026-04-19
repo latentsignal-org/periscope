@@ -30,6 +30,9 @@ func (s *Server) handleStarSession(
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	if s.summarizer != nil {
+		s.summarizer.Enqueue(id)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -55,6 +55,20 @@ export interface CompactSignal {
   compact_focus?: string[];
 }
 
+export type SummaryCoverageStatus =
+  | "disabled"
+  | "idle"
+  | "pending"
+  | "complete";
+
+export interface SummaryCoverage {
+  status: SummaryCoverageStatus;
+  total_turns: number;
+  summarised_turns: number;
+  starred: boolean;
+  last_updated_at?: string;
+}
+
 export interface SessionContextResponse {
   summary: ContextSummary;
   capacity: ContextCapacity;
@@ -63,6 +77,7 @@ export interface SessionContextResponse {
   warnings?: string[];
   rewind_signal?: RewindSignal;
   compact_signal?: CompactSignal;
+  summary_coverage?: SummaryCoverage;
 }
 
 export interface ContextCategoryValue {

@@ -88,9 +88,35 @@ func (s *Store) ListStarredSessionIDs(
 	return []string{}, nil
 }
 
+// IsSessionStarred returns false in read-only mode.
+func (s *Store) IsSessionStarred(
+	_ context.Context, _ string,
+) (bool, error) {
+	return false, nil
+}
+
 // BulkStarSessions is not supported in read-only mode.
 func (s *Store) BulkStarSessions(_ []string) error {
 	return db.ErrReadOnly
+}
+
+// UpsertTurnSummary is not supported in read-only mode.
+func (s *Store) UpsertTurnSummary(_ db.TurnSummary) error {
+	return db.ErrReadOnly
+}
+
+// ListTurnSummaries returns an empty slice.
+func (s *Store) ListTurnSummaries(
+	_ context.Context, _ string,
+) ([]db.TurnSummary, error) {
+	return []db.TurnSummary{}, nil
+}
+
+// HasTurnSummary returns false.
+func (s *Store) HasTurnSummary(
+	_ context.Context, _ string, _ int, _ string,
+) (bool, error) {
+	return false, nil
 }
 
 // PinMessage is not supported in read-only mode.

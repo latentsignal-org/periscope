@@ -515,6 +515,40 @@ func (db *DB) migrateColumns() error {
 		)
 	}
 
+	if _, err := w.Exec(`
+		CREATE TABLE IF NOT EXISTS context_turn_summaries (
+			id              INTEGER PRIMARY KEY,
+			session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			turn_index      INTEGER NOT NULL,
+			start_ordinal   INTEGER NOT NULL,
+			end_ordinal     INTEGER NOT NULL,
+			content_hash    TEXT NOT NULL,
+			summary         TEXT NOT NULL,
+			intent          TEXT NOT NULL DEFAULT '',
+			outcome         TEXT NOT NULL DEFAULT '',
+			topic           TEXT NOT NULL DEFAULT '',
+			files_touched   TEXT NOT NULL DEFAULT '[]',
+			tags            TEXT NOT NULL DEFAULT '[]',
+			model           TEXT NOT NULL DEFAULT '',
+			prompt_version  INTEGER NOT NULL DEFAULT 1,
+			created_at      TEXT NOT NULL
+				DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+			UNIQUE(session_id, turn_index, content_hash)
+		)`,
+	); err != nil {
+		return fmt.Errorf(
+			"creating context_turn_summaries: %w", err,
+		)
+	}
+	if _, err := w.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_context_turn_summaries_session
+			ON context_turn_summaries(session_id, turn_index)`,
+	); err != nil {
+		return fmt.Errorf(
+			"creating context_turn_summaries index: %w", err,
+		)
+	}
+
 	runRepair, err := db.shouldRunTokenCoverageRepairLocked(w)
 	if err != nil {
 		return err
