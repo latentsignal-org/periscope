@@ -12,30 +12,53 @@
 
   let { summary, capacity, session = null, warnings = [] }: Props = $props();
 
+  let subtitle = $derived.by(() => {
+    if (summary.visible_since_ordinal > 0) {
+      return "After compaction";
+    }
+    return "Full conversation";
+  });
+
   function percentLabel(value: number): string {
     if (!Number.isFinite(value)) return "—";
     return `${Math.round(value)}%`;
   }
 
-  function provenanceLabel(value: string): string {
+  function provenanceTooltip(value: string): string {
     switch (value) {
       case "measured":
-        return "Measured";
+        return "Measured from actual token counts";
       case "inferred":
-        return "Inferred";
+        return "Inferred from available data";
       case "estimated":
-        return "Estimated";
+        return "Estimated based on heuristics";
       default:
-        return "Unknown";
+        return "";
     }
   }
 </script>
 
 <section class="context-card">
   <div class="header">
-    <div>
+    <div class="header-left">
       <div class="eyebrow">Context Summary</div>
-      <h2>Visible context after latest compaction</h2>
+      <h2>{subtitle}</h2>
+      <div class="session-pills">
+        <span class="pill">{session?.agent ?? capacity.agent ?? "Unknown agent"}</span>
+        {#if capacity.model}
+          <span class="pill">{capacity.model}</span>
+        {/if}
+        {#if summary.last_updated_at}
+          <span class="pill" title={formatTimestamp(summary.last_updated_at)}>
+            Updated {formatRelativeTime(summary.last_updated_at)}
+          </span>
+        {/if}
+        {#if session?.ended_at}
+          <span class="pill pill-dim">Ended</span>
+        {:else}
+          <span class="pill pill-live">Live</span>
+        {/if}
+      </div>
     </div>
     <div class="occupancy">
       <div class="tokens">{formatTokenCount(summary.tokens_in_use)}</div>
@@ -57,12 +80,11 @@
   </div>
 
   <div class="stats-grid">
-    <div class="stat">
+    <div class="stat" title={provenanceTooltip(summary.tokens_provenance)}>
       <span class="label">Used</span>
       <strong>{percentLabel(summary.percent_consumed)}</strong>
-      <span class="meta">{provenanceLabel(summary.tokens_provenance)}</span>
     </div>
-    <div class="stat">
+    <div class="stat" title={provenanceTooltip(capacity.provenance)}>
       <span class="label">Remaining</span>
       <strong>
         {#if summary.remaining_known}
@@ -71,41 +93,7 @@
           —
         {/if}
       </strong>
-      <span class="meta">{provenanceLabel(capacity.provenance)}</span>
     </div>
-    <div class="stat">
-      <span class="label">Window</span>
-      <strong>
-        {#if capacity.max_tokens > 0}
-          {formatTokenCount(capacity.max_tokens)}
-        {:else}
-          Unknown
-        {/if}
-      </strong>
-      <span class="meta">{provenanceLabel(capacity.provenance)}</span>
-    </div>
-    <div class="stat">
-      <span class="label">Granularity</span>
-      <strong>{summary.row_granularity}</strong>
-      <span class="meta">Visible since message {summary.visible_since_ordinal}</span>
-    </div>
-  </div>
-
-  <div class="session-meta">
-    <span>{session?.agent ?? capacity.agent ?? "Unknown agent"}</span>
-    {#if capacity.model}
-      <span>{capacity.model}</span>
-    {/if}
-    {#if summary.last_updated_at}
-      <span title={formatTimestamp(summary.last_updated_at)}>
-        Updated {formatRelativeTime(summary.last_updated_at)}
-      </span>
-    {/if}
-    {#if session?.ended_at}
-      <span>Historical session</span>
-    {:else}
-      <span>Live session</span>
-    {/if}
   </div>
 
   {#if warnings.length > 0}
@@ -134,12 +122,16 @@
     align-items: end;
   }
 
+  .header-left {
+    display: grid;
+    gap: 4px;
+  }
+
   .eyebrow {
     font-size: 10px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--text-muted);
-    margin-bottom: 4px;
   }
 
   h2 {
@@ -150,8 +142,36 @@
     color: var(--text-primary);
   }
 
+  .session-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 2px;
+  }
+
+  .pill {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: var(--bg-inset);
+    border: 1px solid var(--border-muted);
+    border-radius: 999px;
+    padding: 1px 8px;
+    white-space: nowrap;
+  }
+
+  .pill-live {
+    color: var(--accent-teal);
+    border-color: var(--accent-teal);
+  }
+
+  .pill-dim {
+    color: var(--text-muted);
+  }
+
   .occupancy {
     text-align: right;
+    flex-shrink: 0;
   }
 
   .tokens {
@@ -186,7 +206,7 @@
 
   .stats-grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
   }
 
@@ -206,17 +226,9 @@
   }
 
   .label,
-  .meta,
-  .session-meta,
   .warning {
     font-size: 11px;
     color: var(--text-muted);
-  }
-
-  .session-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
   }
 
   .warnings {
@@ -233,10 +245,6 @@
   }
 
   @media (max-width: 900px) {
-    .stats-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
     .header {
       flex-direction: column;
       align-items: start;
