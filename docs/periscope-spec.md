@@ -32,6 +32,13 @@ The product ships in two phases:
   concrete next action — continue, rewind, fork, compact, or delegate to a
   subagent.
 
+Available context capacity is session-specific. Periscope should infer the
+maximum usable context window for each session from the best available signal:
+agent, model, provider-reported limits when exposed, and the user's current
+plan or entitlement tier when that affects model limits. Occupancy percentages,
+remaining budget, and threshold-based guidance must be calculated against this
+session-specific maximum rather than a single global default.
+
 Together, the two phases turn context engineering from intuition into something
 visible, measurable, and actionable.
 
@@ -163,7 +170,8 @@ V1 must deliver:
   home. The same route may also be embedded as a tab inside the agentsview
   session detail view, and is the surface exposed inside JetBrains IDEs.
 - A **summary header** showing estimated context tokens in use, estimated
-  percent of the available window consumed, and remaining budget.
+  percent of the available window consumed, remaining budget, and the inferred
+  maximum context window used for the calculation.
 - A **composition breakdown** of context by source category (system prompt and
   tool definitions, user messages, assistant messages, file reads, tool calls,
   tool outputs, summaries and compacted handoffs, subagent outputs, and the
@@ -173,6 +181,9 @@ V1 must deliver:
   compaction, rewind, fork, and subagent events when known.
 - **Token estimation** as specified below: prefer recorded token usage from the
   agent's session files, fall back to byte-count with a per-agent ratio.
+- **Context-capacity estimation** as specified below: determine the session's
+  maximum context window from agent, model, provider metadata, and user-plan
+  signals when available; label the result as measured, inferred, or unknown.
 - **Live updates over SSE** for active sessions so the visualizer keeps current
   as turns arrive.
 - **Support for all agents** registered in `internal/parser/types.go`.
@@ -203,6 +214,10 @@ V2 must deliver:
   topic-overlap.
 - **Optional guidance agent**: a separate agent invoked with a fresh context
   window to analyze the primary session from outside.
+- **Live-session isolation**: when guidance or analysis is run against an
+  active session, it must execute in a separate subagent or equivalent fresh
+  analysis session so the primary live session does not accumulate the analysis
+  prompt, evidence bundle, or generated guidance output in its own context.
 
 ## Jobs To Be Done
 
@@ -247,6 +262,7 @@ preserves the original draft for cross-reference.
 The product must show a current-state summary of the session, including:
 
 - estimated context tokens in use,
+- inferred maximum context window for this session,
 - estimated percent of available context consumed,
 - available remaining context,
 - source breakdown by category.
@@ -290,6 +306,18 @@ The feature must work for:
 
 - historical sessions already indexed in the database,
 - the currently active session, with live updates pushed over SSE.
+
+For every session, V1 must determine the best available maximum context window
+before computing percentages. The determination should use, in priority order:
+
+1. provider- or agent-recorded context limits attached to the session,
+1. model-specific limits known for the detected agent/model pair,
+1. user-plan or entitlement-aware limits when the same model exposes different
+   windows by plan,
+1. conservative agent-level defaults when no better signal exists.
+
+If the exact session limit cannot be proven, the UI and API must label the
+window size as inferred rather than measured.
 
 #### FR9: Support agent-specific interpretation
 
@@ -374,6 +402,8 @@ The guidance agent must:
 - produce ready-to-use action text,
 - avoid importing the entire raw session when a compressed representation is
   sufficient.
+- when analyzing a live session, run outside the primary session context so the
+  analysis itself does not pollute the live session's context window.
 
 ## User Experience Requirements
 
@@ -629,6 +659,29 @@ Estimation accuracy is a best-effort signal. Every API and UI response that
 includes a token count must mark whether the count is **measured** (from
 recorded usage) or **estimated** (from the byte-count fallback).
 
+## Context Capacity Estimation
+
+Periscope must estimate the maximum available context window for each session so
+occupancy percentages and remaining-budget calculations are grounded in the
+actual session limit.
+
+Capacity detection pipeline:
+
+1. **Prefer recorded limits.** If the source agent or provider records the
+   session's maximum context window, use it directly.
+1. **Otherwise infer from agent + model.** Map the detected agent and model to
+   a known maximum window.
+1. **Adjust for user plan when relevant.** If the same model can expose
+   different context limits depending on the user's subscription, plan, or
+   entitlement tier, Periscope should use the best available plan signal to pick
+   the correct limit.
+1. **Fall back conservatively.** If exact limits remain unavailable, use a
+   conservative default for that agent/model family and mark it as inferred.
+
+Every API and UI response that includes occupancy percentage, remaining budget,
+or threshold projections must also expose whether the maximum context window was
+**measured**, **inferred**, or **unknown**.
+
 ## Compaction Handling
 
 Periscope shows post-compaction context only. When a session has been compacted,
@@ -789,6 +842,10 @@ transcript by default. Candidate input bundle:
 - computed signals,
 - snippets of evidence around suspected problems.
 
+For active sessions, this bundle must be passed to a separate subagent or
+equivalent fresh analysis session rather than appended to the live parent
+session.
+
 ### Outputs
 
 The guidance agent must return:
@@ -808,6 +865,8 @@ The guidance agent must return:
 - Clearly separate guidance-agent opinion from measured telemetry.
 - Do not imply certainty where evidence is weak.
 - Provide fallback recommendations when confidence is low.
+- Do not run live-session guidance inline inside the primary session if doing so
+  would enlarge or contaminate the primary session's context.
 
 ### Example Guidance Output
 
@@ -929,6 +988,7 @@ Every response must clearly separate:
 
 - measured values,
 - estimated values,
+- inferred session-capacity values,
 - inferred values,
 - model-generated guidance text.
 
