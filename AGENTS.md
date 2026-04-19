@@ -10,7 +10,8 @@ Instructions for autonomous coding agents working in this repository.
 
 ## Required Git Rules
 
-1. Commit every turn.
+1. Do not commit after every turn; wait for explicit user review and approval
+   before committing changes.
 1. Do not amend commits.
 1. Do not change branches without explicit user permission.
 
