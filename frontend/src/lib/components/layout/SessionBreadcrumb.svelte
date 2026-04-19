@@ -25,12 +25,23 @@
   import { messages as messagesStore } from "../../stores/messages.svelte.js";
   import { ui } from "../../stores/ui.svelte.js";
 
+  type SessionTab = "transcript" | "context";
+
   interface Props {
     session: Session | undefined;
     onBack: () => void;
+    tab?: SessionTab;
+    onSelectTab?: (tab: SessionTab) => void;
+    onOpenStandalone?: () => void;
   }
 
-  let { session, onBack }: Props = $props();
+  let {
+    session,
+    onBack,
+    tab,
+    onSelectTab,
+    onOpenStandalone,
+  }: Props = $props();
   let copiedSessionId = $state("");
   let menuOpen = $state(false);
   let renaming = $state(false);
@@ -403,9 +414,46 @@
       onblur={submitRename}
     />
   {:else}
-    <span class="breadcrumb-current">
-      {session?.display_name || session?.project || ""}
-    </span>
+    <div class="breadcrumb-title-row">
+      <span class="breadcrumb-current">
+        {session?.display_name || session?.project || ""}
+      </span>
+      {#if tab && onSelectTab}
+        <div class="tab-switch" role="tablist" aria-label="Session view">
+          <button
+            type="button"
+            role="tab"
+            class:active={tab === "transcript"}
+            aria-selected={tab === "transcript"}
+            onclick={() => onSelectTab("transcript")}
+          >
+            Messages
+          </button>
+          <button
+            type="button"
+            role="tab"
+            class:active={tab === "context"}
+            aria-selected={tab === "context"}
+            onclick={() => onSelectTab("context")}
+          >
+            Context
+          </button>
+          {#if onOpenStandalone}
+            <button
+              role="tab"
+              title="Open in new tab"
+              aria-label="Open in new tab"
+              onclick={onOpenStandalone}
+            >
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                <path d="M8.636 3.5a.5.5 0 00-.5-.5H1.5A1.5 1.5 0 000 4.5v10A1.5 1.5 0 001.5 16h10a1.5 1.5 0 001.5-1.5V7.864a.5.5 0 00-1 0V14.5a.5.5 0 01-.5.5h-10a.5.5 0 01-.5-.5v-10a.5.5 0 01.5-.5h6.636a.5.5 0 00.5-.5z"/>
+                <path d="M16 .5a.5.5 0 00-.5-.5h-5a.5.5 0 000 1h3.793L6.146 9.146a.5.5 0 10.708.708L15 1.707V5.5a.5.5 0 001 0v-5z"/>
+              </svg>
+            </button>
+          {/if}
+        </div>
+      {/if}
+    </div>
   {/if}
   {#if session}
     <span class="breadcrumb-meta">
@@ -573,6 +621,19 @@
         <span class="model-badge" title={mainModel}>{mainModel}</span>
       {/if}
       <div class="actions-wrapper">
+        {#if onOpenStandalone}
+          <button
+            class="standalone-btn"
+            title="Open in new tab"
+            aria-label="Open in new tab"
+            onclick={onOpenStandalone}
+          >
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M8.636 3.5a.5.5 0 00-.5-.5H1.5A1.5 1.5 0 000 4.5v10A1.5 1.5 0 001.5 16h10a1.5 1.5 0 001.5-1.5V7.864a.5.5 0 00-1 0V14.5a.5.5 0 01-.5.5h-10a.5.5 0 01-.5-.5v-10a.5.5 0 01.5-.5h6.636a.5.5 0 00.5-.5z"/>
+              <path d="M16 .5a.5.5 0 00-.5-.5h-5a.5.5 0 000 1h3.793L6.146 9.146a.5.5 0 10.708.708L15 1.707V5.5a.5.5 0 001 0v-5z"/>
+            </svg>
+          </button>
+        {/if}
         <button
           class="link-btn"
           class:link-btn--copied={copiedLinkId === session?.id}
@@ -715,6 +776,60 @@
     gap: 6px;
     margin-left: auto;
     flex-shrink: 0;
+  }
+
+  .tab-switch {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px;
+    margin-left: 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-muted);
+    border-radius: 999px;
+    flex-shrink: 0;
+  }
+
+  .tab-switch button {
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 10px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+    line-height: 1.4;
+  }
+
+  .tab-switch button:hover {
+    color: var(--text-secondary);
+  }
+
+  .tab-switch button.active {
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  }
+
+  .standalone-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border: none;
+    border-radius: var(--radius-sm, 4px);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    flex-shrink: 0;
+  }
+
+  .standalone-btn:hover {
+    background: var(--bg-surface-hover);
+    color: var(--accent-blue);
   }
 
   .agent-badge {

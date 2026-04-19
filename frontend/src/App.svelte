@@ -448,27 +448,10 @@
         <SessionBreadcrumb
           session={session}
           onBack={() => sessions.deselectSession()}
+          tab={sessionTab()}
+          onSelectTab={setSessionTab}
+          onOpenStandalone={() => router.navigateToContext(sessions.activeSessionId!)}
         />
-        <div class="session-tabs">
-          <button
-            class:active={sessionTab() === "transcript"}
-            onclick={() => setSessionTab("transcript")}
-          >
-            Transcript
-          </button>
-          <button
-            class:active={sessionTab() === "context"}
-            onclick={() => setSessionTab("context")}
-          >
-            Context
-          </button>
-          <button
-            class="open-standalone"
-            onclick={() => router.navigateToContext(sessions.activeSessionId!)}
-          >
-            Open Standalone
-          </button>
-        </div>
         {#if ui.activityMinimapOpen && sessions.activeSessionId && sessionTab() === "transcript"}
           <ActivityMinimap
             sessionId={sessions.activeSessionId}
@@ -552,32 +535,6 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-  }
-
-  .session-tabs {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 0 16px 12px;
-  }
-
-  .session-tabs button {
-    border: 1px solid var(--border-default);
-    background: var(--bg-surface);
-    color: var(--text-secondary);
-    border-radius: 999px;
-    padding: 8px 12px;
-    cursor: pointer;
-    font-size: 12px;
-  }
-
-  .session-tabs button.active {
-    color: var(--text-primary);
-    background: color-mix(in srgb, var(--bg-surface) 82%, #0f766e 18%);
-  }
-
-  .session-tabs .open-standalone {
-    margin-left: auto;
   }
 
   .undo-toast {
