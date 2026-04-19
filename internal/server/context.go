@@ -337,8 +337,6 @@ func computeSessionContextView(
 		warnings = append(warnings,
 			"Context capacity is unknown for this session; occupancy and free-space values are omitted.")
 	}
-	warnings = append(warnings,
-		"Timeline rows are grouped into turns in V1 and link back to transcript messages.")
 
 	composition := buildComposition(compositionTotals, currentTokens, capacity)
 
