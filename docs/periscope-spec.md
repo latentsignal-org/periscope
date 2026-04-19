@@ -1,38 +1,49 @@
-# Context Session Visualizer Product Specification
+# Periscope Product Specification
 
 ## Document Status
 
 - Status: Draft for implementation handoff
 - Author: Codex
 - Date: 2026-04-18
-- Product area: Session browser, analytics, context engineering
+- Product area: Context engineering, optimization
 
-## Executive Summary
+## Summary
 
-The Context Session Visualizer is a session-level observability and decision
-support feature for coding-agent workflows.
+Periscope is a context session visualizer and improver for coding-agent
+workflows. It provides session-level observability and decision support so users
+can understand how a live or historical coding-agent session consumed its
+context window over time, how that context composition affects session quality,
+and what session-management action to take next.
 
-Its purpose is to help users understand how a live or historical coding-agent
-session consumed its context window over time, how that context composition
-affects session quality, and what session-management action the user should take
-next.
+Periscope is built on the thesis that success in coding-agent workflows depends
+not only on model quality and prompt quality but on context quality. Long
+sessions accumulate useful knowledge, but they also accumulate irrelevant tool
+output, failed attempts, stale assumptions, debugging tangents, and compressed
+summaries. As a session grows, the agent's effective intelligence often degrades
+because the context becomes diluted, noisy, or misaligned with the current
+objective.
 
-The feature is built on the thesis that success in coding-agent workflows
-depends not only on model quality and prompt quality, but on context quality.
-Long sessions accumulate useful knowledge, but they also accumulate irrelevant
-tool output, failed attempts, stale assumptions, debugging tangents, and
-compressed summaries. As a session grows, the agent's effective intelligence
-often degrades because the context becomes diluted, noisy, or misaligned with
-the current objective.
+The product ships in two phases:
 
-The product should therefore do two jobs:
+- **V1 — Context Visualizer.** An x-ray of how session context was spent and how
+  it evolved. Descriptive only: no analysis or recommendations.
+- **V2 — Context Guidance.** An interpretation layer on top of V1: compute
+  signals, classify session health, detect branch points, and recommend a
+  concrete next action — continue, rewind, fork, compact, or delegate to a
+  subagent.
 
-1. Show an x-ray of how session context was spent and how it evolved.
-2. Recommend concrete context-shaping actions such as continue, rewind, fork,
-   compact, or delegate to a subagent.
+Together, the two phases turn context engineering from intuition into something
+visible, measurable, and actionable.
 
-This feature should make context engineering visible, measurable, and
-actionable.
+### Non-Goals
+
+- Do not reconstruct exact provider-side prompt packing with perfect fidelity if
+  the provider does not expose it.
+- Do not replace the primary transcript viewer.
+- Do not automatically mutate user sessions.
+- Do not act as a universal tokenizer for every provider at perfect parity.
+- Do not attempt general agent evaluation across all dimensions; focus
+  specifically on context health and session branching quality.
 
 ## Problem Statement
 
@@ -63,67 +74,6 @@ Without this visibility, users manage sessions by intuition. That leads to:
 
 The user needs a system that turns hidden context dynamics into explicit signals
 and recommended actions.
-
-## Product Vision
-
-Build a context observability and context intervention layer for coding-agent
-sessions.
-
-The user should be able to inspect a session and immediately understand:
-
-- how full the session context is,
-- what is occupying that context,
-- which turns added durable value versus ephemeral noise,
-- where context quality likely degraded,
-- what action will best preserve progress while restoring clarity.
-
-The product should not merely report token usage. It should help the user make
-better branching decisions at every meaningful turn of a session.
-
-## Core Product Thesis
-
-The Context Session Visualizer is founded on these principles:
-
-1. Session success depends on context engineering.
-2. Context size alone is not enough; context quality matters more.
-3. As context grows, relevance concentration often decreases.
-4. Every turn is a branching point where the user could continue, rewind, fork,
-   compact, or delegate.
-5. Tangents, retries, and long tool traces create hidden context drag.
-6. Session-management operations should be guided by evidence, not intuition.
-7. A separate analysis agent with a clean context window can often diagnose the
-   primary session better than the primary session can diagnose itself.
-
-## Product Goals
-
-### Primary Goals
-
-- Give users a detailed view of how session context grew over time.
-- Attribute context growth to concrete sources such as prompts, file reads, tool
-  results, summaries, and agent replies.
-- Identify likely context-health problems such as tangents, retries, repeated
-  reads, compaction loss, and stale branches.
-- Recommend the best next session-management action.
-- Help users preserve model intelligence by acting before context quality
-  collapses.
-
-### Secondary Goals
-
-- Make session-management concepts legible to advanced users.
-- Improve confidence in operations like rewind and compact.
-- Create a foundation for automated coaching and future proactive assistance.
-- Allow retrospective analysis of successful and failed sessions to improve user
-  habits.
-
-### Non-Goals
-
-- Do not attempt to reconstruct exact provider-side prompt packing with perfect
-  fidelity if the provider does not expose it.
-- Do not replace the primary transcript viewer.
-- Do not automatically mutate user sessions in v1.
-- Do not act as a universal tokenizer for every provider at perfect parity.
-- Do not attempt to solve general agent evaluation across all dimensions; focus
-  specifically on context health and session branching quality.
 
 ## Target Users
 
@@ -199,16 +149,60 @@ Any user or system action that changes future context composition:
 
 ## Product Scope
 
-The feature consists of two tightly coupled subsystems:
+The product ships in two phases that map to V1 and V2.
 
-### 1. Context Session Visualizer
+### V1: Context Visualizer
 
-A visual, inspectable breakdown of session context history and current state.
+A visual, inspectable breakdown of session context history and current state. V1
+is descriptive only — it shows what happened and what is currently in the
+window, with no analysis, scoring, or recommendations.
 
-### 2. Context Advisor
+V1 must deliver:
 
-A secondary analysis layer, optionally powered by a separate agent, that
-interprets the session and recommends actions.
+- A standalone `/context/:sessionId` route with a link back to the agentsview
+  home. The same route may also be embedded as a tab inside the agentsview
+  session detail view, and is the surface exposed inside JetBrains IDEs.
+- A **summary header** showing estimated context tokens in use, estimated
+  percent of the available window consumed, and remaining budget.
+- A **composition breakdown** of context by source category (system prompt and
+  tool definitions, user messages, assistant messages, file reads, tool calls,
+  tool outputs, summaries and compacted handoffs, subagent outputs, and the
+  other categories enumerated in FR3).
+- A **turn-by-turn timeline** showing per-turn context delta, cumulative context
+  estimate, growth spikes, category attribution per spike, and markers for
+  compaction, rewind, fork, and subagent events when known.
+- **Token estimation** as specified below: prefer recorded token usage from the
+  agent's session files, fall back to byte-count with a per-agent ratio.
+- **Live updates over SSE** for active sessions so the visualizer keeps current
+  as turns arrive.
+- **Support for all agents** registered in `internal/parser/types.go`.
+- **Post-compaction context only.** When a session has been compacted, the
+  timeline begins at the compaction event and treats the compacted summary as a
+  single source segment.
+
+### V2: Context Guidance
+
+An interpretation layer built on top of V1 that turns the visualized data into
+diagnoses and recommended actions.
+
+V2 must deliver:
+
+- **Context-health signals** across occupancy, noise, retry, compression, and
+  branching families.
+- **Health classification** into Healthy / Watch / Degraded / Critical.
+- **Branch-point detection** with reason, recommended action, estimated benefit,
+  and confidence.
+- **Recommendation engine** that produces one primary action plus alternatives:
+  continue, rewind, compact, fork, fresh session, or subagent.
+- **Operational guidance text**: copyable command, suggested prompt, suggested
+  compact focus, suggested rewind reprompt, suggested fork brief, suggested
+  subagent task wording.
+- **Evidence inspector** that traces every recommendation back to the turns,
+  categories, and signals that produced it.
+- **Relevance estimation** as a heuristic: recency × file-overlap ×
+  topic-overlap.
+- **Optional guidance agent**: a separate agent invoked with a fresh context
+  window to analyze the primary session from outside.
 
 ## Jobs To Be Done
 
@@ -241,26 +235,27 @@ When reviewing past work, the user wants to see what context-management choices
 correlated with success or failure, so they can improve how they work with
 coding agents.
 
-## Product Requirements
-
 ## Functional Requirements
 
-### FR1: Show current session context state
+V1 requirements are descriptive; V2 requirements add interpretation. Numbering
+preserves the original draft for cross-reference.
+
+### V1 Requirements
+
+#### FR1: Show current session context state
 
 The product must show a current-state summary of the session, including:
 
 - estimated context tokens in use,
 - estimated percent of available context consumed,
 - available remaining context,
-- source breakdown by category,
-- current session health status,
-- count of significant context-shaping events.
+- source breakdown by category.
 
-### FR2: Show context growth over time
+#### FR2: Show context growth over time
 
 The product must display context growth turn by turn across the session.
 
-This should include:
+This must include:
 
 - per-turn context delta,
 - cumulative context estimate,
@@ -268,10 +263,10 @@ This should include:
 - category attribution for each spike,
 - markers for compaction, rewind, fork points, and subagent events when known.
 
-### FR3: Attribute context to sources
+#### FR3: Attribute context to sources
 
-The product must classify context consumption into meaningful categories. Initial
-categories should include:
+The product must classify context consumption into meaningful categories.
+Initial categories include:
 
 - system prompt and tool definitions,
 - user messages,
@@ -286,10 +281,31 @@ categories should include:
 - deferred or hidden tool payloads when exposed by the source agent,
 - free space.
 
-This taxonomy should be extensible and agent-specific mapping rules must be
+This taxonomy must be extensible, and agent-specific mapping rules must be
 allowed.
 
-### FR4: Surface context-health signals
+#### FR8: Support historical and current sessions
+
+The feature must work for:
+
+- historical sessions already indexed in the database,
+- the currently active session, with live updates pushed over SSE.
+
+#### FR9: Support agent-specific interpretation
+
+The system must support agent-specific logic for:
+
+- context category mapping,
+- compaction event recognition,
+- rewind or fork semantics,
+- subagent event detection,
+- token estimation quality.
+
+V1 must support every agent registered in `internal/parser/types.go`.
+
+### V2 Requirements
+
+#### FR4: Surface context-health signals
 
 The product must compute interpretable signals that help estimate session
 quality. Candidate signals include:
@@ -303,16 +319,15 @@ quality. Candidate signals include:
 - retry loops,
 - compaction frequency,
 - suspected compaction loss,
-- divergence between recent task focus and older context mass,
 - large branches later abandoned,
 - high ratio of intermediate output to durable conclusions.
 
-### FR5: Highlight branching points
+#### FR5: Highlight branching points
 
 The product must identify meaningful points in the session where an alternative
 action would likely have been beneficial.
 
-For each highlighted branch point, the UI should show:
+For each highlighted branch point, the UI must show:
 
 - the message or turn index,
 - the likely reason it matters,
@@ -320,7 +335,7 @@ For each highlighted branch point, the UI should show:
 - the estimated benefit,
 - the confidence level.
 
-### FR6: Recommend next best action
+#### FR6: Recommend next best action
 
 The product must generate a recommendation for what the user should do now.
 
@@ -333,9 +348,9 @@ At minimum, the system must support recommending:
 - start a fresh session with a distilled brief,
 - use a subagent for the next work chunk.
 
-### FR7: Provide operational guidance
+#### FR7: Provide operational guidance
 
-Recommendations must be actionable. The product should provide:
+Recommendations must be actionable. The product must provide:
 
 - a concrete explanation,
 - the exact command or control to use when the source agent supports it,
@@ -345,30 +360,12 @@ Recommendations must be actionable. The product should provide:
 - suggested fork brief,
 - suggested subagent task wording.
 
-### FR8: Support historical and current sessions
-
-The feature should work for:
-
-- historical sessions already indexed in the database,
-- the currently active session when live updates are available.
-
-### FR9: Support agent-specific interpretation
-
-The system must support agent-specific logic for:
-
-- context category mapping,
-- compaction event recognition,
-- rewind or fork semantics,
-- subagent event detection,
-- token estimation quality,
-- recommended command text.
-
-### FR10: Support advisor-agent analysis
+#### FR10: Support guidance-agent analysis
 
 The system should optionally invoke a separate analysis agent with a fresh
 context window to analyze the primary session.
 
-The side agent must:
+The guidance agent must:
 
 - receive a structured summary of the primary session,
 - diagnose context health,
@@ -380,38 +377,42 @@ The side agent must:
 
 ## User Experience Requirements
 
-### UX1: Session-level entry point
+### UX1: Standalone /context route
 
-The visualizer should be accessible from the session detail view as a dedicated
-tab, panel, or route-level mode.
+Periscope is served at `/context/:sessionId`. The page links back to the
+agentsview home at `/`. The same view may also be embedded as a tab inside the
+agentsview session detail view.
 
-Candidate labels:
-
-- Context
-- Context Health
-- Session X-Ray
+The route must be safe to expose inside a JetBrains IDE webview as the primary
+surface for using Periscope from inside the IDE.
 
 ### UX2: Immediate legibility
 
-Within a few seconds, the user should be able to answer:
+Within a few seconds, V1 must let the user answer:
 
 - How full is this session?
 - What is consuming the context?
+
+V2 must additionally let the user answer:
+
 - Is this session still healthy?
 - What should I do next?
 
 ### UX3: Drill-down capability
 
-The user must be able to inspect:
+V1 users must be able to inspect:
 
 - turn-level context changes,
-- category-level consumption,
-- a branch-point explanation,
+- category-level consumption.
+
+V2 adds:
+
+- branch-point explanations,
 - recommended action details.
 
-### UX4: Action-oriented summary
+### UX4: Action-oriented summary (V2)
 
-The top of the view should include a compact decision card:
+The top of the V2 view must include a compact decision card:
 
 - Session health: healthy, watch, degraded, critical
 - Primary issue: tangent, tool noise, retry loop, compaction risk, stale branch
@@ -419,56 +420,53 @@ The top of the view should include a compact decision card:
 - Confidence
 - CTA text or copyable command
 
-### UX5: Avoid false authority
+### UX5: Avoid false authority (V2)
 
 The system must distinguish:
 
 - measured facts,
 - heuristics,
 - inferred judgments,
-- advisor-agent opinions.
+- guidance-agent opinions.
 
-Confidence and uncertainty should be explicit.
+Confidence and uncertainty must be explicit.
 
 ## Proposed User Interface
 
-## Primary Layout
-
-### Section A: Context Summary Header
+### Section A: Context Summary Header (V1)
 
 Displays:
 
 - current estimated context usage,
 - percent full,
 - remaining budget,
-- health status,
-- most likely recommended action,
 - timestamp of last update.
 
-### Section B: Context Composition Breakdown
+V2 adds health status and the most likely recommended action to this header.
+
+### Section B: Context Composition Breakdown (V1)
 
 A stacked bar or treemap showing major context categories.
 
-The user should be able to:
+The user must be able to:
 
 - hover or click a category,
 - see token estimate and percentage,
 - navigate to representative turns that contributed to it.
 
-### Section C: Context Timeline
+### Section C: Context Timeline (V1)
 
 A chronological view of turns showing:
 
 - per-turn additions,
 - cumulative context,
 - session-management events,
-- tool-heavy sections,
-- tangent windows,
-- suspected degraded zones.
+- tool-heavy sections.
 
-This is the core x-ray.
+This is the core x-ray. V2 overlays tangent windows and suspected degraded
+zones.
 
-### Section D: Branch Points
+### Section D: Branch Points (V2)
 
 A list of recommended or historically meaningful branch points:
 
@@ -477,7 +475,7 @@ A list of recommended or historically meaningful branch points:
 - "Compact should have happened before turn 103"
 - "Use subagent for verification branch at turn 119"
 
-### Section E: Advisor Panel
+### Section E: Guidance Panel (V2)
 
 Displays either rule-based analysis, agent-based analysis, or both:
 
@@ -488,7 +486,7 @@ Displays either rule-based analysis, agent-based analysis, or both:
 - suggested handoff text,
 - confidence.
 
-### Section F: Evidence Inspector
+### Section F: Evidence Inspector (V2)
 
 Shows why the system made the recommendation:
 
@@ -499,7 +497,7 @@ Shows why the system made the recommendation:
 - compaction boundaries,
 - high-growth spikes.
 
-## Example Decision Outputs
+## Example Decision Outputs (V2)
 
 ### Example: Continue
 
@@ -540,14 +538,14 @@ estimate.
 - Context source
 - Context segment
 - Turn
-- Branch point
+- Branch point (V2)
 - Session-management event
-- Context-health signal
-- Recommendation
+- Context-health signal (V2)
+- Recommendation (V2)
 
 ### Proposed Data Model
 
-#### ContextSegment
+#### ContextSegment (V1)
 
 Represents a piece of session context attributable to a source.
 
@@ -561,12 +559,15 @@ Fields:
 - `origin_agent`
 - `token_estimate`
 - `content_length`
-- `is_ephemeral_candidate`
-- `is_currently_relevant_estimate`
 - `branch_group`
 - `created_at`
 
-#### ContextTurnDelta
+V2 adds:
+
+- `is_ephemeral_candidate`
+- `is_currently_relevant_estimate`
+
+#### ContextTurnDelta (V1)
 
 Represents context added or transformed during a turn.
 
@@ -583,7 +584,7 @@ Fields:
 - `primary_label`
 - `notes`
 
-#### ContextBranchPoint
+#### ContextBranchPoint (V2)
 
 Fields:
 
@@ -596,7 +597,7 @@ Fields:
 - `confidence`
 - `action_payload`
 
-#### ContextRecommendation
+#### ContextRecommendation (V2)
 
 Fields:
 
@@ -611,10 +612,36 @@ Fields:
 - `suggested_prompt`
 - `evidence_refs`
 
-## Signal Framework
+## Token Estimation
 
-The system should compute a set of context-health signals. These do not need to
-be perfect in v1, but they must be explainable.
+Token counts must be estimated for every context segment. The pipeline:
+
+1. **Prefer recorded token usage.** When the source agent's session file exposes
+   per-message token counts (typically in `token_usage` fields on assistant or
+   system messages), use those values directly.
+1. **Fall back to byte count plus per-agent ratio.** When token counts are
+   absent, estimate tokens from content byte length using an agent-specific
+   bytes-per-token ratio. Each parser in `internal/parser/` declares its own
+   ratio; the parser registry in `internal/parser/types.go` is extended to carry
+   it.
+
+Estimation accuracy is a best-effort signal. Every API and UI response that
+includes a token count must mark whether the count is **measured** (from
+recorded usage) or **estimated** (from the byte-count fallback).
+
+## Compaction Handling
+
+Periscope shows post-compaction context only. When a session has been compacted,
+the timeline begins at the compaction event and treats the compacted summary as
+a single source segment. Pre-compaction segments are not reconstructed.
+
+This is an explicit V1 simplification, and the same constraint applies to V2.
+Reconstructing pre-compaction context across all agents is out of scope.
+
+## Signal Framework (V2)
+
+The system must compute a set of context-health signals. These do not need to be
+perfect, but they must be explainable.
 
 ### Signal Families
 
@@ -631,27 +658,21 @@ be perfect in v1, but they must be explainable.
 - long raw logs,
 - duplicated or near-duplicated reads.
 
-#### 3. Drift Signals
-
-- topic shift from original task,
-- task pivot without session reset,
-- low overlap between recent turns and early retained context.
-
-#### 4. Retry Signals
+#### 3. Retry Signals
 
 - repeated attempts on same failing approach,
 - repeated edits to same files without convergence,
 - repeated tool failures,
 - repeated reversions or churn.
 
-#### 5. Compression Signals
+#### 4. Compression Signals
 
 - number of compactions,
 - time since last compaction,
 - compaction near high-noise state,
 - likely summary loss after a pivot.
 
-#### 6. Branching Signals
+#### 5. Branching Signals
 
 - identifiable tangent start,
 - abandoned side branch,
@@ -660,14 +681,14 @@ be perfect in v1, but they must be explainable.
 
 ### Health States
 
-The system should classify overall session health into:
+The system must classify overall session health into:
 
 - Healthy
 - Watch
 - Degraded
 - Critical
 
-This label should derive from a score plus major trigger conditions.
+This label derives from a score plus major trigger conditions.
 
 ### Example Heuristic Score Inputs
 
@@ -675,27 +696,26 @@ This label should derive from a score plus major trigger conditions.
 - recent growth acceleration,
 - noise-to-conclusion ratio,
 - retry density,
-- drift intensity,
 - compaction risk,
 - stale branch weight,
 - tool failure density.
 
-## Recommendation Engine
+## Recommendation Engine (V2)
 
-The recommendation engine should combine:
+The recommendation engine combines:
 
 - deterministic heuristics,
 - interpretable rule-based logic,
-- optional advisor-agent analysis.
+- optional guidance-agent analysis.
 
 ### Recommendation Pipeline
 
 1. Reconstruct or estimate context state.
-2. Compute turn-level deltas and signal values.
-3. Detect branching points.
-4. Score candidate actions.
-5. Produce a primary recommendation and alternatives.
-6. Attach evidence and suggested commands.
+1. Compute turn-level deltas and signal values.
+1. Detect branching points.
+1. Score candidate actions.
+1. Produce a primary recommendation and alternatives.
+1. Attach evidence and suggested commands.
 
 ### Candidate Actions and Selection Logic
 
@@ -741,10 +761,10 @@ Recommend when:
 - only the conclusion needs to return,
 - the parent context should remain clean.
 
-## Advisor-Agent Specification
+## Guidance-Agent Specification (V2)
 
-The Context Advisor is an optional higher-order agent that analyzes the primary
-session from outside the session.
+The Context Guidance agent is an optional higher-order agent that analyzes the
+primary session from outside the session.
 
 ### Purpose
 
@@ -753,7 +773,7 @@ without being degraded by the primary session's own overloaded context.
 
 ### Inputs
 
-The advisor should receive a structured representation rather than the full raw
+The guidance agent receives a structured representation rather than the full raw
 transcript by default. Candidate input bundle:
 
 - session metadata,
@@ -771,7 +791,7 @@ transcript by default. Candidate input bundle:
 
 ### Outputs
 
-The advisor must return:
+The guidance agent must return:
 
 - diagnosis,
 - primary recommendation,
@@ -782,25 +802,26 @@ The advisor must return:
 - confidence,
 - cited evidence from the structured input.
 
-### Advisor Safety Constraints
+### Safety Constraints
 
-- Do not allow the advisor to issue destructive commands automatically.
-- Clearly separate advisor opinion from measured telemetry.
+- Do not allow the guidance agent to issue destructive commands automatically.
+- Clearly separate guidance-agent opinion from measured telemetry.
 - Do not imply certainty where evidence is weak.
 - Provide fallback recommendations when confidence is low.
 
-### Example Advisor Output
+### Example Guidance Output
 
 "Recommendation: rewind to turn 84. The session retains useful repo-reading
 context up to turn 84, but turns 85-104 represent a failed tangent into
-deployment warnings that do not support the active auth bug. Rewind and re-prompt
-with: 'Ignore the deployment warning branch. Focus on auth middleware in
-files X and Y. We ruled out approach A because constraint B.'"
+deployment warnings that do not support the active auth bug. Rewind and
+re-prompt with: 'Ignore the deployment warning branch. Focus on auth middleware
+in files X and Y. We ruled out approach A because constraint B.'"
 
 ## Agent-Specific Considerations
 
-Different coding agents expose different observability surfaces. The system must
-handle partial fidelity by agent.
+Different coding agents expose different observability surfaces. The product
+must handle partial fidelity by agent. V1 supports every agent registered in
+`internal/parser/types.go`.
 
 ### Claude Code
 
@@ -823,7 +844,7 @@ Likely strong support for:
 
 ### General Requirement
 
-The product should define:
+The product must define:
 
 - a normalized context taxonomy,
 - a per-agent mapping layer,
@@ -831,7 +852,7 @@ The product should define:
 
 ## Data Requirements
 
-The implementation should reuse existing `agentsview` session and message data
+The implementation must reuse existing `agentsview` session and message data
 where possible and extend the schema only where needed.
 
 ### Existing Data Likely Reusable
@@ -847,55 +868,34 @@ where possible and extend the schema only where needed.
 
 ### New Derived Data Needed
 
-- context timeline aggregates,
-- context category attribution,
-- turn-level context deltas,
-- branch-point detections,
-- recommendation objects,
-- advisor outputs,
+- context timeline aggregates (V1),
+- context category attribution (V1),
+- turn-level context deltas (V1),
+- branch-point detections (V2),
+- recommendation objects (V2),
+- guidance-agent outputs (V2),
 - optional cached token estimates.
 
 ## Storage Strategy
 
-### Option A: Mostly computed on read
+Lightweight context metrics are computed on read. Persistence is added only for
+expensive derived analyses (such as guidance-agent outputs in V2) and only when
+caching becomes necessary for UX.
 
-Advantages:
+Trade-offs we accept:
 
-- fewer schema changes,
-- easy iteration,
-- no migration burden for early versions.
+- **Pro:** fewer schema changes, easy iteration, no migration burden for early
+  versions.
+- **Con:** more expensive reads, harder to compare repeated analysis runs.
 
-Disadvantages:
-
-- more expensive reads,
-- harder to compare repeated analysis runs.
-
-### Option B: Persist derived context-analysis artifacts
-
-Advantages:
-
-- faster UI,
-- easier diffing across runs,
-- advisor output caching.
-
-Disadvantages:
-
-- more schema work,
-- invalidation complexity.
-
-### Recommendation
-
-For v1:
-
-- compute lightweight context metrics on read,
-- persist only advisor outputs and expensive derived analyses if needed,
-- add caching once UX and signal definitions stabilize.
+Caching is added once UX and signal definitions stabilize.
 
 ## API Requirements
 
-The backend should expose dedicated context-analysis endpoints.
+The backend exposes dedicated context-analysis endpoints. V1 endpoints return
+descriptive data only; V2 endpoints return interpretation.
 
-### Proposed Endpoints
+### V1 Endpoints
 
 #### `GET /api/v1/sessions/{id}/context`
 
@@ -904,6 +904,8 @@ Returns current summary and context composition.
 #### `GET /api/v1/sessions/{id}/context/timeline`
 
 Returns per-turn or per-window context growth data.
+
+### V2 Endpoints
 
 #### `GET /api/v1/sessions/{id}/context/branch-points`
 
@@ -915,56 +917,67 @@ Returns the primary recommendation and rationale.
 
 #### `POST /api/v1/sessions/{id}/context/analyze`
 
-Triggers fresh analysis, optionally including advisor-agent execution.
+Triggers fresh analysis, optionally including guidance-agent execution.
 
-#### `GET /api/v1/sessions/{id}/context/advisor`
+#### `GET /api/v1/sessions/{id}/context/guidance`
 
-Returns latest advisor result if one exists.
+Returns the latest guidance-agent result if one exists.
 
 ### Response Requirements
 
-Every response should clearly separate:
+Every response must clearly separate:
 
 - measured values,
 - estimated values,
 - inferred values,
-- model-generated advisory text.
+- model-generated guidance text.
 
 ## Frontend Requirements
 
+### Route
+
+Periscope is served at `/context/:sessionId`. The page includes:
+
+- a link to the agentsview home (`/`),
+- optional embedding as a tab inside the agentsview session detail view,
+- safe exposure as a JetBrains IDE webview.
+
 ### UI Components
 
-Candidate component set:
+V1 components:
 
 - `ContextSummaryCard`
 - `ContextCompositionChart`
 - `ContextTimeline`
+
+V2 components (additive):
+
 - `ContextBranchPointList`
 - `ContextRecommendationCard`
-- `ContextAdvisorPanel`
+- `ContextGuidancePanel`
 - `ContextEvidenceDrawer`
 
 ### Interaction Requirements
 
-- Clicking a turn in the timeline should jump to the transcript.
-- Clicking a branch point should highlight the implicated turns.
-- Recommendation actions should provide copyable command and prompt text.
-- The UI should make live updates obvious when the session is active.
+- Clicking a turn in the timeline must jump to the transcript.
+- (V2) Clicking a branch point must highlight the implicated turns.
+- (V2) Recommendation actions must provide copyable command and prompt text.
+- The UI must make live updates obvious when the session is active.
 
 ### Filtering and Modes
 
-The user should be able to switch between:
+The user must be able to switch between:
 
-- current-state view,
-- full timeline view,
-- recent degradation view,
-- branch-point view,
-- advisor view.
+- current-state view (V1),
+- full timeline view (V1),
+- recent degradation view (V2),
+- branch-point view (V2),
+- guidance view (V2).
 
-## Algorithm and Heuristic Guidance
+## Algorithm and Heuristic Guidance (V2)
 
-The system does not need perfect semantic understanding in v1, but it must be
-useful and explainable.
+The system does not need perfect semantic understanding, but it must be useful
+and explainable.
 
 ### Suggested Initial Heuristics
 
@@ -1004,43 +1017,43 @@ delegation to a subagent.
 
 ## Example End-to-End Flows
 
-### Flow 1: Live degraded session
+### Flow 1: Live degraded session (V2)
 
 1. User opens an active session.
-2. Context view shows 78% occupancy and rapid recent growth.
-3. Timeline highlights the last 24 turns as a tool-heavy debugging tangent.
-4. Branch-point card says: "Rewind to turn 91."
-5. Recommendation card provides rewind guidance and a reprompt.
-6. User copies the suggested rewind text and acts in the primary tool.
+1. Context view shows 78% occupancy and rapid recent growth.
+1. Timeline highlights the last 24 turns as a tool-heavy debugging tangent.
+1. Branch-point card says: "Rewind to turn 91."
+1. Recommendation card provides rewind guidance and a reprompt.
+1. User copies the suggested rewind text and acts in the primary tool.
 
-### Flow 2: Compact before failure
+### Flow 2: Compact before failure (V2)
 
 1. User sees session at 63% occupancy.
-2. Context remains coherent but a large implementation branch has accumulated.
-3. Recommendation says compact proactively.
-4. Product offers compact focus text.
-5. User compacts before context rot worsens.
+1. Context remains coherent but a large implementation branch has accumulated.
+1. Recommendation says compact proactively.
+1. Product offers compact focus text.
+1. User compacts before context rot worsens.
 
-### Flow 3: Fork after task pivot
+### Flow 3: Fork after task pivot (V2)
 
 1. Session began as feature implementation.
-2. User later switched to documentation and deployment.
-3. Visualizer detects low overlap between current task and early session mass.
-4. Recommendation says start a new session with a prepared handoff brief.
+1. User later switched to documentation and deployment.
+1. Visualizer detects low overlap between current task and early session mass.
+1. Recommendation says start a new session with a prepared handoff brief.
 
-### Flow 4: Advisor review
+### Flow 4: Guidance review (V2)
 
-1. User requests advisor analysis.
-2. Secondary agent receives structured summary.
-3. Advisor returns diagnosis, recommendation, and copyable action text.
-4. UI displays advisor output alongside system heuristics.
+1. User requests guidance-agent analysis.
+1. Secondary agent receives structured summary.
+1. Guidance returns diagnosis, recommendation, and copyable action text.
+1. UI displays guidance output alongside system heuristics.
 
 ## Success Metrics
 
 ### Product Success Metrics
 
 - users open the context view during long sessions,
-- users adopt suggested branch actions,
+- users adopt suggested branch actions (V2),
 - users report higher confidence in session-management decisions,
 - users recover from degraded sessions faster,
 - fewer very-long sessions end in obvious retry loops or compaction failures.
@@ -1054,11 +1067,11 @@ delegation to a subagent.
 
 ### Quality Metrics
 
-- recommendation acceptance rate,
+- recommendation acceptance rate (V2),
 - user-rated usefulness,
-- branch-point precision,
-- advisor agreement with user action,
-- false-positive rate for unhealthy-session warnings.
+- branch-point precision (V2),
+- guidance-agent agreement with user action (V2),
+- false-positive rate for unhealthy-session warnings (V2).
 
 ## Constraints and Risks
 
@@ -1076,155 +1089,41 @@ Bad advice here can be costly. The system must remain transparent and cautious.
 Token attribution, branch detection, and multi-agent support can expand quickly.
 Scope discipline is required.
 
-### Risk: Advisor contamination
+### Risk: Guidance contamination
 
-If the advisor receives too much raw transcript, it may become expensive and less
-focused. Structured summaries should be preferred.
+If the guidance agent receives too much raw transcript, it may become expensive
+and less focused. Structured summaries must be preferred.
 
 ## Privacy and Security
 
-- All analysis should remain local by default.
-- Advisor-agent invocation should use the user's existing local agent tools when
+- All analysis must remain local by default.
+- Guidance-agent invocation must use the user's existing local agent tools when
   possible.
-- No session data should be sent to remote services without explicit user
-  action.
-- Cached advisor outputs should be stored as local session artifacts.
+- No session data may be sent to remote services without explicit user action.
+- Cached guidance outputs must be stored as local session artifacts.
 
 ## Rollout Plan
 
-### Phase 1: Read-only visualizer
+### V1: Context Visualizer
 
-Deliver:
+Deliver the visualizer described in Product Scope > V1, satisfying FR1, FR2,
+FR3, FR8, and FR9. No analysis, scoring, or recommendation surfaces. Live
+updates are wired through SSE; all agents in `internal/parser/types.go` are
+supported.
 
-- context summary,
-- composition breakdown,
-- turn timeline,
-- basic health signals,
-- branch-point heuristics,
-- static recommendation card.
+### V2: Context Guidance
 
-### Phase 2: Operational guidance
+Deliver the guidance layer described in Product Scope > V2, satisfying FR4
+through FR7 and FR10. Includes signal computation, health classification,
+branch-point detection, recommendation engine, copyable action text, evidence
+inspector, relevance heuristic, and the optional guidance agent with structured
+input bundle, fresh-context analysis, and result panel with caching.
 
-Deliver:
-
-- copyable command text,
-- suggested rewind prompts,
-- suggested compact focus text,
-- fork handoff generation.
-
-### Phase 3: Advisor-agent integration
-
-Deliver:
-
-- structured analysis bundle,
-- external advisor run,
-- advisor results panel,
-- caching and re-run controls.
-
-### Phase 4: Deeper automation
-
-Potential future work:
-
-- proactive warnings,
-- auto-generated handoff drafts,
-- compare two candidate branch strategies,
-- recommend subagent boundaries before a task starts.
-
-## Open Questions
-
-- Which agents expose enough metadata for high-fidelity context reconstruction?
-- Should advisor recommendations be persisted or always recomputed?
-- How should "relevance" be estimated without adding heavy semantic models?
-- How should the UI distinguish context size from context usefulness?
-- Should the initial release be Claude-first, then generalized?
-- How much of the recommendation engine should be deterministic versus
-  agent-generated?
-
-## Recommended v1 Scope
-
-To keep the first version tractable, v1 should focus on:
-
-- a single session detail experience,
-- historical plus live analysis for agents with strong parse support,
-- estimated context growth timeline,
-- source-category breakdown,
-- heuristic health classification,
-- rewind/compact/fork/subagent recommendations,
-- copyable action text,
-- optional advisor execution behind a manual button.
-
-Avoid for v1:
-
-- fully automatic action execution,
-- cross-session optimization,
-- heavy semantic topic modeling,
-- exact packed-context reconstruction for every agent,
-- team-wide dashboards for context health.
-
-## Implementation Handoff
-
-## Suggested Workstreams
-
-### Workstream 1: Context Data Layer
-
-- define normalized context categories,
-- implement token-estimation utilities,
-- build turn-level context delta computation,
-- expose derived analysis structs.
-
-### Workstream 2: Recommendation Engine
-
-- implement signal calculations,
-- build rule-based action scorer,
-- generate recommendation payloads,
-- create evidence attachments.
-
-### Workstream 3: Backend API
-
-- add context-analysis endpoints,
-- add caching or persistence where needed,
-- support live refresh for active sessions.
-
-### Workstream 4: Frontend Experience
-
-- create context tab or route,
-- build summary, timeline, branch-point, and recommendation components,
-- integrate transcript jump links and copy actions.
-
-### Workstream 5: Advisor Integration
-
-- define advisor input schema,
-- define advisor output schema,
-- implement advisor execution path,
-- render advisor result safely with confidence and evidence.
-
-## Suggested Deliverables for the Implementing Agent
-
-1. Data model and API design proposal
-2. Backend context-analysis implementation
-3. Frontend context visualizer UI
-4. Recommendation engine
-5. Advisor-agent integration
-6. Tests for signal logic and recommendation output
-7. Documentation for supported agents and accuracy caveats
-
-## Acceptance Criteria
-
-The feature is complete for v1 when:
-
-- a user can open a session and see estimated context usage and composition,
-- a user can inspect context growth turn by turn,
-- a user can see at least one evidence-backed recommendation,
-- the recommendation includes actionable text,
-- the system distinguishes measured versus inferred values,
-- the UI supports active-session refresh,
-- at least one agent is supported well enough to make the feature genuinely
-  useful.
+Detailed implementation plans for each phase are produced separately.
 
 ## Final Product Statement
 
-The Context Session Visualizer is a context x-ray and context coach for
-coding-agent sessions.
+Periscope is a context x-ray and context coach for coding-agent sessions.
 
 It helps users see how context was spent, where it stopped helping, and what to
 do next to preserve model performance. By combining context observability,
