@@ -660,6 +660,16 @@ export async function starSession(id: string): Promise<void> {
   }
 }
 
+export async function enqueueSummarize(id: string): Promise<void> {
+  const res = await fetch(`${getBase()}/sessions/${id}/summarize`, authHeaders({
+    method: "POST",
+  }));
+  if (!res.ok) {
+    const body = await res.text();
+    throw new ApiError(res.status, apiErrorMessage(res.status, body));
+  }
+}
+
 export async function unstarSession(id: string): Promise<void> {
   const res = await fetch(`${getBase()}/sessions/${id}/star`, authHeaders({
     method: "DELETE",

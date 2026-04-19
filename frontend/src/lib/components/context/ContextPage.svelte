@@ -5,6 +5,7 @@
     getSessionContext,
     getSessionContextTimeline,
     watchSession,
+    enqueueSummarize,
   } from "../../api/client.js";
   import type {
     Session,
@@ -31,6 +32,8 @@
   let sessionData: Session | null = $state(session);
   let loading = $state(true);
   let error = $state("");
+  let summarizing = $state(false);
+  let summarizeError = $state("");
   let loadVersion = 0;
   let watcher: EventSource | null = null;
 
@@ -56,6 +59,18 @@
       if (loadVersion === version) {
         loading = false;
       }
+    }
+  }
+
+  async function triggerSummarize() {
+    summarizing = true;
+    summarizeError = "";
+    try {
+      await enqueueSummarize(sessionId);
+    } catch (err) {
+      summarizeError = err instanceof Error ? err.message : "Failed to enqueue";
+    } finally {
+      summarizing = false;
     }
   }
 
@@ -132,6 +147,19 @@
                 Summaries · {sc.total_turns}/{sc.total_turns}
               {/if}
             </span>
+            {#if sc.status === "idle" || sc.status === "pending"}
+              <button
+                class="summarize-btn"
+                onclick={triggerSummarize}
+                disabled={summarizing}
+                title="Enqueue this session for turn summarization"
+              >
+                {summarizing ? "Queued…" : "Generate summaries"}
+              </button>
+            {/if}
+            {#if summarizeError}
+              <span class="summarize-error">{summarizeError}</span>
+            {/if}
           {/if}
         </div>
         {#if summaryData.rewind_signal}
@@ -268,6 +296,32 @@
 
   .coverage-pill.idle {
     color: var(--text-secondary);
+  }
+
+  .summarize-btn {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--accent-teal);
+    color: var(--accent-teal);
+    background: transparent;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .summarize-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--bg-surface) 85%, var(--accent-teal) 15%);
+  }
+
+  .summarize-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .summarize-error {
+    font-size: 11px;
+    color: var(--accent-rose);
   }
 
   .empty {

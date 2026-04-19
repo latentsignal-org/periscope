@@ -553,14 +553,18 @@ func recomputePendingSessions(
 // Returns nil when ANTHROPIC_API_KEY is unset — the server then
 // treats summarisation as disabled.
 func startLLMClient() llm.Client {
-	client, ok := llm.NewFromEnv()
-	if !ok {
-		log.Printf(
-			"summarize: ANTHROPIC_API_KEY unset; " +
-				"turn summaries disabled",
-		)
+	key := os.Getenv("ANTHROPIC_API_KEY")
+	if key == "" {
+		log.Printf("summarize: ANTHROPIC_API_KEY unset; turn summaries disabled")
 		return nil
 	}
+	log.Printf("summarize: ANTHROPIC_API_KEY found (len=%d)", len(key))
+	client, ok := llm.NewFromEnv()
+	if !ok {
+		log.Printf("summarize: LLM client init failed despite key being set")
+		return nil
+	}
+	log.Printf("summarize: LLM client initialized; turn summaries enabled")
 	return client
 }
 

@@ -76,6 +76,23 @@ func (s *Server) handleListStarred(
 	})
 }
 
+func (s *Server) handleEnqueueSummarize(
+	w http.ResponseWriter, r *http.Request,
+) {
+	if s.summarizer == nil || !s.summarizer.Enabled() {
+		writeError(w, http.StatusServiceUnavailable,
+			"summaries disabled: set ANTHROPIC_API_KEY and restart")
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "missing session id")
+		return
+	}
+	s.summarizer.Enqueue(id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleBulkStar(
 	w http.ResponseWriter, r *http.Request,
 ) {
