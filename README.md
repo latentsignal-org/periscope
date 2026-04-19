@@ -1,7 +1,6 @@
 # Periscope
 
-Context session visualizer and improver for AI coding agents — built on
-[agentsview](https://github.com/wesm/agentsview).
+Context session visualizer and improver for AI coding agents.
 
 Browse, search, and track costs across all your AI coding agents. See where
 your context window is going, understand session health, and get guidance on
@@ -9,7 +8,7 @@ when to continue, rewind, compact, or start fresh. One binary, no accounts,
 everything local.
 
 <p align="center">
-  <img src="https://agentsview.io/screenshots/dashboard.png" alt="Analytics dashboard" width="720">
+  <img src="screenshots/periscope-context-view.png" alt="Periscope context view" width="720">
 </p>
 
 ## Install
