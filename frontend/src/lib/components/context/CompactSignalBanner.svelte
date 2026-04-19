@@ -1,148 +1,195 @@
 <script lang="ts">
   import type { CompactSignal } from "../../api/types/context.js";
+  import { formatTokenCount } from "../../utils/format.js";
 
   interface Props {
     signal: CompactSignal;
   }
 
   let { signal }: Props = $props();
-
-  const confidenceColor: Record<string, string> = {
-    high: "var(--accent-orange, #ea580c)",
-    medium: "var(--accent-yellow, #e6a700)",
-    low: "var(--text-muted)",
-  };
 </script>
 
-<div class="compact-banner" style:border-left-color={confidenceColor[signal.confidence] ?? "var(--text-muted)"}>
-  <div class="compact-header">
-    <div class="compact-label">
-      <span class="badge" class:high={signal.confidence === "high"} class:medium={signal.confidence === "medium"} class:low={signal.confidence === "low"}>
-        Compact signal
-      </span>
-      <span class="confidence">{signal.confidence} confidence</span>
-      <span class="score">score {signal.score}/100</span>
-    </div>
-    {#if signal.estimated_reclaimable > 0}
-      <span class="reclaimable">
-        ~{Math.round(signal.estimated_reclaimable / 1000)}k tokens reclaimable
-      </span>
-    {/if}
+<section class="signal-card compact" class:high={signal.confidence === "high"} class:medium={signal.confidence === "medium"}>
+  <div class="signal-icon">
+    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="4 14 10 14 10 20" />
+      <polyline points="20 10 14 10 14 4" />
+      <line x1="14" y1="10" x2="21" y2="3" />
+      <line x1="3" y1="21" x2="10" y2="14" />
+    </svg>
   </div>
-  <ul class="reasons">
-    {#each signal.reasons as reason}
-      <li>{reason}</li>
-    {/each}
-  </ul>
-  {#if signal.compact_focus && signal.compact_focus.length > 0}
-    <div class="focus-section">
-      <span class="focus-label">Focus areas:</span>
-      {#each signal.compact_focus as focus}
-        <span class="focus-tag">{focus}</span>
-      {/each}
+
+  <div class="signal-body">
+    <div class="signal-top">
+      <div class="signal-title-row">
+        <h3>Compact recommended</h3>
+        <div class="signal-badges">
+          <span class="badge confidence">{signal.confidence}</span>
+          <span class="badge score">{signal.score}/100</span>
+        </div>
+      </div>
     </div>
-  {/if}
-</div>
+
+    <ul class="reasons">
+      {#each signal.reasons as reason}
+        <li>{reason}</li>
+      {/each}
+    </ul>
+
+    <div class="signal-footer">
+      {#if signal.estimated_reclaimable > 0}
+        <span class="metric">
+          <strong>~{formatTokenCount(signal.estimated_reclaimable)}</strong> reclaimable
+        </span>
+      {/if}
+      {#if signal.compact_focus && signal.compact_focus.length > 0}
+        <span class="focus">
+          Focus: {signal.compact_focus.join(", ")}
+        </span>
+      {/if}
+    </div>
+  </div>
+</section>
 
 <style>
-  .compact-banner {
-    background: var(--bg-surface);
+  .signal-card {
+    display: flex;
+    gap: 14px;
+    padding: 14px 16px;
+    border-radius: var(--radius-lg);
     border: 1px solid var(--border-muted);
-    border-left-width: 3px;
+    background: var(--bg-surface);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .signal-card::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+  }
+
+  .signal-card.compact::before {
+    background: linear-gradient(135deg,
+      color-mix(in srgb, var(--accent-amber) 6%, transparent),
+      color-mix(in srgb, var(--accent-orange) 3%, transparent));
+  }
+
+  .signal-card.high {
+    border-color: color-mix(in srgb, var(--accent-orange) 40%, var(--border-muted));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-orange) 10%, transparent),
+                var(--shadow-sm);
+  }
+
+  .signal-card.medium {
+    border-color: color-mix(in srgb, var(--accent-amber) 35%, var(--border-muted));
+  }
+
+  .signal-icon {
+    flex-shrink: 0;
+    width: 40px;
+    height: 40px;
     border-radius: var(--radius-md);
-    padding: 12px 14px;
-    font-size: 12px;
-    line-height: 1.5;
+    display: grid;
+    place-items: center;
   }
 
-  .compact-header {
+  .compact .signal-icon {
+    background: color-mix(in srgb, var(--accent-amber) 14%, transparent);
+    color: var(--accent-amber);
+  }
+
+  .signal-body {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+    gap: 8px;
+  }
+
+  .signal-top {
+    display: grid;
+    gap: 4px;
+  }
+
+  .signal-title-row {
     display: flex;
+    align-items: center;
     justify-content: space-between;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
+    gap: 10px;
   }
 
-  .compact-label {
+  h3 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+  }
+
+  .signal-badges {
     display: flex;
-    align-items: center;
-    gap: 8px;
+    gap: 5px;
+    flex-shrink: 0;
   }
 
   .badge {
     font-size: 10px;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
-    padding: 2px 6px;
+    letter-spacing: 0.05em;
+    padding: 2px 7px;
     border-radius: 3px;
+    line-height: 1.4;
   }
 
-  .badge.high {
-    background: color-mix(in srgb, var(--accent-orange, #ea580c) 20%, transparent);
-    color: var(--accent-orange, #ea580c);
+  .badge.confidence {
+    background: color-mix(in srgb, var(--accent-amber) 14%, transparent);
+    color: var(--accent-amber);
   }
 
-  .badge.medium {
-    background: color-mix(in srgb, var(--accent-yellow, #e6a700) 20%, transparent);
-    color: var(--accent-yellow, #e6a700);
+  .high .badge.confidence {
+    background: color-mix(in srgb, var(--accent-orange) 14%, transparent);
+    color: var(--accent-orange);
   }
 
-  .badge.low {
-    background: color-mix(in srgb, var(--text-muted) 15%, transparent);
-    color: var(--text-muted);
-  }
-
-  .confidence {
-    color: var(--text-secondary);
-    font-weight: 500;
-  }
-
-  .score {
-    color: var(--text-muted);
-    font-variant-numeric: tabular-nums;
-  }
-
-  .reclaimable {
+  .badge.score {
+    background: var(--bg-inset);
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
   }
 
   .reasons {
-    margin: 8px 0 0;
-    padding-left: 18px;
+    margin: 0;
+    padding-left: 16px;
+    font-size: 12px;
+    line-height: 1.6;
     color: var(--text-secondary);
   }
 
   .reasons li {
-    margin-bottom: 2px;
+    margin-bottom: 1px;
   }
 
-  .reasons li:last-child {
-    margin-bottom: 0;
-  }
-
-  .focus-section {
+  .signal-footer {
     display: flex;
-    align-items: center;
-    gap: 6px;
+    align-items: baseline;
+    gap: 12px;
     flex-wrap: wrap;
-    margin-top: 8px;
-    padding-top: 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    padding-top: 6px;
     border-top: 1px solid var(--border-muted);
   }
 
-  .focus-label {
-    color: var(--text-muted);
-    font-size: 11px;
-    font-weight: 500;
+  .metric strong {
+    font-weight: 700;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
   }
 
-  .focus-tag {
-    font-size: 11px;
-    padding: 1px 6px;
-    border-radius: 3px;
-    background: color-mix(in srgb, var(--accent-orange, #ea580c) 10%, transparent);
-    color: var(--text-secondary);
+  .focus {
+    font-style: italic;
   }
 </style>

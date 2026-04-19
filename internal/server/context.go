@@ -1168,6 +1168,15 @@ func buildCompactInput(
 		}
 	}
 
+	// Delta sums can exceed the measured cumulative total.
+	// Clamp so ratios stay in [0, 1].
+	if olderTokens > currentTokens {
+		olderTokens = currentTokens
+	}
+	if recentTokens > currentTokens {
+		recentTokens = currentTokens
+	}
+
 	// Compute median delta and recent growth rate
 	medianDelta := 0
 	recentGrowthRate := 0.0

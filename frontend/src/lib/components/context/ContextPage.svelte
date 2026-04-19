@@ -85,7 +85,7 @@
   {#if !embedded}
     <div class="context-page-header">
       <div>
-        <div class="eyebrow">Periscope V1</div>
+        <div class="eyebrow">Periscope</div>
         <h1>{sessionData?.display_name ?? sessionData?.project ?? sessionId}</h1>
       </div>
       <div class="actions">
@@ -104,11 +104,16 @@
   {:else if error}
     <div class="empty error">{error}</div>
   {:else if summaryData && timelineData}
-    {#if summaryData.rewind_signal}
-      <RewindSignalBanner signal={summaryData.rewind_signal} />
-    {/if}
-    {#if summaryData.compact_signal}
-      <CompactSignalBanner signal={summaryData.compact_signal} />
+    {#if summaryData.rewind_signal || summaryData.compact_signal}
+      <div class="signals-group">
+        <div class="signals-eyebrow">Context Guidance</div>
+        {#if summaryData.rewind_signal}
+          <RewindSignalBanner signal={summaryData.rewind_signal} />
+        {/if}
+        {#if summaryData.compact_signal}
+          <CompactSignalBanner signal={summaryData.compact_signal} />
+        {/if}
+      </div>
     {/if}
     <ContextSummaryCard
       summary={summaryData.summary}
@@ -183,6 +188,19 @@
   .ghost-btn:hover {
     background: var(--bg-surface-hover);
     color: var(--text-primary);
+  }
+
+  .signals-group {
+    display: grid;
+    gap: 10px;
+  }
+
+  .signals-eyebrow {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
   }
 
   .empty {

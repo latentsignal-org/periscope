@@ -1,167 +1,224 @@
 <script lang="ts">
   import type { RewindSignal } from "../../api/types/context.js";
+  import { formatTokenCount } from "../../utils/format.js";
 
   interface Props {
     signal: RewindSignal;
   }
 
   let { signal }: Props = $props();
-
-  const confidenceColor: Record<string, string> = {
-    high: "var(--accent-red)",
-    medium: "var(--accent-yellow, #e6a700)",
-    low: "var(--text-muted)",
-  };
 </script>
 
-<div class="rewind-banner" style:border-left-color={confidenceColor[signal.confidence] ?? "var(--text-muted)"}>
-  <div class="rewind-header">
-    <div class="rewind-label">
-      <span class="badge" class:high={signal.confidence === "high"} class:medium={signal.confidence === "medium"} class:low={signal.confidence === "low"}>
-        Rewind signal
-      </span>
-      <span class="confidence">{signal.confidence} confidence</span>
-      <span class="score">score {signal.score}/100</span>
-    </div>
-    {#if signal.tokens_recoverable > 0}
-      <span class="recoverable">
-        ~{Math.round(signal.tokens_recoverable / 1000)}k tokens recoverable
-      </span>
-    {/if}
+<section class="signal-card rewind" class:high={signal.confidence === "high"} class:medium={signal.confidence === "medium"}>
+  <div class="signal-icon">
+    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="1 4 1 10 7 10" />
+      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+    </svg>
   </div>
-  {#if signal.rewind_to_turn}
-    <div class="rewind-target">
-      <span class="target-arrow">&#x21B6;</span>
-      <span class="target-text">
-        Rewind to turn {signal.rewind_to_turn}
-      </span>
-      {#if signal.bad_stretch_from && signal.bad_stretch_to}
-        <span class="bad-stretch">
-          {#if signal.bad_stretch_from === signal.bad_stretch_to}
-            — turn {signal.bad_stretch_to} is problematic
-          {:else}
-            — turns {signal.bad_stretch_from}–{signal.bad_stretch_to} are problematic
+
+  <div class="signal-body">
+    <div class="signal-top">
+      <div class="signal-title-row">
+        <h3>Rewind recommended</h3>
+        <div class="signal-badges">
+          <span class="badge confidence">{signal.confidence}</span>
+          <span class="badge score">{signal.score}/100</span>
+        </div>
+      </div>
+
+      {#if signal.rewind_to_turn}
+        <div class="target">
+          <span class="target-label">Rewind to turn {signal.rewind_to_turn}</span>
+          {#if signal.bad_stretch_from && signal.bad_stretch_to}
+            <span class="target-meta">
+              {#if signal.bad_stretch_from === signal.bad_stretch_to}
+                &mdash; drop turn {signal.bad_stretch_to}
+              {:else}
+                &mdash; drop turns {signal.bad_stretch_from}&ndash;{signal.bad_stretch_to}
+              {/if}
+            </span>
           {/if}
-        </span>
+        </div>
       {/if}
     </div>
-  {/if}
-  <ul class="reasons">
-    {#each signal.reasons as reason}
-      <li>{reason}</li>
-    {/each}
-    {#if signal.rewind_to_reason}
-      <li class="target-reason">{signal.rewind_to_reason}</li>
-    {/if}
-  </ul>
-</div>
+
+    <ul class="reasons">
+      {#each signal.reasons as reason}
+        <li>{reason}</li>
+      {/each}
+    </ul>
+
+    <div class="signal-footer">
+      {#if signal.tokens_recoverable > 0}
+        <span class="metric">
+          <strong>{formatTokenCount(signal.tokens_recoverable)}</strong> recoverable
+        </span>
+      {/if}
+      {#if signal.rewind_to_reason}
+        <span class="detail">{signal.rewind_to_reason}</span>
+      {/if}
+    </div>
+  </div>
+</section>
 
 <style>
-  .rewind-banner {
-    background: var(--bg-surface);
+  .signal-card {
+    display: flex;
+    gap: 14px;
+    padding: 14px 16px;
+    border-radius: var(--radius-lg);
     border: 1px solid var(--border-muted);
-    border-left-width: 3px;
+    background: var(--bg-surface);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .signal-card::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+  }
+
+  .signal-card.rewind::before {
+    background: linear-gradient(135deg,
+      color-mix(in srgb, var(--accent-red) 6%, transparent),
+      color-mix(in srgb, var(--accent-orange) 3%, transparent));
+  }
+
+  .signal-card.high {
+    border-color: color-mix(in srgb, var(--accent-red) 40%, var(--border-muted));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-red) 10%, transparent),
+                var(--shadow-sm);
+  }
+
+  .signal-card.medium {
+    border-color: color-mix(in srgb, var(--accent-amber) 35%, var(--border-muted));
+  }
+
+  .signal-icon {
+    flex-shrink: 0;
+    width: 40px;
+    height: 40px;
     border-radius: var(--radius-md);
-    padding: 12px 14px;
-    font-size: 12px;
-    line-height: 1.5;
+    display: grid;
+    place-items: center;
   }
 
-  .rewind-header {
+  .rewind .signal-icon {
+    background: color-mix(in srgb, var(--accent-red) 12%, transparent);
+    color: var(--accent-red);
+  }
+
+  .signal-body {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+    gap: 8px;
+  }
+
+  .signal-top {
+    display: grid;
+    gap: 4px;
+  }
+
+  .signal-title-row {
     display: flex;
+    align-items: center;
     justify-content: space-between;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
+    gap: 10px;
   }
 
-  .rewind-label {
+  h3 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+  }
+
+  .signal-badges {
     display: flex;
-    align-items: center;
-    gap: 8px;
+    gap: 5px;
+    flex-shrink: 0;
   }
 
   .badge {
     font-size: 10px;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
-    padding: 2px 6px;
+    letter-spacing: 0.05em;
+    padding: 2px 7px;
     border-radius: 3px;
-    color: var(--text-primary);
+    line-height: 1.4;
   }
 
-  .badge.high {
-    background: color-mix(in srgb, var(--accent-red) 20%, transparent);
+  .badge.confidence {
+    background: color-mix(in srgb, var(--accent-red) 14%, transparent);
     color: var(--accent-red);
   }
 
-  .badge.medium {
-    background: color-mix(in srgb, var(--accent-yellow, #e6a700) 20%, transparent);
-    color: var(--accent-yellow, #e6a700);
+  .medium .badge.confidence {
+    background: color-mix(in srgb, var(--accent-amber) 14%, transparent);
+    color: var(--accent-amber);
   }
 
-  .badge.low {
-    background: color-mix(in srgb, var(--text-muted) 15%, transparent);
-    color: var(--text-muted);
-  }
-
-  .confidence {
-    color: var(--text-secondary);
-    font-weight: 500;
-  }
-
-  .score {
+  .badge.score {
+    background: var(--bg-inset);
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
   }
 
-  .recoverable {
-    color: var(--text-muted);
-    font-variant-numeric: tabular-nums;
-  }
-
-  .rewind-target {
+  .target {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     gap: 6px;
-    margin-top: 10px;
-    padding: 6px 10px;
-    background: color-mix(in srgb, var(--accent-blue, #3b82f6) 8%, transparent);
-    border-radius: var(--radius-sm);
-    font-size: 12px;
+    flex-wrap: wrap;
   }
 
-  .target-arrow {
-    font-size: 14px;
-    color: var(--accent-blue, #3b82f6);
-  }
-
-  .target-text {
+  .target-label {
+    font-size: 13px;
     font-weight: 600;
-    color: var(--text-primary);
+    color: var(--accent-blue);
   }
 
-  .bad-stretch {
+  .target-meta {
+    font-size: 12px;
     color: var(--text-muted);
   }
 
   .reasons {
-    margin: 8px 0 0;
-    padding-left: 18px;
+    margin: 0;
+    padding-left: 16px;
+    font-size: 12px;
+    line-height: 1.6;
     color: var(--text-secondary);
   }
 
-  .target-reason {
-    color: var(--text-muted);
-    font-style: italic;
-  }
-
   .reasons li {
-    margin-bottom: 2px;
+    margin-bottom: 1px;
   }
 
-  .reasons li:last-child {
-    margin-bottom: 0;
+  .signal-footer {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: var(--text-muted);
+    padding-top: 6px;
+    border-top: 1px solid var(--border-muted);
+  }
+
+  .metric strong {
+    font-weight: 700;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .detail {
+    font-style: italic;
   }
 </style>
