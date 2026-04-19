@@ -116,8 +116,8 @@
 <style>
   .context-page {
     display: grid;
-    gap: 18px;
-    padding: 18px;
+    gap: 16px;
+    padding: 16px;
   }
 
   .context-page-header {
@@ -128,43 +128,55 @@
   }
 
   .eyebrow {
-    font-size: 11px;
+    font-size: 10px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--text-secondary);
-    margin-bottom: 6px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
   }
 
   h1 {
     margin: 0;
-    font-size: 24px;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
   }
 
   .actions {
     display: flex;
-    gap: 10px;
+    gap: 8px;
   }
 
   .ghost-btn {
-    border: 1px solid var(--border-default);
+    border: 1px solid var(--border-muted);
     background: var(--bg-surface);
-    color: var(--text-primary);
-    border-radius: 10px;
-    padding: 9px 12px;
+    color: var(--text-secondary);
+    border-radius: var(--radius-sm);
+    padding: 4px 10px;
+    height: 24px;
+    font-size: 11px;
+    font-weight: 500;
     cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+  }
+
+  .ghost-btn:hover {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
   }
 
   .empty {
-    border: 1px dashed var(--border-default);
+    border: 1px dashed var(--border-muted);
     background: var(--bg-surface);
     color: var(--text-secondary);
-    border-radius: 14px;
-    padding: 30px;
+    border-radius: var(--radius-md);
+    padding: 24px;
     text-align: center;
+    font-size: 13px;
   }
 
   .empty.error {
-    color: #dc2626;
+    color: var(--accent-red);
   }
 
   @media (max-width: 900px) {

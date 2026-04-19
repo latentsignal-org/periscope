@@ -14,18 +14,18 @@ export const CATEGORY_LABELS: Record<string, string> = {
 };
 
 export const CATEGORY_COLORS: Record<string, string> = {
-  system_prompt_and_tool_definitions: "#6b7280",
-  user_messages: "#0f766e",
-  assistant_messages: "#1d4ed8",
-  thinking: "#7c3aed",
-  tool_calls: "#b45309",
-  tool_outputs: "#ea580c",
-  file_reads: "#2563eb",
-  search_results: "#0891b2",
-  summaries_and_compacted_handoffs: "#be123c",
-  subagent_outputs: "#4f46e5",
-  free_space: "#d1d5db",
-  other: "#64748b",
+  system_prompt_and_tool_definitions: "var(--text-muted)",
+  user_messages: "var(--accent-teal)",
+  assistant_messages: "var(--accent-blue)",
+  thinking: "var(--accent-purple)",
+  tool_calls: "var(--accent-amber)",
+  tool_outputs: "var(--accent-orange)",
+  file_reads: "var(--accent-sky)",
+  search_results: "var(--accent-indigo)",
+  summaries_and_compacted_handoffs: "var(--accent-rose)",
+  subagent_outputs: "var(--accent-pink)",
+  free_space: "var(--border-muted)",
+  other: "var(--text-muted)",
 };
 
 export function categoryLabel(category: string): string {

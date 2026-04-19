@@ -54,33 +54,35 @@
 
 <style>
   .panel {
-    border: 1px solid var(--border-default);
+    border: 1px solid var(--border-muted);
     background: var(--bg-surface);
-    border-radius: 14px;
-    padding: 18px;
+    border-radius: var(--radius-md);
+    padding: 12px;
     display: grid;
-    gap: 14px;
+    gap: 12px;
   }
 
   .eyebrow {
-    font-size: 11px;
+    font-size: 10px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--text-secondary);
-    margin-bottom: 6px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
   }
 
   h3 {
     margin: 0;
-    font-size: 18px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
   }
 
   .stacked-bar {
     display: flex;
-    height: 18px;
+    height: 14px;
     overflow: hidden;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--bg-surface) 70%, #334155 30%);
+    background: var(--bg-inset);
   }
 
   .segment {
@@ -89,7 +91,7 @@
 
   .legend {
     display: grid;
-    gap: 10px;
+    gap: 6px;
   }
 
   .legend-row {
@@ -97,7 +99,7 @@
     justify-content: space-between;
     gap: 16px;
     align-items: center;
-    font-size: 13px;
+    font-size: 12px;
   }
 
   .legend-name,
@@ -108,8 +110,18 @@
     flex-wrap: wrap;
   }
 
+  .legend-name {
+    color: var(--text-primary);
+  }
+
   .legend-metrics {
-    color: var(--text-secondary);
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+
+  .legend-metrics strong {
+    color: var(--text-primary);
+    font-weight: 600;
   }
 
   .swatch {

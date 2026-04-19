@@ -119,12 +119,12 @@
 
 <style>
   .context-card {
-    border: 1px solid var(--border-default);
+    border: 1px solid var(--border-muted);
     background: var(--bg-surface);
-    border-radius: 14px;
-    padding: 18px;
+    border-radius: var(--radius-md);
+    padding: 12px;
     display: grid;
-    gap: 14px;
+    gap: 12px;
   }
 
   .header {
@@ -135,17 +135,19 @@
   }
 
   .eyebrow {
-    font-size: 11px;
+    font-size: 10px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--text-secondary);
-    margin-bottom: 6px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
   }
 
   h2 {
     margin: 0;
-    font-size: 20px;
-    line-height: 1.2;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.3;
+    color: var(--text-primary);
   }
 
   .occupancy {
@@ -153,50 +155,62 @@
   }
 
   .tokens {
-    font-size: 28px;
+    font-size: 20px;
     font-weight: 700;
     line-height: 1;
+    color: var(--text-primary);
   }
 
   .tokens-meta {
-    font-size: 12px;
-    color: var(--text-secondary);
+    font-size: 11px;
+    color: var(--text-muted);
     margin-top: 4px;
   }
 
   .meter-shell {
-    height: 12px;
-    background: color-mix(in srgb, var(--bg-surface) 65%, #334155 35%);
+    height: 8px;
+    background: var(--bg-inset);
     border-radius: 999px;
     overflow: hidden;
   }
 
   .meter-fill {
     height: 100%;
-    background: linear-gradient(90deg, #0f766e, #ea580c);
+    background: linear-gradient(
+      90deg,
+      var(--accent-teal),
+      var(--accent-amber),
+      var(--accent-rose)
+    );
   }
 
   .stats-grid {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 12px;
+    gap: 8px;
   }
 
   .stat {
-    padding: 12px;
-    border-radius: 12px;
-    background: color-mix(in srgb, var(--bg-surface) 88%, #0f172a 12%);
-    border: 1px solid var(--border-default);
+    padding: 10px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-inset);
+    border: 1px solid var(--border-muted);
     display: grid;
-    gap: 4px;
+    gap: 2px;
+  }
+
+  .stat strong {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
   }
 
   .label,
   .meta,
   .session-meta,
   .warning {
-    font-size: 12px;
-    color: var(--text-secondary);
+    font-size: 11px;
+    color: var(--text-muted);
   }
 
   .session-meta {
@@ -207,14 +221,15 @@
 
   .warnings {
     display: grid;
-    gap: 8px;
+    gap: 6px;
   }
 
   .warning {
-    padding: 10px 12px;
-    border-left: 3px solid #f59e0b;
-    background: color-mix(in srgb, var(--bg-surface) 85%, #f59e0b 15%);
-    border-radius: 8px;
+    padding: 8px 10px;
+    border-left: 3px solid var(--accent-amber);
+    background: color-mix(in srgb, var(--bg-surface) 85%, var(--accent-amber) 15%);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
   }
 
   @media (max-width: 900px) {

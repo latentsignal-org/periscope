@@ -130,39 +130,41 @@
 
 <style>
   .panel {
-    border: 1px solid var(--border-default);
+    border: 1px solid var(--border-muted);
     background: var(--bg-surface);
-    border-radius: 14px;
-    padding: 18px;
-    display: grid;
-    gap: 16px;
-  }
-
-  .eyebrow {
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--text-secondary);
-    margin-bottom: 6px;
-  }
-
-  h3 {
-    margin: 0;
-    font-size: 18px;
-  }
-
-  .rows {
+    border-radius: var(--radius-md);
+    padding: 12px;
     display: grid;
     gap: 12px;
   }
 
+  .eyebrow {
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+  }
+
+  h3 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .rows {
+    display: grid;
+    gap: 10px;
+  }
+
   .turn-shell {
-    border-top: 1px solid var(--border-default);
-    padding-top: 12px;
+    border-top: 1px solid var(--border-muted);
+    padding-top: 10px;
   }
 
   .turn-shell.compaction-row {
-    border-top: 4px solid #be123c;
+    border-top: 2px solid var(--accent-rose);
     padding-top: 10px;
   }
 
@@ -191,12 +193,13 @@
   .entry-kind,
   .entry-ordinal,
   .annotation {
-    font-size: 12px;
-    color: var(--text-secondary);
+    font-size: 11px;
+    color: var(--text-muted);
   }
 
   .ordinal-label {
     font-weight: 700;
+    color: var(--text-secondary);
   }
 
   .metric {
@@ -204,9 +207,15 @@
     gap: 2px;
   }
 
+  .metric strong {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
   .turn-main {
     display: grid;
-    gap: 8px;
+    gap: 6px;
   }
 
   .turn-topline,
@@ -218,17 +227,17 @@
   }
 
   .turn-label {
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 600;
     color: var(--text-primary);
   }
 
   .bar {
     display: flex;
-    min-height: 16px;
+    min-height: 12px;
     overflow: hidden;
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--bg-surface) 70%, #334155 30%);
+    border-radius: var(--radius-sm);
+    background: var(--bg-inset);
   }
 
   .bar-segment {
@@ -236,13 +245,14 @@
   }
 
   .marker {
-    border: 1px solid var(--border-default);
+    border: 1px solid var(--border-muted);
     border-radius: 999px;
-    padding: 2px 6px;
+    padding: 1px 6px;
+    color: var(--text-secondary);
   }
 
   .chevron {
-    color: var(--text-secondary);
+    color: var(--text-muted);
     transition: transform 0.15s ease;
     transform-origin: center;
     padding-top: 3px;
@@ -254,50 +264,53 @@
 
   .turn-children {
     margin-left: calc(64px + 112px + 120px + 24px);
-    margin-top: 10px;
+    margin-top: 8px;
     display: grid;
-    gap: 8px;
+    gap: 6px;
   }
 
   .entry-row {
     width: 100%;
-    border: 1px solid var(--border-default);
-    background: color-mix(in srgb, var(--bg-surface) 88%, #0f172a 12%);
+    border: 1px solid var(--border-muted);
+    background: var(--bg-inset);
     color: var(--text-primary);
-    border-radius: 10px;
-    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
     display: grid;
     grid-template-columns: 88px minmax(0, 1fr) 52px;
     gap: 12px;
     align-items: start;
     text-align: left;
     cursor: pointer;
+    transition: background 0.1s, border-color 0.1s;
   }
 
   .entry-row:hover {
-    background: color-mix(in srgb, var(--bg-surface) 80%, #0f172a 20%);
+    background: var(--bg-surface-hover);
+    border-color: var(--border-default);
   }
 
   .entry-kind {
     text-transform: uppercase;
     letter-spacing: 0.04em;
     font-weight: 700;
+    color: var(--text-secondary);
   }
 
   .entry-content {
     display: grid;
-    gap: 4px;
+    gap: 2px;
   }
 
   .entry-label {
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 600;
   }
 
   .entry-preview {
-    font-size: 14px;
-    line-height: 1.35;
-    color: var(--text-primary);
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-secondary);
   }
 
   .entry-ordinal {
