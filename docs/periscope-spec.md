@@ -463,6 +463,17 @@ Confidence and uncertainty must be explicit.
 
 ## Proposed User Interface
 
+V1 uses a fixed three-section page layout:
+
+1. `ContextSummaryCard`
+1. `ContextCompositionChart`
+1. `ContextTimeline`
+
+The page structure is a vertical stack. The timeline section uses explicit
+turn-row rendering with per-turn stacked category bars, inline annotations, and
+strong compaction dividers. This is the chosen V1 UI, not an open design
+question.
+
 ### Section A: Context Summary Header (V1)
 
 Displays:
@@ -492,6 +503,12 @@ A chronological view of turns showing:
 - cumulative context,
 - session-management events,
 - tool-heavy sections.
+
+The V1 timeline must render as explicit rows rather than only as an aggregate
+chart. Each row should show the turn index, delta, cumulative estimate,
+dominant category, and a stacked per-turn category composition bar. Inline
+annotation rows should call out spikes, compaction boundaries, and subagent
+events when known.
 
 This is the core x-ray. V2 overlays tangent windows and suspected degraded
 zones.
@@ -925,6 +942,9 @@ where possible and extend the schema only where needed.
 - signal-related session metadata,
 - subagent session relationships when present.
 
+V1 implementation should build on top of this existing data model rather than
+introducing a parallel session-ingestion pipeline.
+
 ### New Derived Data Needed
 
 - context timeline aggregates (V1),
@@ -999,7 +1019,8 @@ Every response must clearly separate:
 Periscope is served at `/context/:sessionId`. The page includes:
 
 - a link to the agentsview home (`/`),
-- optional embedding as a tab inside the agentsview session detail view,
+- embedding as a tab inside the agentsview session detail view in the first V1
+  pass,
 - safe exposure as a JetBrains IDE webview.
 
 ### UI Components
@@ -1010,6 +1031,9 @@ V1 components:
 - `ContextCompositionChart`
 - `ContextTimeline`
 
+`ContextTimeline` is the canonical V1 interaction surface. A linked dual-panel
+growth chart may be added later, but it is not part of the initial V1 ship.
+
 V2 components (additive):
 
 - `ContextBranchPointList`
@@ -1019,7 +1043,9 @@ V2 components (additive):
 
 ### Interaction Requirements
 
-- Clicking a turn in the timeline must jump to the transcript.
+- Transcript jump linkage is explicitly deferred from the initial V1 ship. The
+  timeline should preserve stable turn/message identifiers so transcript
+  navigation can be added later without reworking the data model.
 - (V2) Clicking a branch point must highlight the implicated turns.
 - (V2) Recommendation actions must provide copyable command and prompt text.
 - The UI must make live updates obvious when the session is active.

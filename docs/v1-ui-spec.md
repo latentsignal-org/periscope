@@ -253,11 +253,10 @@ The current spec changes the recommendation in a few important ways:
 1. Post-compaction-only rendering simplifies the timeline and makes strong
    compaction dividers more useful.
 
-## Recommendation
+## Final V1 Layout
 
-### Recommended V1 Layout: Spec Stack + Option C Timeline
-
-The best V1 UI is a combination rather than one option verbatim:
+The V1 UI choice is now final. It is a combination rather than one option
+verbatim:
 
 1. `ContextSummaryCard`
 1. `ContextCompositionChart`
@@ -270,7 +269,10 @@ This is the right choice because:
 1. It provides turn-level inspectability without chart-library complexity.
 1. It preserves a clear path to a richer linked chart later.
 
-### Evolution Path
+The first V1 ship should not include transcript-jump behavior. The row design
+should preserve stable identifiers so transcript linkage can be added later.
+
+## Evolution Path
 
 After the first V1 ship, the best enhancement path is Option D:
 
@@ -278,7 +280,7 @@ After the first V1 ship, the best enhancement path is Option D:
 - add a linked cumulative-growth chart,
 - synchronize selection between chart and turn rows.
 
-### What to Skip for First V1
+## What to Skip for First V1
 
 - Do not ship Option A as the main timeline.
 - Do not rely on Option B alone when Option C adds materially better

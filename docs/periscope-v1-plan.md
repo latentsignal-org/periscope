@@ -28,7 +28,7 @@ branch-point analysis.
 ## Scope Summary
 
 Periscope V1 ships a standalone route at `/context/:sessionId` with optional
-embedding inside the existing session detail experience later.
+embedding inside the existing session detail experience in the first pass.
 
 The product should let a user answer two questions quickly:
 
@@ -37,6 +37,54 @@ The product should let a user answer two questions quickly:
 
 It should then let the user inspect turn-by-turn growth, spikes, and
 compaction boundaries.
+
+## Implementation Assumptions
+
+These assumptions are now fixed for V1:
+
+1. Build on top of the existing database, parser, and session-analysis code in
+   this repository. Do not create a parallel ingestion path.
+1. Use the best granularity already available per agent. Where true turn
+   reconstruction is weak, use message-level rows and label them clearly.
+1. Do not implement transcript-jump behavior in V1.
+1. Deliver both the standalone route and the embedded session-detail tab in the
+   first pass.
+1. Implement V1 in multiple waves rather than as a single large rollout.
+
+## Existing Data Audit
+
+The repository already contains most of the telemetry needed for V1:
+
+- `sessions` stores agent/session metadata, `peak_context_tokens`,
+  `compaction_count`, `has_context_data`, `cwd`, `git_branch`,
+  `parent_session_id`, and `relationship_type`.
+- `messages` stores `model`, `token_usage`, `context_tokens`,
+  `output_tokens`, `source_type`, `source_subtype`, `has_thinking`,
+  `has_tool_use`, and `is_compact_boundary`.
+- `tool_calls` and `tool_result_events` already support tool attribution and
+  subagent event reconstruction.
+- `internal/signals/context.go` already contains model-to-context-window lookup
+  logic that should be reused rather than duplicated.
+
+The local database also confirms real coverage for this data:
+
+- `621` sessions and `17052` messages.
+- `12425` messages with model data.
+- `10378` messages with token usage and context-token coverage.
+- `376` sessions with peak-context coverage.
+
+Current coverage is strongest for Claude and good for Codex, Gemini, Pi, and
+OpenCode. VSCode Copilot and OpenClaw currently have weak or missing
+token-context coverage, so V1 must degrade gracefully there.
+
+No plan, subscription, or entitlement signal was found in the current database
+schema. V1 should therefore:
+
+- use recorded limits when present,
+- otherwise infer from agent + model,
+- label plan-aware capacity as unavailable unless an existing stored signal is
+  discovered during implementation,
+- never present inferred capacity as authoritative.
 
 ## UI Plan
 
@@ -119,6 +167,9 @@ Implement a resolver with this precedence:
 
 The resolver must return both the numeric value and the provenance label.
 
+Because no plan or subscription field is currently stored in the DB, plan-aware
+capacity is a conditional enhancement rather than a V1 dependency.
+
 ### Token Estimation
 
 For each relevant message or artifact:
@@ -171,6 +222,9 @@ Audit every agent in `internal/parser/types.go` for:
 
 Fill in missing parser metadata where practical.
 
+This audit should start from the existing parser outputs and DB fields, not by
+adding new parser responsibilities unless a true gap is found.
+
 ### 2. Normalization Layer
 
 Build a normalization layer that can turn agent-specific session records into a
@@ -220,7 +274,8 @@ The first version can send coarse refresh events instead of fine-grained diffs.
 
 ### Route
 
-Add `/context/:sessionId` as a dedicated route with a link back to `/`.
+Add `/context/:sessionId` as a dedicated route with a link back to `/`, and
+mount the same shared UI inside the session detail view in the first pass.
 
 ### Components
 
@@ -233,10 +288,12 @@ Build:
 
 ### Interaction Requirements
 
-- Clicking a turn jumps to the transcript.
 - Clicking a category highlights or filters representative turns.
 - Live sessions visibly update without stealing scroll position.
 - Capacity uncertainty is visible inline near the max-window value.
+
+Transcript-jump behavior is explicitly deferred from V1. The UI should retain
+stable identifiers so it can be added later.
 
 ### Layout Priorities
 
@@ -246,6 +303,8 @@ Build:
 - Make compaction boundaries visually unmistakable.
 
 ## Delivery Sequence
+
+V1 should ship in controlled waves, not as a one-shot implementation.
 
 ### Milestone 1: Data Plumbing
 
@@ -273,14 +332,15 @@ Exit criteria:
 ### Milestone 3: Historical Session UI
 
 - route shell,
+- embedded session-detail tab shell,
 - summary card,
 - composition chart,
 - Option C timeline,
-- transcript jump behavior.
 
 Exit criteria:
 
-- historical sessions are inspectable end to end.
+- historical sessions are inspectable end to end in both standalone and
+  embedded surfaces.
 
 ### Milestone 4: Live Session UX
 
@@ -318,7 +378,6 @@ Exit criteria:
 ### Frontend Tests
 
 - component rendering tests,
-- click-to-transcript tests,
 - composition interaction tests,
 - active-session update tests,
 - narrow-layout verification.
@@ -334,6 +393,9 @@ Verify with:
 - at least one session per supported agent family,
 - a session with plan-aware inferred capacity,
 - a session with unknown capacity.
+
+For agents without strong token/context coverage, verify that the UI stays
+useful and labels uncertainty clearly.
 
 ## Risks
 
@@ -377,6 +439,7 @@ Mitigation:
 - guidance panel,
 - evidence inspector,
 - guidance-agent execution,
+- transcript-jump behavior,
 - any analysis that feeds output back into the live parent session context.
 
 ## Recommended First Build Order
@@ -385,9 +448,8 @@ Mitigation:
 1. context capacity resolver,
 1. token attribution and category mapping,
 1. summary and timeline APIs,
-1. standalone `/context/:sessionId` route,
+1. standalone `/context/:sessionId` route plus embedded session tab shell,
 1. summary and composition UI,
 1. Option C timeline,
-1. transcript jump behavior,
 1. SSE live updates,
 1. cross-agent polish.
