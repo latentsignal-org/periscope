@@ -26,11 +26,10 @@ import (
 // trigger a non-destructive re-sync (mtime reset + skip cache
 // clear) so existing session data is preserved.
 //
-// Bumped to 13: track mid-task compaction count (boundaries
-// where post-boundary tools repeat pre-boundary work — a
-// context-loss signal that scores heavier than ordinary
-// compactions).
-const dataVersion = 13
+// Bumped to 14: persist session-level model context window
+// metadata so recorded capacity survives resyncs and can
+// drive occupancy calculations.
+const dataVersion = 14
 
 const tokenCoverageRepairStatsKey = "token_coverage_repair_v1"
 
@@ -353,12 +352,20 @@ func (db *DB) migrateColumns() error {
 			"ALTER TABLE sessions ADD COLUMN peak_context_tokens INTEGER NOT NULL DEFAULT 0",
 		},
 		{
+			"sessions", "model_context_window_tokens",
+			"ALTER TABLE sessions ADD COLUMN model_context_window_tokens INTEGER NOT NULL DEFAULT 0",
+		},
+		{
 			"sessions", "has_total_output_tokens",
 			"ALTER TABLE sessions ADD COLUMN has_total_output_tokens INTEGER NOT NULL DEFAULT 0",
 		},
 		{
 			"sessions", "has_peak_context_tokens",
 			"ALTER TABLE sessions ADD COLUMN has_peak_context_tokens INTEGER NOT NULL DEFAULT 0",
+		},
+		{
+			"sessions", "has_model_context_window_tokens",
+			"ALTER TABLE sessions ADD COLUMN has_model_context_window_tokens INTEGER NOT NULL DEFAULT 0",
 		},
 		{
 			"sessions", "local_modified_at",

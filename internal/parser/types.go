@@ -420,10 +420,12 @@ type ParsedSession struct {
 	UserMessageCount int
 	File             FileInfo
 
-	TotalOutputTokens    int
-	PeakContextTokens    int
-	HasTotalOutputTokens bool
-	HasPeakContextTokens bool
+	TotalOutputTokens           int
+	PeakContextTokens           int
+	ModelContextWindowTokens    int
+	HasTotalOutputTokens        bool
+	HasPeakContextTokens        bool
+	HasModelContextWindowTokens bool
 
 	// aggregateTokenPresenceKnown marks session aggregate token
 	// coverage as parser-owned and authoritative.

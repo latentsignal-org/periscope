@@ -28,7 +28,9 @@ const sessionBaseCols = `id, project, machine, agent,
 	message_count, user_message_count,
 	parent_session_id, relationship_type,
 	total_output_tokens, peak_context_tokens,
+	model_context_window_tokens,
 	has_total_output_tokens, has_peak_context_tokens,
+	has_model_context_window_tokens,
 	is_automated,
 	tool_failure_signal_count, tool_retry_count,
 	edit_churn_count, consecutive_failure_max,
@@ -51,7 +53,9 @@ const sessionPruneCols = `id, project, machine, agent,
 	message_count, user_message_count,
 	parent_session_id, relationship_type,
 	total_output_tokens, peak_context_tokens,
+	model_context_window_tokens,
 	has_total_output_tokens, has_peak_context_tokens,
+	has_model_context_window_tokens,
 	is_automated,
 	tool_failure_signal_count, tool_retry_count,
 	edit_churn_count, consecutive_failure_max,
@@ -73,7 +77,9 @@ const sessionFullCols = `id, project, machine, agent,
 	message_count, user_message_count,
 	parent_session_id, relationship_type,
 	total_output_tokens, peak_context_tokens,
+	model_context_window_tokens,
 	has_total_output_tokens, has_peak_context_tokens,
+	has_model_context_window_tokens,
 	is_automated,
 	tool_failure_signal_count, tool_retry_count,
 	edit_churn_count, consecutive_failure_max,
@@ -112,7 +118,9 @@ func scanSessionRow(rs rowScanner) (Session, error) {
 		&s.MessageCount, &s.UserMessageCount,
 		&s.ParentSessionID, &s.RelationshipType,
 		&s.TotalOutputTokens, &s.PeakContextTokens,
+		&s.ModelContextWindowTokens,
 		&s.HasTotalOutputTokens, &s.HasPeakContextTokens,
+		&s.HasModelContextWindowTokens,
 		&s.IsAutomated,
 		&s.ToolFailureSignalCount, &s.ToolRetryCount,
 		&s.EditChurnCount, &s.ConsecutiveFailureMax,
@@ -134,23 +142,25 @@ func scanSessionRow(rs rowScanner) (Session, error) {
 
 // Session represents a row in the sessions table.
 type Session struct {
-	ID                   string  `json:"id"`
-	Project              string  `json:"project"`
-	Machine              string  `json:"machine"`
-	Agent                string  `json:"agent"`
-	FirstMessage         *string `json:"first_message"`
-	DisplayName          *string `json:"display_name,omitempty"`
-	StartedAt            *string `json:"started_at"`
-	EndedAt              *string `json:"ended_at"`
-	MessageCount         int     `json:"message_count"`
-	UserMessageCount     int     `json:"user_message_count"`
-	ParentSessionID      *string `json:"parent_session_id,omitempty"`
-	RelationshipType     string  `json:"relationship_type,omitempty"`
-	TotalOutputTokens    int     `json:"total_output_tokens"`
-	PeakContextTokens    int     `json:"peak_context_tokens"`
-	HasTotalOutputTokens bool    `json:"has_total_output_tokens"`
-	HasPeakContextTokens bool    `json:"has_peak_context_tokens"`
-	IsAutomated          bool    `json:"is_automated"`
+	ID                          string  `json:"id"`
+	Project                     string  `json:"project"`
+	Machine                     string  `json:"machine"`
+	Agent                       string  `json:"agent"`
+	FirstMessage                *string `json:"first_message"`
+	DisplayName                 *string `json:"display_name,omitempty"`
+	StartedAt                   *string `json:"started_at"`
+	EndedAt                     *string `json:"ended_at"`
+	MessageCount                int     `json:"message_count"`
+	UserMessageCount            int     `json:"user_message_count"`
+	ParentSessionID             *string `json:"parent_session_id,omitempty"`
+	RelationshipType            string  `json:"relationship_type,omitempty"`
+	TotalOutputTokens           int     `json:"total_output_tokens"`
+	PeakContextTokens           int     `json:"peak_context_tokens"`
+	ModelContextWindowTokens    int     `json:"model_context_window_tokens"`
+	HasTotalOutputTokens        bool    `json:"has_total_output_tokens"`
+	HasPeakContextTokens        bool    `json:"has_peak_context_tokens"`
+	HasModelContextWindowTokens bool    `json:"has_model_context_window_tokens"`
+	IsAutomated                 bool    `json:"is_automated"`
 
 	// Session signals (computed from messages/tool_calls).
 	ToolFailureSignalCount int      `json:"tool_failure_signal_count"`
@@ -602,7 +612,9 @@ func (db *DB) GetSessionFull(
 		&s.MessageCount, &s.UserMessageCount,
 		&s.ParentSessionID, &s.RelationshipType,
 		&s.TotalOutputTokens, &s.PeakContextTokens,
+		&s.ModelContextWindowTokens,
 		&s.HasTotalOutputTokens, &s.HasPeakContextTokens,
+		&s.HasModelContextWindowTokens,
 		&s.IsAutomated,
 		&s.ToolFailureSignalCount, &s.ToolRetryCount,
 		&s.EditChurnCount, &s.ConsecutiveFailureMax,
@@ -687,13 +699,15 @@ func (db *DB) UpsertSession(s Session) error {
 			user_message_count, parent_session_id,
 			relationship_type,
 			total_output_tokens, peak_context_tokens,
+			model_context_window_tokens,
 			has_total_output_tokens, has_peak_context_tokens,
+			has_model_context_window_tokens,
 			is_automated,
 			cwd, git_branch, source_session_id,
 			source_version, parser_malformed_lines,
 			is_truncated,
 			file_path, file_size, file_mtime, file_hash
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			project = excluded.project,
 			machine = excluded.machine,
@@ -707,8 +721,10 @@ func (db *DB) UpsertSession(s Session) error {
 			relationship_type = excluded.relationship_type,
 			total_output_tokens = excluded.total_output_tokens,
 			peak_context_tokens = excluded.peak_context_tokens,
+			model_context_window_tokens = excluded.model_context_window_tokens,
 			has_total_output_tokens = excluded.has_total_output_tokens,
 			has_peak_context_tokens = excluded.has_peak_context_tokens,
+			has_model_context_window_tokens = excluded.has_model_context_window_tokens,
 			is_automated = excluded.is_automated,
 			cwd = excluded.cwd,
 			git_branch = excluded.git_branch,
@@ -725,7 +741,9 @@ func (db *DB) UpsertSession(s Session) error {
 		s.UserMessageCount, s.ParentSessionID,
 		s.RelationshipType,
 		s.TotalOutputTokens, s.PeakContextTokens,
+		s.ModelContextWindowTokens,
 		s.HasTotalOutputTokens, s.HasPeakContextTokens,
+		s.HasModelContextWindowTokens,
 		isAutomated,
 		s.Cwd, s.GitBranch, s.SourceSessionID,
 		s.SourceVersion, s.ParserMalformedLines,
@@ -982,14 +1000,16 @@ func (db *DB) GetSessionVersion(
 // IncrementalInfo holds the data needed for incremental
 // re-parsing of an append-only session file.
 type IncrementalInfo struct {
-	ID                   string
-	FileSize             int64
-	MsgCount             int
-	UserMsgCount         int
-	TotalOutputTokens    int
-	PeakContextTokens    int
-	HasTotalOutputTokens bool
-	HasPeakContextTokens bool
+	ID                          string
+	FileSize                    int64
+	MsgCount                    int
+	UserMsgCount                int
+	TotalOutputTokens           int
+	PeakContextTokens           int
+	ModelContextWindowTokens    int
+	HasTotalOutputTokens        bool
+	HasPeakContextTokens        bool
+	HasModelContextWindowTokens bool
 }
 
 // GetSessionForIncremental returns session state needed for
@@ -1017,13 +1037,17 @@ func (db *DB) GetSessionForIncremental(
 		`SELECT id, file_size, message_count,
 			user_message_count,
 			total_output_tokens, peak_context_tokens,
-			has_total_output_tokens, has_peak_context_tokens
+			model_context_window_tokens,
+			has_total_output_tokens, has_peak_context_tokens,
+			has_model_context_window_tokens
 		 FROM sessions WHERE file_path = ?`,
 		path,
 	).Scan(
 		&info.ID, &fs, &info.MsgCount, &info.UserMsgCount,
 		&info.TotalOutputTokens, &info.PeakContextTokens,
+		&info.ModelContextWindowTokens,
 		&info.HasTotalOutputTokens, &info.HasPeakContextTokens,
+		&info.HasModelContextWindowTokens,
 	)
 	if err != nil {
 		return nil, false
@@ -1035,6 +1059,9 @@ func (db *DB) GetSessionForIncremental(
 		info.HasTotalOutputTokens || info.TotalOutputTokens != 0
 	info.HasPeakContextTokens =
 		info.HasPeakContextTokens || info.PeakContextTokens != 0
+	info.HasModelContextWindowTokens =
+		info.HasModelContextWindowTokens ||
+			info.ModelContextWindowTokens != 0
 	return &info, true
 }
 
@@ -1049,7 +1076,8 @@ func (db *DB) UpdateSessionIncremental(
 	msgCount, userMsgCount int,
 	fileSize, fileMtime int64,
 	totalOutputTokens, peakContextTokens int,
-	hasTotalOutputTokens, hasPeakContextTokens bool,
+	modelContextWindowTokens int,
+	hasTotalOutputTokens, hasPeakContextTokens, hasModelContextWindowTokens bool,
 ) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -1069,13 +1097,17 @@ func (db *DB) UpdateSessionIncremental(
 			file_mtime = ?,
 			total_output_tokens = ?,
 			peak_context_tokens = ?,
+			model_context_window_tokens = ?,
 			has_total_output_tokens = ?,
-			has_peak_context_tokens = ?
+			has_peak_context_tokens = ?,
+			has_model_context_window_tokens = ?
 		WHERE id = ?`,
 		endedAt, msgCount, userMsgCount, userMsgCount,
 		fileSize, fileMtime,
 		totalOutputTokens, peakContextTokens,
-		hasTotalOutputTokens, hasPeakContextTokens, id,
+		modelContextWindowTokens,
+		hasTotalOutputTokens, hasPeakContextTokens,
+		hasModelContextWindowTokens, id,
 	)
 	if err != nil {
 		return fmt.Errorf(

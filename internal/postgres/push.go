@@ -615,8 +615,10 @@ func sessionPushFingerprint(sess db.Session) string {
 		fmt.Sprintf("%d", sess.UserMessageCount),
 		fmt.Sprintf("%d", sess.TotalOutputTokens),
 		fmt.Sprintf("%d", sess.PeakContextTokens),
+		fmt.Sprintf("%d", sess.ModelContextWindowTokens),
 		fmt.Sprintf("%t", sess.HasTotalOutputTokens),
 		fmt.Sprintf("%t", sess.HasPeakContextTokens),
+		fmt.Sprintf("%t", sess.HasModelContextWindowTokens),
 		stringValue(sess.ParentSessionID),
 		sess.RelationshipType,
 		stringValue(sess.FileHash),
@@ -728,7 +730,9 @@ func (s *Sync) pushSession(
 			created_at, started_at, ended_at, deleted_at,
 			message_count, user_message_count,
 			total_output_tokens, peak_context_tokens,
+			model_context_window_tokens,
 			has_total_output_tokens, has_peak_context_tokens,
+			has_model_context_window_tokens,
 			is_automated, data_version,
 			cwd, git_branch, source_session_id,
 			source_version, parser_malformed_lines,
@@ -747,16 +751,16 @@ func (s *Sync) pushSession(
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10,
-			$11, $12, $13, $14,
-			$15, $16, $17, $18,
-			$19, $20, $21, $22, $23, $24,
-			$25, $26,
-			$27, $28, $29, $30,
-			$31, $32, $33, $34,
-			$35,
-			$36, $37,
-			$38,
-			$39, $40, $41, $42,
+			$11, $12, $13, $14, $15,
+			$16, $17, $18, $19,
+			$20, $21, $22, $23, $24, $25,
+			$26, $27,
+			$28, $29, $30, $31,
+			$32, $33, $34, $35,
+			$36,
+			$37, $38,
+			$39,
+			$40, $41, $42, $43,
 			NOW()
 		)
 		ON CONFLICT (id) DO UPDATE SET
@@ -773,8 +777,10 @@ func (s *Sync) pushSession(
 			user_message_count = EXCLUDED.user_message_count,
 			total_output_tokens = EXCLUDED.total_output_tokens,
 			peak_context_tokens = EXCLUDED.peak_context_tokens,
+			model_context_window_tokens = EXCLUDED.model_context_window_tokens,
 			has_total_output_tokens = EXCLUDED.has_total_output_tokens,
 			has_peak_context_tokens = EXCLUDED.has_peak_context_tokens,
+			has_model_context_window_tokens = EXCLUDED.has_model_context_window_tokens,
 			is_automated = EXCLUDED.is_automated,
 			data_version = EXCLUDED.data_version,
 			cwd = EXCLUDED.cwd,
@@ -815,8 +821,10 @@ func (s *Sync) pushSession(
 			OR sessions.user_message_count IS DISTINCT FROM EXCLUDED.user_message_count
 			OR sessions.total_output_tokens IS DISTINCT FROM EXCLUDED.total_output_tokens
 			OR sessions.peak_context_tokens IS DISTINCT FROM EXCLUDED.peak_context_tokens
+			OR sessions.model_context_window_tokens IS DISTINCT FROM EXCLUDED.model_context_window_tokens
 			OR sessions.has_total_output_tokens IS DISTINCT FROM EXCLUDED.has_total_output_tokens
 			OR sessions.has_peak_context_tokens IS DISTINCT FROM EXCLUDED.has_peak_context_tokens
+			OR sessions.has_model_context_window_tokens IS DISTINCT FROM EXCLUDED.has_model_context_window_tokens
 			OR sessions.is_automated IS DISTINCT FROM EXCLUDED.is_automated
 			OR sessions.data_version IS DISTINCT FROM EXCLUDED.data_version
 			OR sessions.cwd IS DISTINCT FROM EXCLUDED.cwd
@@ -854,7 +862,9 @@ func (s *Sync) pushSession(
 		nilStrTS(sess.DeletedAt),
 		sess.MessageCount, sess.UserMessageCount,
 		sess.TotalOutputTokens, sess.PeakContextTokens,
+		sess.ModelContextWindowTokens,
 		sess.HasTotalOutputTokens, sess.HasPeakContextTokens,
+		sess.HasModelContextWindowTokens,
 		isAutomated, sess.DataVersion,
 		sess.Cwd, sess.GitBranch, sess.SourceSessionID,
 		sess.SourceVersion, sess.ParserMalformedLines,

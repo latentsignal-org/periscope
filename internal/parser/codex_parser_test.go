@@ -965,6 +965,25 @@ func TestParseCodexSession_TokenUsage(t *testing.T) {
 		assert.Empty(t, msgs[1].TokenUsage)
 		assert.Equal(t, 0, msgs[1].OutputTokens)
 	})
+
+	t.Run("captures latest session model context window", func(t *testing.T) {
+		content := testjsonl.JoinJSONL(
+			testjsonl.CodexSessionMetaJSON("tu-6", "/tmp", "user", tsEarly),
+			testjsonl.CodexTaskStartedJSON(tsEarly, 258400),
+			testjsonl.CodexTurnContextJSON("gpt-5.4", tsEarlyS1),
+			testjsonl.CodexMsgJSON("user", "hello", tsEarlyS1),
+			testjsonl.CodexMsgJSON("assistant", "hi", tsEarlyS5),
+			testjsonl.CodexTokenCountWithWindowJSON(tsEarlyS5, 10000, 500, 6000, 258400),
+			testjsonl.CodexMsgJSON("user", "follow up", tsLate),
+			testjsonl.CodexMsgJSON("assistant", "reply", tsLateS5),
+			testjsonl.CodexTokenCountWithWindowJSON(tsLateS5, 12000, 200, 3000, 260000),
+		)
+		sess, msgs := runCodexParserTest(t, "test.jsonl", content, false)
+		require.NotNil(t, sess)
+		require.Len(t, msgs, 4)
+		assert.True(t, sess.HasModelContextWindowTokens)
+		assert.Equal(t, 260000, sess.ModelContextWindowTokens)
+	})
 }
 
 func TestParseCodexSession_EdgeCases(t *testing.T) {
@@ -1063,7 +1082,7 @@ func TestParseCodexSessionFrom_Incremental(t *testing.T) {
 	require.NoError(t, f.Close())
 
 	// Incremental parse from the offset.
-	newMsgs, endedAt, _, err := ParseCodexSessionFrom(
+	newMsgs, endedAt, _, _, _, err := ParseCodexSessionFrom(
 		path, offset, 1, false,
 	)
 	require.NoError(t, err)
@@ -1112,7 +1131,7 @@ func TestParseCodexSessionFrom_SkipsSessionMeta(t *testing.T) {
 	f.WriteString(extra)
 	f.Close()
 
-	newMsgs, _, _, err := ParseCodexSessionFrom(
+	newMsgs, _, _, _, _, err := ParseCodexSessionFrom(
 		path, offset, 5, false,
 	)
 	require.NoError(t, err)
@@ -1136,7 +1155,7 @@ func TestParseCodexSessionFrom_NoNewData(t *testing.T) {
 	offset := info.Size()
 
 	// Parse from end of file — no new data.
-	newMsgs, endedAt, _, err := ParseCodexSessionFrom(
+	newMsgs, endedAt, _, _, _, err := ParseCodexSessionFrom(
 		path, offset, 10, false,
 	)
 	require.NoError(t, err)
@@ -1169,7 +1188,7 @@ func TestParseCodexSessionFrom_SubagentOutputRequiresFullParse(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	_, _, _, err = ParseCodexSessionFrom(path, offset, 2, false)
+	_, _, _, _, _, err = ParseCodexSessionFrom(path, offset, 2, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "full parse")
 }
@@ -1207,7 +1226,7 @@ func TestParseCodexSessionFrom_WaitCallRequiresFullParse(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	_, _, _, err = ParseCodexSessionFrom(path, offset, 4, false)
+	_, _, _, _, _, err = ParseCodexSessionFrom(path, offset, 4, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "full parse")
 }
@@ -1233,7 +1252,7 @@ func TestParseCodexSessionFrom_SystemMessageDoesNotRequireFullParse(t *testing.T
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	newMsgs, endedAt, _, err := ParseCodexSessionFrom(path, offset, 1, false)
+	newMsgs, endedAt, _, _, _, err := ParseCodexSessionFrom(path, offset, 1, false)
 	require.NoError(t, err)
 	assert.Equal(t, 0, len(newMsgs))
 	assert.False(t, endedAt.IsZero())
@@ -1264,7 +1283,7 @@ func TestParseCodexSessionFrom_RunningNotificationRequiresFullParse(t *testing.T
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	_, _, _, err = ParseCodexSessionFrom(path, offset, 1, false)
+	_, _, _, _, _, err = ParseCodexSessionFrom(path, offset, 1, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "full parse")
 }
@@ -1290,7 +1309,7 @@ func TestParseCodexSessionFrom_NonSubagentFunctionOutputDoesNotRequireFullParse(
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	newMsgs, endedAt, _, err := ParseCodexSessionFrom(path, offset, 1, false)
+	newMsgs, endedAt, _, _, _, err := ParseCodexSessionFrom(path, offset, 1, false)
 	require.NoError(t, err)
 	assert.Equal(t, 0, len(newMsgs))
 	assert.False(t, endedAt.IsZero())
@@ -1332,7 +1351,7 @@ func TestParseCodexSessionFrom_SeedsModelFromTurnContext(
 	require.NoError(t, err)
 	require.NoError(t, f2.Close())
 
-	newMsgs2, _, _, err := ParseCodexSessionFrom(
+	newMsgs2, _, _, _, _, err := ParseCodexSessionFrom(
 		path, offset, 2, false,
 	)
 	require.NoError(t, err)
@@ -1379,7 +1398,7 @@ func TestParseCodexSessionFrom_SeedsBoundaryAfterTurnContext(
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	newMsgs, _, _, err := ParseCodexSessionFrom(
+	newMsgs, _, _, _, _, err := ParseCodexSessionFrom(
 		path, offset, 0, false,
 	)
 	require.NoError(t, err)
@@ -1428,7 +1447,7 @@ func TestParseCodexSessionFrom_EmptyModelReset(
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	newMsgs, _, _, err := ParseCodexSessionFrom(
+	newMsgs, _, _, _, _, err := ParseCodexSessionFrom(
 		path, offset, 2, false,
 	)
 	require.NoError(t, err)

@@ -497,7 +497,7 @@ func TestIncrementalUpdatePreservesTokenTotals(t *testing.T) {
 		ended := "2024-01-15T10:30:00Z"
 		err := d.UpdateSessionIncremental(
 			"inc-tokens", &ended, 5, 2, 4096, 200,
-			1000, 8000, true, true,
+			1000, 8000, 0, true, true, false,
 		)
 		requireNoError(t, err, "incremental update")
 
@@ -527,7 +527,7 @@ func TestIncrementalUpdatePreservesTokenTotals(t *testing.T) {
 		ended := "2024-01-15T11:00:00Z"
 		err := d.UpdateSessionIncremental(
 			"inc-tokens", &ended, 8, 3, 8192, 300,
-			1500, 9000, true, true,
+			1500, 9000, 0, true, true, false,
 		)
 		requireNoError(t, err, "incremental update")
 
@@ -559,7 +559,7 @@ func TestIncrementalUpdatePreservesTokenTotals(t *testing.T) {
 		ended := "2024-01-15T11:00:00Z"
 		err := d.UpdateSessionIncremental(
 			"inc-tokens", &ended, 8, 3, 8192, 300,
-			1500, 9000, true, true,
+			1500, 9000, 0, true, true, false,
 		)
 		requireNoError(t, err, "retry update")
 

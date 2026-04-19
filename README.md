@@ -25,6 +25,7 @@ Or download the **desktop app** (macOS / Windows) from
 ```bash
 agentsview                 # start server, open web UI
 agentsview usage daily     # print daily cost summary
+go run ./cmd/agentsview sync --full
 ```
 
 On first run, agentsview discovers sessions from every supported agent on your

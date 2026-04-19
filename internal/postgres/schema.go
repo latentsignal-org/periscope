@@ -41,8 +41,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     relationship_type  TEXT NOT NULL DEFAULT '',
     total_output_tokens INT NOT NULL DEFAULT 0,
     peak_context_tokens INT NOT NULL DEFAULT 0,
+    model_context_window_tokens INT NOT NULL DEFAULT 0,
     has_total_output_tokens BOOLEAN NOT NULL DEFAULT FALSE,
     has_peak_context_tokens BOOLEAN NOT NULL DEFAULT FALSE,
+    has_model_context_window_tokens BOOLEAN NOT NULL DEFAULT FALSE,
     is_automated       BOOLEAN NOT NULL DEFAULT FALSE,
     tool_failure_signal_count INT NOT NULL DEFAULT 0,
     tool_retry_count          INT NOT NULL DEFAULT 0,
@@ -206,6 +208,13 @@ func EnsureSchema(
 			"adding sessions.peak_context_tokens",
 		},
 		{
+			"sessions", "model_context_window_tokens",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS model_context_window_tokens
+			 INT NOT NULL DEFAULT 0`,
+			"adding sessions.model_context_window_tokens",
+		},
+		{
 			"sessions", "has_total_output_tokens",
 			`ALTER TABLE sessions
 			 ADD COLUMN IF NOT EXISTS has_total_output_tokens
@@ -218,6 +227,13 @@ func EnsureSchema(
 			 ADD COLUMN IF NOT EXISTS has_peak_context_tokens
 			 BOOLEAN NOT NULL DEFAULT FALSE`,
 			"adding sessions.has_peak_context_tokens",
+		},
+		{
+			"sessions", "has_model_context_window_tokens",
+			`ALTER TABLE sessions
+			 ADD COLUMN IF NOT EXISTS has_model_context_window_tokens
+			 BOOLEAN NOT NULL DEFAULT FALSE`,
+			"adding sessions.has_model_context_window_tokens",
 		},
 		{
 			"messages", "model",

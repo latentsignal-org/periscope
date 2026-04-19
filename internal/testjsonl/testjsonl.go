@@ -275,6 +275,18 @@ func CodexTokenCountJSON(
 	timestamp string,
 	inputTokens, outputTokens, cachedInputTokens int,
 ) string {
+	return CodexTokenCountWithWindowJSON(
+		timestamp, inputTokens, outputTokens, cachedInputTokens, 0,
+	)
+}
+
+// CodexTokenCountWithWindowJSON returns a Codex event_msg with
+// payload.type=token_count, last_token_usage, and an optional
+// model_context_window.
+func CodexTokenCountWithWindowJSON(
+	timestamp string,
+	inputTokens, outputTokens, cachedInputTokens, modelContextWindow int,
+) string {
 	m := map[string]any{
 		"type":      "event_msg",
 		"timestamp": timestamp,
@@ -290,7 +302,25 @@ func CodexTokenCountJSON(
 			},
 		},
 	}
+	if modelContextWindow > 0 {
+		m["payload"].(map[string]any)["info"].(map[string]any)["model_context_window"] = modelContextWindow
+	}
 	return mustMarshal(m)
+}
+
+// CodexTaskStartedJSON returns a Codex event_msg with
+// payload.type=task_started and model_context_window.
+func CodexTaskStartedJSON(
+	timestamp string, modelContextWindow int,
+) string {
+	return mustMarshal(map[string]any{
+		"type":      "event_msg",
+		"timestamp": timestamp,
+		"payload": map[string]any{
+			"type":                 "task_started",
+			"model_context_window": modelContextWindow,
+		},
+	})
 }
 
 // ClaudeEntryJSON returns a Claude JSONL entry with uuid and

@@ -567,6 +567,15 @@ func trimContextMessages(msgs []db.Message) ([]db.Message, bool, int) {
 func resolveContextCapacity(
 	session db.Session, msgs []db.Message, model string,
 ) contextCapacity {
+	if session.HasModelContextWindowTokens &&
+		session.ModelContextWindowTokens > 0 {
+		return contextCapacity{
+			MaxTokens:  session.ModelContextWindowTokens,
+			Provenance: contextProvenanceMeasured,
+			Model:      model,
+			Agent:      session.Agent,
+		}
+	}
 	if recorded := extractRecordedCapacity(msgs); recorded > 0 {
 		return contextCapacity{
 			MaxTokens:  recorded,

@@ -914,7 +914,7 @@ func TestIncrementalUpdateClearsAutomated(t *testing.T) {
 
 	// Simulate a second user turn via incremental update.
 	err = d.UpdateSessionIncremental(
-		"s1", nil, 6, 2, 100, 12345, 0, 0, false, false,
+		"s1", nil, 6, 2, 100, 12345, 0, 0, 0, false, false, false,
 	)
 	requireNoError(t, err, "incremental update")
 

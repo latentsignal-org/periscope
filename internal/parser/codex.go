@@ -32,21 +32,23 @@ var errCodexIncrementalNeedsFullParse = errors.New(
 // codexSessionBuilder accumulates state while scanning a Codex
 // JSONL session file line by line.
 type codexSessionBuilder struct {
-	messages             []ParsedMessage
-	firstMessage         string
-	startedAt            time.Time
-	endedAt              time.Time
-	sessionID            string
-	project              string
-	ordinal              int
-	currentModel         string
-	callNames            map[string]string
-	callRefs             map[string]codexToolCallRef
-	agentSpawnCalls      map[string]string
-	agentWaitCalls       map[string]string
-	pendingAgentEvents   map[string][]codexPendingEvent
-	orphanNotificationIx map[string]int
-	lastTokenUsageRaw    string // dedup streaming duplicates
+	messages              []ParsedMessage
+	firstMessage          string
+	startedAt             time.Time
+	endedAt               time.Time
+	sessionID             string
+	project               string
+	ordinal               int
+	currentModel          string
+	callNames             map[string]string
+	callRefs              map[string]codexToolCallRef
+	agentSpawnCalls       map[string]string
+	agentWaitCalls        map[string]string
+	pendingAgentEvents    map[string][]codexPendingEvent
+	orphanNotificationIx  map[string]int
+	lastTokenUsageRaw     string // dedup streaming duplicates
+	modelContextWindow    int
+	hasModelContextWindow bool
 }
 
 type codexToolCallRef struct {
@@ -176,7 +178,17 @@ func (b *codexSessionBuilder) handleResponseItem(
 func (b *codexSessionBuilder) handleEventMsg(
 	payload gjson.Result,
 ) {
-	if payload.Get("type").Str != "token_count" {
+	switch payload.Get("type").Str {
+	case "task_started":
+		b.updateModelContextWindow(
+			int(payload.Get("model_context_window").Int()),
+		)
+		return
+	case "token_count":
+		b.updateModelContextWindow(
+			int(payload.Get("info.model_context_window").Int()),
+		)
+	default:
 		return
 	}
 	raw := payload.Get("info.last_token_usage").Raw
@@ -198,6 +210,14 @@ func (b *codexSessionBuilder) handleEventMsg(
 			return
 		}
 	}
+}
+
+func (b *codexSessionBuilder) updateModelContextWindow(value int) {
+	if value <= 0 {
+		return
+	}
+	b.modelContextWindow = value
+	b.hasModelContextWindow = true
 }
 
 // applyCodexTokenUsage normalizes Codex token usage fields
@@ -1115,15 +1135,17 @@ func ParseCodexSession(
 	}
 
 	sess := &ParsedSession{
-		ID:               sessionID,
-		Project:          b.project,
-		Machine:          machine,
-		Agent:            AgentCodex,
-		FirstMessage:     b.firstMessage,
-		StartedAt:        b.startedAt,
-		EndedAt:          b.endedAt,
-		MessageCount:     len(b.messages),
-		UserMessageCount: userCount,
+		ID:                          sessionID,
+		Project:                     b.project,
+		Machine:                     machine,
+		Agent:                       AgentCodex,
+		FirstMessage:                b.firstMessage,
+		StartedAt:                   b.startedAt,
+		EndedAt:                     b.endedAt,
+		MessageCount:                len(b.messages),
+		UserMessageCount:            userCount,
+		ModelContextWindowTokens:    b.modelContextWindow,
+		HasModelContextWindowTokens: b.hasModelContextWindow,
 		File: FileInfo{
 			Path:  path,
 			Size:  info.Size(),
@@ -1187,7 +1209,7 @@ func ParseCodexSessionFrom(
 	offset int64,
 	startOrdinal int,
 	includeExec bool,
-) ([]ParsedMessage, time.Time, int64, error) {
+) ([]ParsedMessage, time.Time, int64, int, bool, error) {
 	b := newCodexSessionBuilder(includeExec)
 	b.ordinal = startOrdinal
 	b.currentModel = readCodexModelAtOffset(path, offset)
@@ -1212,18 +1234,19 @@ func ParseCodexSessionFrom(
 		},
 	)
 	if err != nil {
-		return nil, time.Time{}, 0, fmt.Errorf(
+		return nil, time.Time{}, 0, 0, false, fmt.Errorf(
 			"reading codex %s from offset %d: %w",
 			path, offset, err,
 		)
 	}
 	if fallbackErr != nil {
-		return nil, time.Time{}, 0, fallbackErr
+		return nil, time.Time{}, 0, 0, false, fallbackErr
 	}
 
 	b.flushPendingAgentResults()
 
-	return b.messages, b.endedAt, consumed, nil
+	return b.messages, b.endedAt, consumed,
+		b.modelContextWindow, b.hasModelContextWindow, nil
 }
 
 // IsIncrementalFullParseFallback reports whether an incremental

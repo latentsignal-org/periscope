@@ -5395,7 +5395,9 @@ func TestGetSessionForIncremental(t *testing.T) {
 			info.ID, nil, info.MsgCount+1, info.UserMsgCount,
 			info.FileSize+256, 200,
 			info.TotalOutputTokens+50, info.PeakContextTokens,
+			0,
 			info.HasTotalOutputTokens, info.HasPeakContextTokens,
+			false,
 		)
 		requireNoError(t, err, "UpdateSessionIncremental legacy")
 
@@ -5442,7 +5444,7 @@ func TestUpdateSessionIncremental(t *testing.T) {
 	// Incremental update: bump counts and file metadata.
 	ended := "2024-01-15T10:30:00Z"
 	err := d.UpdateSessionIncremental(
-		"inc-update", &ended, 7, 3, 2048, 200, 500, 1600, true, true,
+		"inc-update", &ended, 7, 3, 2048, 200, 500, 1600, 0, true, true, false,
 	)
 	requireNoError(t, err, "incremental update")
 

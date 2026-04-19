@@ -1583,17 +1583,19 @@ func drainResults(results <-chan syncJob, remaining int) {
 // incremental JSONL parse, used to partially update the
 // session row without overwriting unrelated columns.
 type incrementalUpdate struct {
-	sessionID            string
-	msgs                 []parser.ParsedMessage
-	endedAt              time.Time
-	msgCount             int // total (old + new)
-	userMsgCount         int // total (old + new)
-	fileSize             int64
-	fileMtime            int64
-	totalOutputTokens    int // absolute (old + new)
-	peakContextTokens    int // absolute max(old, new)
-	hasTotalOutputTokens bool
-	hasPeakContextTokens bool
+	sessionID                   string
+	msgs                        []parser.ParsedMessage
+	endedAt                     time.Time
+	msgCount                    int // total (old + new)
+	userMsgCount                int // total (old + new)
+	fileSize                    int64
+	fileMtime                   int64
+	totalOutputTokens           int // absolute (old + new)
+	peakContextTokens           int // absolute max(old, new)
+	modelContextWindowTokens    int
+	hasTotalOutputTokens        bool
+	hasPeakContextTokens        bool
+	hasModelContextWindowTokens bool
 }
 
 type processResult struct {
@@ -1833,9 +1835,17 @@ func (e *Engine) processClaude(
 
 	// Try incremental parse for append-only JSONL files
 	// that have already been synced.
+	claudeParseFn := func(
+		path string, offset int64, startOrd int,
+	) ([]parser.ParsedMessage, time.Time, int64, int, bool, error) {
+		msgs, endedAt, consumed, err := parser.ParseClaudeSessionFrom(
+			path, offset, startOrd,
+		)
+		return msgs, endedAt, consumed, 0, false, err
+	}
 	if res, ok := e.tryIncrementalJSONL(
 		file, info, parser.AgentClaude,
-		parser.ParseClaudeSessionFrom,
+		claudeParseFn,
 	); ok {
 		return res
 	}
@@ -1880,7 +1890,7 @@ func (e *Engine) processClaude(
 // lines so it can be used as a safe resume offset.
 type incrementalParseFunc func(
 	path string, offset int64, startOrdinal int,
-) ([]parser.ParsedMessage, time.Time, int64, error)
+) ([]parser.ParsedMessage, time.Time, int64, int, bool, error)
 
 // tryIncrementalJSONL attempts an incremental parse of an
 // append-only JSONL file by reading only bytes appended since
@@ -1921,7 +1931,7 @@ func (e *Engine) tryIncrementalJSONL(
 		return processResult{}, false
 	}
 
-	newMsgs, endedAt, consumed, err := parseFn(
+	newMsgs, endedAt, consumed, modelContextWindowTokens, hasModelContextWindowTokens, err := parseFn(
 		file.Path, inc.FileSize, maxOrd+1,
 	)
 	if err != nil {
@@ -1953,16 +1963,23 @@ func (e *Engine) tryIncrementalJSONL(
 		if consumed > 0 {
 			return processResult{
 				incremental: &incrementalUpdate{
-					sessionID:            inc.ID,
-					endedAt:              endedAt,
-					msgCount:             inc.MsgCount,
-					userMsgCount:         inc.UserMsgCount,
-					fileSize:             newOffset,
-					fileMtime:            info.ModTime().UnixNano(),
-					totalOutputTokens:    inc.TotalOutputTokens,
-					peakContextTokens:    inc.PeakContextTokens,
-					hasTotalOutputTokens: inc.HasTotalOutputTokens,
-					hasPeakContextTokens: inc.HasPeakContextTokens,
+					sessionID:         inc.ID,
+					endedAt:           endedAt,
+					msgCount:          inc.MsgCount,
+					userMsgCount:      inc.UserMsgCount,
+					fileSize:          newOffset,
+					fileMtime:         info.ModTime().UnixNano(),
+					totalOutputTokens: inc.TotalOutputTokens,
+					peakContextTokens: inc.PeakContextTokens,
+					modelContextWindowTokens: func() int {
+						if hasModelContextWindowTokens {
+							return modelContextWindowTokens
+						}
+						return inc.ModelContextWindowTokens
+					}(),
+					hasTotalOutputTokens:        inc.HasTotalOutputTokens,
+					hasPeakContextTokens:        inc.HasPeakContextTokens,
+					hasModelContextWindowTokens: hasModelContextWindowTokens || inc.HasModelContextWindowTokens,
 				},
 			}, true
 		}
@@ -1979,8 +1996,14 @@ func (e *Engine) tryIncrementalJSONL(
 
 	totalOut := inc.TotalOutputTokens
 	peakCtx := inc.PeakContextTokens
+	modelWindow := inc.ModelContextWindowTokens
 	hasTotalOut := inc.HasTotalOutputTokens
 	hasPeakCtx := inc.HasPeakContextTokens
+	hasModelWindow := inc.HasModelContextWindowTokens
+	if hasModelContextWindowTokens {
+		modelWindow = modelContextWindowTokens
+		hasModelWindow = true
+	}
 	for _, m := range newMsgs {
 		msgHasCtx, msgHasOut := m.TokenPresence()
 		if msgHasOut {
@@ -1995,17 +2018,19 @@ func (e *Engine) tryIncrementalJSONL(
 
 	return processResult{
 		incremental: &incrementalUpdate{
-			sessionID:            inc.ID,
-			msgs:                 newMsgs,
-			endedAt:              endedAt,
-			msgCount:             inc.MsgCount + len(newMsgs),
-			userMsgCount:         inc.UserMsgCount + newUserCount,
-			fileSize:             newOffset,
-			fileMtime:            info.ModTime().UnixNano(),
-			totalOutputTokens:    totalOut,
-			peakContextTokens:    peakCtx,
-			hasTotalOutputTokens: hasTotalOut,
-			hasPeakContextTokens: hasPeakCtx,
+			sessionID:                   inc.ID,
+			msgs:                        newMsgs,
+			endedAt:                     endedAt,
+			msgCount:                    inc.MsgCount + len(newMsgs),
+			userMsgCount:                inc.UserMsgCount + newUserCount,
+			fileSize:                    newOffset,
+			fileMtime:                   info.ModTime().UnixNano(),
+			totalOutputTokens:           totalOut,
+			peakContextTokens:           peakCtx,
+			modelContextWindowTokens:    modelWindow,
+			hasTotalOutputTokens:        hasTotalOut,
+			hasPeakContextTokens:        hasPeakCtx,
+			hasModelContextWindowTokens: hasModelWindow,
 		},
 	}, true
 }
@@ -2021,7 +2046,7 @@ func (e *Engine) processCodex(
 
 	codexParseFn := func(
 		path string, offset int64, startOrd int,
-	) ([]parser.ParsedMessage, time.Time, int64, error) {
+	) ([]parser.ParsedMessage, time.Time, int64, int, bool, error) {
 		return parser.ParseCodexSessionFrom(
 			path, offset, startOrd, false,
 		)
@@ -2802,7 +2827,9 @@ func (e *Engine) writeIncremental(
 		msgCount, userMsgCount,
 		inc.fileSize, inc.fileMtime,
 		inc.totalOutputTokens, inc.peakContextTokens,
+		inc.modelContextWindowTokens,
 		inc.hasTotalOutputTokens, inc.hasPeakContextTokens,
+		inc.hasModelContextWindowTokens,
 	); err != nil {
 		return fmt.Errorf(
 			"incremental update %s: %w",
@@ -2958,24 +2985,26 @@ func (e *Engine) applyRemoteRewrites(
 func toDBSession(pw pendingWrite) db.Session {
 	hasTotal, hasPeak := pw.sess.TokenCoverage(pw.msgs)
 	s := db.Session{
-		ID:                   pw.sess.ID,
-		Project:              pw.sess.Project,
-		Machine:              pw.sess.Machine,
-		Agent:                string(pw.sess.Agent),
-		MessageCount:         pw.sess.MessageCount,
-		UserMessageCount:     pw.sess.UserMessageCount,
-		ParentSessionID:      strPtr(pw.sess.ParentSessionID),
-		RelationshipType:     string(pw.sess.RelationshipType),
-		TotalOutputTokens:    pw.sess.TotalOutputTokens,
-		PeakContextTokens:    pw.sess.PeakContextTokens,
-		HasTotalOutputTokens: hasTotal,
-		HasPeakContextTokens: hasPeak,
-		Cwd:                  pw.sess.Cwd,
-		GitBranch:            pw.sess.GitBranch,
-		SourceSessionID:      pw.sess.SourceSessionID,
-		SourceVersion:        pw.sess.SourceVersion,
-		ParserMalformedLines: pw.sess.MalformedLines,
-		IsTruncated:          pw.sess.IsTruncated,
+		ID:                          pw.sess.ID,
+		Project:                     pw.sess.Project,
+		Machine:                     pw.sess.Machine,
+		Agent:                       string(pw.sess.Agent),
+		MessageCount:                pw.sess.MessageCount,
+		UserMessageCount:            pw.sess.UserMessageCount,
+		ParentSessionID:             strPtr(pw.sess.ParentSessionID),
+		RelationshipType:            string(pw.sess.RelationshipType),
+		TotalOutputTokens:           pw.sess.TotalOutputTokens,
+		PeakContextTokens:           pw.sess.PeakContextTokens,
+		ModelContextWindowTokens:    pw.sess.ModelContextWindowTokens,
+		HasTotalOutputTokens:        hasTotal,
+		HasPeakContextTokens:        hasPeak,
+		HasModelContextWindowTokens: pw.sess.HasModelContextWindowTokens,
+		Cwd:                         pw.sess.Cwd,
+		GitBranch:                   pw.sess.GitBranch,
+		SourceSessionID:             pw.sess.SourceSessionID,
+		SourceVersion:               pw.sess.SourceVersion,
+		ParserMalformedLines:        pw.sess.MalformedLines,
+		IsTruncated:                 pw.sess.IsTruncated,
 		// data_version is intentionally left at the
 		// existing column default (0). UpsertSession does
 		// not persist this field; the caller bumps it via
