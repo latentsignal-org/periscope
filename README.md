@@ -167,6 +167,18 @@ make e2e            # Playwright E2E tests
 Pre-commit hooks via [prek](https://github.com/j178/prek): `make install-hooks`
 after cloning (requires `prek` and `uv`).
 
+### JetBrains Plugin
+
+The `jetbrains-plugin/` directory contains a JetBrains IDE plugin that embeds
+the agentsview web UI in a tool window. Requires JDK 17+.
+
+```bash
+cd jetbrains-plugin
+./gradlew build       # compile and package the plugin
+./gradlew runIde      # launch a sandboxed IDE with the plugin loaded
+./gradlew buildPlugin # produce distributable ZIP in build/distributions/
+```
+
 ### Project Layout
 
 ```
@@ -174,6 +186,7 @@ cmd/agentsview/     CLI entrypoint
 internal/           Go packages (config, db, parser, server, sync, postgres)
 frontend/           Svelte 5 SPA (Vite, TypeScript)
 desktop/            Tauri desktop wrapper
+jetbrains-plugin/   JetBrains IDE plugin (Kotlin, Gradle)
 ```
 
 ## Acknowledgements
