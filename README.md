@@ -69,6 +69,12 @@ Features:
 - Timezone-aware date bucketing (`--timezone`)
 - Works standalone -- no server required, just run the command
 
+## Context Visualizer and Guidance
+
+| Context guidance                                    | Timeline view                                     |
+| --------------------------------------------------- | ------------------------------------------------- |
+| ![Guidance](screenshots/guidance.png)               | ![Timeline](screenshots/timeline-view.png)        |
+
 ## Session Browser
 
 | Dashboard                                                     | Session viewer                                                          |
