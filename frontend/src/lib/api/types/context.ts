@@ -34,12 +34,25 @@ export interface ContextSupports {
   compaction_trimmed: boolean;
 }
 
+export interface RewindSignal {
+  should_rewind: boolean;
+  confidence: string;
+  reasons: string[];
+  tokens_recoverable: number;
+  score: number;
+  rewind_to_turn?: number;
+  rewind_to_reason?: string;
+  bad_stretch_from?: number;
+  bad_stretch_to?: number;
+}
+
 export interface SessionContextResponse {
   summary: ContextSummary;
   capacity: ContextCapacity;
   composition: ContextCompositionItem[];
   supports: ContextSupports;
   warnings?: string[];
+  rewind_signal?: RewindSignal;
 }
 
 export interface ContextCategoryValue {

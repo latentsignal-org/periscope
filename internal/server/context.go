@@ -145,11 +145,12 @@ type contextSupports struct {
 }
 
 type sessionContextResponse struct {
-	Summary     contextSummary           `json:"summary"`
-	Capacity    contextCapacity          `json:"capacity"`
-	Composition []contextCompositionItem `json:"composition"`
-	Supports    contextSupports          `json:"supports"`
-	Warnings    []string                 `json:"warnings,omitempty"`
+	Summary      contextSummary           `json:"summary"`
+	Capacity     contextCapacity          `json:"capacity"`
+	Composition  []contextCompositionItem `json:"composition"`
+	Supports     contextSupports          `json:"supports"`
+	Warnings     []string                 `json:"warnings,omitempty"`
+	RewindSignal *signals.RewindSignal    `json:"rewind_signal,omitempty"`
 }
 
 type sessionContextTimelineResponse struct {
@@ -159,12 +160,13 @@ type sessionContextTimelineResponse struct {
 }
 
 type sessionContextView struct {
-	Summary     contextSummary
-	Capacity    contextCapacity
-	Composition []contextCompositionItem
-	Timeline    []contextTimelineTurn
-	Supports    contextSupports
-	Warnings    []string
+	Summary      contextSummary
+	Capacity     contextCapacity
+	Composition  []contextCompositionItem
+	Timeline     []contextTimelineTurn
+	Supports     contextSupports
+	Warnings     []string
+	RewindSignal *signals.RewindSignal
 }
 
 type contextRowCalc struct {
@@ -195,11 +197,12 @@ func (s *Server) handleGetSessionContext(
 	}
 
 	writeJSON(w, http.StatusOK, sessionContextResponse{
-		Summary:     view.Summary,
-		Capacity:    view.Capacity,
-		Composition: view.Composition,
-		Supports:    view.Supports,
-		Warnings:    view.Warnings,
+		Summary:      view.Summary,
+		Capacity:     view.Capacity,
+		Composition:  view.Composition,
+		Supports:     view.Supports,
+		Warnings:     view.Warnings,
+		RewindSignal: view.RewindSignal,
 	})
 }
 
@@ -336,6 +339,14 @@ func computeSessionContextView(
 
 	composition := buildComposition(compositionTotals, currentTokens, capacity)
 
+	// V2 debug: compute rewind signal for the last turn
+	rewindTurns := buildRewindTurns(timeline, visible)
+	rewindSig := signals.DetectRewindCandidate(rewindTurns, capacity.MaxTokens)
+	var rewindPtr *signals.RewindSignal
+	if rewindSig.ShouldRewind {
+		rewindPtr = &rewindSig
+	}
+
 	return sessionContextView{
 		Summary: contextSummary{
 			TokensInUse:         currentTokens,
@@ -360,7 +371,8 @@ func computeSessionContextView(
 			RowGranularity:    "turn",
 			CompactionTrimmed: compactionTrimmed,
 		},
-		Warnings: warnings,
+		Warnings:     warnings,
+		RewindSignal: rewindPtr,
 	}
 }
 
@@ -1047,4 +1059,75 @@ func fmtAny(v any) string {
 		return ""
 	}
 	return string(b)
+}
+
+// buildRewindTurns converts timeline turns and visible messages into
+// the signals.RewindTurn slice needed by the rewind detector.
+func buildRewindTurns(
+	timeline []contextTimelineTurn,
+	msgs []db.Message,
+) []signals.RewindTurn {
+	if len(timeline) == 0 {
+		return nil
+	}
+
+	// Index messages by ordinal for tool-call detail lookup.
+	msgByOrd := map[int]db.Message{}
+	for _, m := range msgs {
+		msgByOrd[m.Ordinal] = m
+	}
+
+	result := make([]signals.RewindTurn, 0, len(timeline))
+	for _, turn := range timeline {
+		rt := signals.RewindTurn{
+			Turn:             turn.Turn,
+			DeltaTokens:      turn.DeltaTokens,
+			CumulativeTokens: turn.CumulativeTokens,
+			DominantCategory: turn.DominantCategory,
+			Categories:       map[string]int{},
+		}
+		for _, cat := range turn.Categories {
+			rt.Categories[cat.Category] = cat.Tokens
+		}
+
+		// Collect tool calls from all messages in this turn's ordinal range.
+		for ord := turn.StartOrdinal; ord <= turn.EndOrdinal; ord++ {
+			msg, ok := msgByOrd[ord]
+			if !ok {
+				continue
+			}
+			for _, tc := range msg.ToolCalls {
+				status := ""
+				if len(tc.ResultEvents) > 0 {
+					status = tc.ResultEvents[len(tc.ResultEvents)-1].Status
+				}
+				resultContent := tc.ResultContent
+				if resultContent == "" && len(tc.ResultEvents) > 0 {
+					resultContent = tc.ResultEvents[len(tc.ResultEvents)-1].Content
+				}
+				rt.ToolCalls = append(rt.ToolCalls, signals.RewindToolCall{
+					ToolName:      tc.ToolName,
+					Category:      tc.Category,
+					InputJSON:     tc.InputJSON,
+					ResultContent: resultContent,
+					EventStatus:   status,
+				})
+
+				// Check for successful edits
+				if (tc.Category == "Edit" || tc.Category == "Write") && status != "errored" && status != "cancelled" {
+					if !isEditFailureContent(resultContent) {
+						rt.HasSuccessfulEdit = true
+					}
+				}
+			}
+		}
+
+		result = append(result, rt)
+	}
+	return result
+}
+
+func isEditFailureContent(content string) bool {
+	return strings.Contains(content, "FAILED") ||
+		strings.Contains(content, "error")
 }
