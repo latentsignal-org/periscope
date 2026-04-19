@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math"
@@ -11,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/wesm/agentsview/internal/db"
+	"github.com/wesm/agentsview/internal/guidance"
 	"github.com/wesm/agentsview/internal/signals"
 )
 
@@ -187,6 +190,11 @@ type sessionContextView struct {
 	SummaryCoverage *summaryCoverage
 }
 
+type guidanceCacheEntry struct {
+	Rewind  *signals.RewindSignal
+	Compact *signals.CompactSignal
+}
+
 type contextRowCalc struct {
 	row               contextTimelineRow
 	estimatedTotal    int
@@ -269,9 +277,18 @@ func (s *Server) buildSessionContextView(
 		return sessionContextView{}, err
 	}
 	view := computeSessionContextView(*session, msgs)
+	starred, err := s.db.IsSessionStarred(ctx, sessionID)
+	if err != nil && !errors.Is(err, db.ErrReadOnly) {
+		return sessionContextView{}, err
+	}
+	summaries, err := s.db.ListTurnSummaries(ctx, sessionID)
+	if err != nil && !errors.Is(err, db.ErrReadOnly) {
+		return sessionContextView{}, err
+	}
 	view.SummaryCoverage = s.computeSummaryCoverage(
-		ctx, sessionID, len(view.Timeline),
+		len(view.Timeline), starred, summaries,
 	)
+	s.enrichGuidanceSignals(ctx, &view, summaries)
 	return view, nil
 }
 
@@ -279,7 +296,9 @@ func (s *Server) buildSessionContextView(
 // have LLM summaries, and the overall lifecycle status. Returns
 // nil when there are no turns to summarise.
 func (s *Server) computeSummaryCoverage(
-	ctx context.Context, sessionID string, totalTurns int,
+	totalTurns int,
+	starred bool,
+	summaries []db.TurnSummary,
 ) *summaryCoverage {
 	if totalTurns == 0 {
 		return nil
@@ -289,17 +308,11 @@ func (s *Server) computeSummaryCoverage(
 		sc.Status = "disabled"
 		return sc
 	}
-	starred, err := s.db.IsSessionStarred(ctx, sessionID)
-	if err == nil {
-		sc.Starred = starred
-	}
-	summaries, err := s.db.ListTurnSummaries(ctx, sessionID)
-	if err == nil {
-		sc.SummarisedTurns = len(summaries)
-		for _, ts := range summaries {
-			if ts.CreatedAt > sc.LastUpdatedAt {
-				sc.LastUpdatedAt = ts.CreatedAt
-			}
+	sc.Starred = starred
+	sc.SummarisedTurns = len(summaries)
+	for _, ts := range summaries {
+		if ts.CreatedAt > sc.LastUpdatedAt {
+			sc.LastUpdatedAt = ts.CreatedAt
 		}
 	}
 	switch {
@@ -311,6 +324,293 @@ func (s *Server) computeSummaryCoverage(
 		sc.Status = "idle"
 	}
 	return sc
+}
+
+func (s *Server) enrichGuidanceSignals(
+	ctx context.Context,
+	view *sessionContextView,
+	summaries []db.TurnSummary,
+) {
+	if s == nil || view == nil || s.guidanceClient == nil ||
+		len(summaries) == 0 {
+		return
+	}
+	summaryByTurn := map[int]db.TurnSummary{}
+	for _, ts := range summaries {
+		summaryByTurn[ts.TurnIndex] = ts
+	}
+	taskTopic := pickOverallTaskTopic(summaries)
+	if view.RewindSignal != nil {
+		s.enrichRewindSignal(
+			ctx, view.RewindSignal, summaryByTurn, taskTopic,
+		)
+	}
+	if view.CompactSignal != nil {
+		s.enrichCompactSignal(
+			ctx, view.CompactSignal, view.Timeline, summaryByTurn, taskTopic,
+		)
+	}
+}
+
+func (s *Server) enrichRewindSignal(
+	ctx context.Context,
+	sig *signals.RewindSignal,
+	summaryByTurn map[int]db.TurnSummary,
+	taskTopic string,
+) {
+	if sig == nil || sig.BadStretchFrom <= 0 || sig.BadStretchTo <= 0 ||
+		sig.RewindToTurn <= 0 {
+		return
+	}
+	lastClean, ok := summaryByTurn[sig.RewindToTurn]
+	if !ok {
+		return
+	}
+	badStretch := make([]db.TurnSummary, 0, sig.BadStretchTo-sig.BadStretchFrom+1)
+	for turn := sig.BadStretchFrom; turn <= sig.BadStretchTo; turn++ {
+		ts, ok := summaryByTurn[turn]
+		if !ok {
+			return
+		}
+		badStretch = append(badStretch, ts)
+	}
+	in := guidance.RewindInput{
+		TaskTopic:     taskTopic,
+		LastCleanTurn: lastClean,
+		BadStretch:    badStretch,
+	}
+	key := s.guidanceCacheKey("rewind", in)
+	if cached := s.getCachedRewindSignal(key); cached != nil {
+		*sig = *cached
+		return
+	}
+	out, err := guidance.GenerateRewind(
+		ctx, s.guidanceClient, s.guidanceModel, in,
+	)
+	if err != nil || out.RewindRepromptText == "" {
+		return
+	}
+	augmented := *sig
+	augmented.TangentLabel = out.TangentLabel
+	augmented.RewindRepromptText = out.RewindRepromptText
+	augmented.RepromptProvenance = "model-generated"
+	augmented.RepromptModel = out.Model
+	augmented.EvidenceTurns = evidenceTurnsForRewind(
+		lastClean.TurnIndex, badStretch,
+	)
+	s.setCachedRewindSignal(key, &augmented)
+	*sig = augmented
+}
+
+func (s *Server) enrichCompactSignal(
+	ctx context.Context,
+	sig *signals.CompactSignal,
+	timeline []contextTimelineTurn,
+	summaryByTurn map[int]db.TurnSummary,
+	taskTopic string,
+) {
+	if sig == nil || len(timeline) < 2 {
+		return
+	}
+	recentCount := max(1, len(timeline)/5)
+	olderCount := len(timeline) - recentCount
+	if olderCount <= 0 {
+		return
+	}
+	olderTurns := make([]db.TurnSummary, 0, olderCount)
+	for _, turn := range timeline[:olderCount] {
+		ts, ok := summaryByTurn[turn.Turn]
+		if !ok {
+			return
+		}
+		olderTurns = append(olderTurns, ts)
+	}
+	recentTurns := make([]db.TurnSummary, 0, recentCount)
+	for _, turn := range timeline[olderCount:] {
+		ts, ok := summaryByTurn[turn.Turn]
+		if !ok {
+			return
+		}
+		recentTurns = append(recentTurns, ts)
+	}
+	in := guidance.CompactInput{
+		TaskTopic:          taskTopic,
+		OlderTurns:         olderTurns,
+		RecentTurns:        recentTurns,
+		LowValueCategories: append([]string(nil), sig.CompactFocus...),
+	}
+	key := s.guidanceCacheKey("compact", in)
+	if cached := s.getCachedCompactSignal(key); cached != nil {
+		*sig = *cached
+		return
+	}
+	out, err := guidance.GenerateCompact(
+		ctx, s.guidanceClient, s.guidanceModel, in,
+	)
+	if err != nil || out.CompactFocusText == "" {
+		return
+	}
+	augmented := *sig
+	augmented.KeepItems = out.KeepItems
+	augmented.DropItems = out.DropItems
+	augmented.CompactFocusText = out.CompactFocusText
+	augmented.FocusProvenance = "model-generated"
+	augmented.FocusModel = out.Model
+	augmented.EvidenceTurns = evidenceTurnsForCompact(
+		olderTurns, recentTurns,
+	)
+	s.setCachedCompactSignal(key, &augmented)
+	*sig = augmented
+}
+
+func pickOverallTaskTopic(summaries []db.TurnSummary) string {
+	counts := map[string]int{}
+	order := map[string]int{}
+	bestTopic := ""
+	bestCount := 0
+	bestOrder := -1
+	for i, ts := range summaries {
+		topic := strings.TrimSpace(ts.Topic)
+		if topic == "" {
+			continue
+		}
+		counts[topic]++
+		if _, ok := order[topic]; !ok {
+			order[topic] = i
+		}
+		if counts[topic] > bestCount ||
+			(counts[topic] == bestCount && order[topic] > bestOrder) {
+			bestTopic = topic
+			bestCount = counts[topic]
+			bestOrder = order[topic]
+		}
+	}
+	return bestTopic
+}
+
+func evidenceTurnsForRewind(
+	lastCleanTurn int, badStretch []db.TurnSummary,
+) []int {
+	turns := []int{lastCleanTurn}
+	if len(badStretch) == 1 {
+		return append(turns, badStretch[0].TurnIndex)
+	}
+	if len(badStretch) > 0 {
+		turns = append(turns, badStretch[0].TurnIndex)
+		if len(badStretch) > 2 {
+			turns = append(turns, badStretch[len(badStretch)/2].TurnIndex)
+		}
+		turns = append(turns, badStretch[len(badStretch)-1].TurnIndex)
+	}
+	return uniqueSortedInts(turns)
+}
+
+func evidenceTurnsForCompact(
+	olderTurns []db.TurnSummary,
+	recentTurns []db.TurnSummary,
+) []int {
+	var turns []int
+	appendEvidence := func(items []db.TurnSummary) {
+		if len(items) == 0 {
+			return
+		}
+		turns = append(turns, items[0].TurnIndex)
+		if len(items) > 2 {
+			turns = append(turns, items[len(items)/2].TurnIndex)
+		}
+		if len(items) > 1 {
+			turns = append(turns, items[len(items)-1].TurnIndex)
+		}
+	}
+	appendEvidence(olderTurns)
+	appendEvidence(recentTurns)
+	return uniqueSortedInts(turns)
+}
+
+func uniqueSortedInts(items []int) []int {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := map[int]struct{}{}
+	out := make([]int, 0, len(items))
+	for _, item := range items {
+		if _, ok := seen[item]; ok || item <= 0 {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func (s *Server) guidanceCacheKey(kind string, in any) string {
+	payload, err := json.Marshal(struct {
+		Kind string `json:"kind"`
+		In   any    `json:"in"`
+	}{
+		Kind: kind,
+		In:   in,
+	})
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(payload)
+	return kind + ":" + hex.EncodeToString(sum[:])
+}
+
+func (s *Server) getCachedRewindSignal(key string) *signals.RewindSignal {
+	if key == "" {
+		return nil
+	}
+	s.guidanceMu.RLock()
+	defer s.guidanceMu.RUnlock()
+	entry, ok := s.guidanceCache[key]
+	if !ok || entry.Rewind == nil {
+		return nil
+	}
+	cloned := *entry.Rewind
+	return &cloned
+}
+
+func (s *Server) setCachedRewindSignal(
+	key string,
+	sig *signals.RewindSignal,
+) {
+	if key == "" || sig == nil {
+		return
+	}
+	cloned := *sig
+	s.guidanceMu.Lock()
+	defer s.guidanceMu.Unlock()
+	s.guidanceCache[key] = guidanceCacheEntry{Rewind: &cloned}
+}
+
+func (s *Server) getCachedCompactSignal(key string) *signals.CompactSignal {
+	if key == "" {
+		return nil
+	}
+	s.guidanceMu.RLock()
+	defer s.guidanceMu.RUnlock()
+	entry, ok := s.guidanceCache[key]
+	if !ok || entry.Compact == nil {
+		return nil
+	}
+	cloned := *entry.Compact
+	return &cloned
+}
+
+func (s *Server) setCachedCompactSignal(
+	key string,
+	sig *signals.CompactSignal,
+) {
+	if key == "" || sig == nil {
+		return
+	}
+	cloned := *sig
+	s.guidanceMu.Lock()
+	defer s.guidanceMu.Unlock()
+	s.guidanceCache[key] = guidanceCacheEntry{Compact: &cloned}
 }
 
 func computeSessionContextView(

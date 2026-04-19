@@ -17,6 +17,7 @@ import (
 	"github.com/wesm/agentsview/internal/config"
 	"github.com/wesm/agentsview/internal/db"
 	"github.com/wesm/agentsview/internal/insight"
+	"github.com/wesm/agentsview/internal/llm"
 	"github.com/wesm/agentsview/internal/summarize"
 	"github.com/wesm/agentsview/internal/sync"
 	"github.com/wesm/agentsview/internal/web"
@@ -57,6 +58,14 @@ type Server struct {
 	// summary_coverage.status = "disabled".
 	summarizer *summarize.Worker
 
+	// guidanceClient generates Phase B banner text from per-turn
+	// summaries. Optional: when nil, guidance falls back to the
+	// existing heuristic-only banner copy.
+	guidanceClient llm.Client
+	guidanceModel  string
+	guidanceMu     gosync.RWMutex
+	guidanceCache  map[string]guidanceCacheEntry
+
 	// handlerDelay is injected before each timeout-wrapped
 	// handler, used only by tests to guarantee handlers
 	// exceed a short timeout. Zero in production.
@@ -92,6 +101,8 @@ func New(
 		generateStreamFunc: insight.GenerateStream,
 		spaFS:              dist,
 		spaHandler:         http.FileServerFS(dist),
+		guidanceModel:      llm.DefaultGenerateModel,
+		guidanceCache:      map[string]guidanceCacheEntry{},
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -126,6 +137,13 @@ func WithBaseContext(ctx context.Context) Option {
 // /context response includes summary_coverage metadata.
 func WithSummarizer(w *summarize.Worker) Option {
 	return func(s *Server) { s.summarizer = w }
+}
+
+// WithGuidanceClient wires an LLM client into the Phase B banner
+// guidance generator. When nil, the server exposes heuristic-only
+// signals with no generated text.
+func WithGuidanceClient(c llm.Client) Option {
+	return func(s *Server) { s.guidanceClient = c }
 }
 
 // WithBroadcaster wires an event broadcaster into the server so the

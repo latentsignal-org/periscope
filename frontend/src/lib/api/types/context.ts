@@ -44,6 +44,11 @@ export interface RewindSignal {
   rewind_to_reason?: string;
   bad_stretch_from?: number;
   bad_stretch_to?: number;
+  tangent_label?: string;
+  rewind_reprompt_text?: string;
+  reprompt_provenance?: string;
+  reprompt_model?: string;
+  evidence_turns?: number[];
 }
 
 export interface CompactSignal {
@@ -53,6 +58,12 @@ export interface CompactSignal {
   score: number;
   estimated_reclaimable: number;
   compact_focus?: string[];
+  keep_items?: string[];
+  drop_items?: string[];
+  compact_focus_text?: string;
+  focus_provenance?: string;
+  focus_model?: string;
+  evidence_turns?: number[];
 }
 
 export type SummaryCoverageStatus =

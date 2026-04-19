@@ -194,7 +194,8 @@ func runServe(cfg config.Config) {
 	}
 	cfg = preparedCfg
 
-	summarizer := startSummarizer(ctx, database, broadcaster)
+	llmClient := startLLMClient()
+	summarizer := startSummarizer(ctx, database, broadcaster, llmClient)
 
 	srv := server.New(cfg, database, engine,
 		server.WithVersion(server.VersionInfo{
@@ -206,6 +207,7 @@ func runServe(cfg config.Config) {
 		server.WithBaseContext(ctx),
 		server.WithBroadcaster(broadcaster),
 		server.WithSummarizer(summarizer),
+		server.WithGuidanceClient(llmClient),
 	)
 
 	rt, err := startServerWithOptionalCaddy(ctx, cfg, srv, rtOpts)
@@ -550,17 +552,25 @@ func recomputePendingSessions(
 // loop, and kicks off a boot-time reconcile over starred sessions.
 // Returns nil when ANTHROPIC_API_KEY is unset — the server then
 // treats summarisation as disabled.
-func startSummarizer(
-	ctx context.Context,
-	database *db.DB,
-	broadcaster *server.Broadcaster,
-) *summarize.Worker {
+func startLLMClient() llm.Client {
 	client, ok := llm.NewFromEnv()
 	if !ok {
 		log.Printf(
 			"summarize: ANTHROPIC_API_KEY unset; " +
 				"turn summaries disabled",
 		)
+		return nil
+	}
+	return client
+}
+
+func startSummarizer(
+	ctx context.Context,
+	database *db.DB,
+	broadcaster *server.Broadcaster,
+	client llm.Client,
+) *summarize.Worker {
+	if client == nil {
 		return nil
 	}
 	w := summarize.NewWorker(database, client, summarize.WorkerOptions{

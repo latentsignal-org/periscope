@@ -1,12 +1,26 @@
 <script lang="ts">
-  import type { CompactSignal } from "../../api/types/context.js";
+  import type {
+    CompactSignal,
+    SummaryCoverage,
+  } from "../../api/types/context.js";
   import { formatTokenCount } from "../../utils/format.js";
+  import GuidanceSuggestionBlock from "./GuidanceSuggestionBlock.svelte";
 
   interface Props {
     signal: CompactSignal;
+    summaryCoverage?: SummaryCoverage;
   }
 
-  let { signal }: Props = $props();
+  let { signal, summaryCoverage }: Props = $props();
+
+  let generatedHeadline = $derived.by(() => {
+    const keep = signal.keep_items?.[0]?.trim();
+    const drop = signal.drop_items?.[0]?.trim();
+    if (keep && drop) return `Preserve ${keep}, drop ${drop}`;
+    if (keep) return `Preserve ${keep}`;
+    if (drop) return `Drop ${drop}`;
+    return "";
+  });
 </script>
 
 <section class="signal-card compact" class:high={signal.confidence === "high"} class:medium={signal.confidence === "medium"}>
@@ -28,6 +42,9 @@
           <span class="badge score">{signal.score}/100</span>
         </div>
       </div>
+      {#if generatedHeadline}
+        <div class="focus-headline">{generatedHeadline}</div>
+      {/if}
     </div>
 
     <ul class="reasons">
@@ -35,6 +52,16 @@
         <li>{reason}</li>
       {/each}
     </ul>
+
+    <GuidanceSuggestionBlock
+      title="Suggested compact focus"
+      text={signal.compact_focus_text}
+      provenance={signal.focus_provenance}
+      model={signal.focus_model}
+      hint={summaryCoverage?.status === "idle"
+        ? "Star to enable guidance text"
+        : ""}
+    />
 
     <div class="signal-footer">
       {#if signal.estimated_reclaimable > 0}
@@ -166,6 +193,12 @@
     font-size: 12px;
     line-height: 1.6;
     color: var(--text-secondary);
+  }
+
+  .focus-headline {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent-orange);
   }
 
   .reasons li {

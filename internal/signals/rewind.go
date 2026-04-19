@@ -20,6 +20,12 @@ type RewindSignal struct {
 	RewindToReason string `json:"rewind_to_reason,omitempty"` // why this turn
 	BadStretchFrom int    `json:"bad_stretch_from,omitempty"` // first bad turn
 	BadStretchTo   int    `json:"bad_stretch_to,omitempty"`   // last bad turn (usually last)
+
+	TangentLabel       string `json:"tangent_label,omitempty"`
+	RewindRepromptText string `json:"rewind_reprompt_text,omitempty"`
+	RepromptProvenance string `json:"reprompt_provenance,omitempty"`
+	RepromptModel      string `json:"reprompt_model,omitempty"`
+	EvidenceTurns      []int  `json:"evidence_turns,omitempty"`
 }
 
 // RewindTurn is the per-turn data needed by the rewind detector.
@@ -519,4 +525,3 @@ func sortInts(a []int) {
 		}
 	}
 }
-

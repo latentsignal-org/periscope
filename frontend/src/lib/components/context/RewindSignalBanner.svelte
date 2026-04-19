@@ -1,12 +1,17 @@
 <script lang="ts">
-  import type { RewindSignal } from "../../api/types/context.js";
+  import type {
+    RewindSignal,
+    SummaryCoverage,
+  } from "../../api/types/context.js";
   import { formatTokenCount } from "../../utils/format.js";
+  import GuidanceSuggestionBlock from "./GuidanceSuggestionBlock.svelte";
 
   interface Props {
     signal: RewindSignal;
+    summaryCoverage?: SummaryCoverage;
   }
 
-  let { signal }: Props = $props();
+  let { signal, summaryCoverage }: Props = $props();
 </script>
 
 <section class="signal-card rewind" class:high={signal.confidence === "high"} class:medium={signal.confidence === "medium"}>
@@ -30,7 +35,9 @@
       {#if signal.rewind_to_turn}
         <div class="target">
           <span class="target-label">Rewind to turn {signal.rewind_to_turn}</span>
-          {#if signal.bad_stretch_from && signal.bad_stretch_to}
+          {#if signal.tangent_label}
+            <span class="target-meta">&mdash; drop the {signal.tangent_label}</span>
+          {:else if signal.bad_stretch_from && signal.bad_stretch_to}
             <span class="target-meta">
               {#if signal.bad_stretch_from === signal.bad_stretch_to}
                 &mdash; drop turn {signal.bad_stretch_to}
@@ -48,6 +55,16 @@
         <li>{reason}</li>
       {/each}
     </ul>
+
+    <GuidanceSuggestionBlock
+      title="Suggested rewind prompt"
+      text={signal.rewind_reprompt_text}
+      provenance={signal.reprompt_provenance}
+      model={signal.reprompt_model}
+      hint={summaryCoverage?.status === "idle"
+        ? "Star to enable guidance text"
+        : ""}
+    />
 
     <div class="signal-footer">
       {#if signal.tokens_recoverable > 0}

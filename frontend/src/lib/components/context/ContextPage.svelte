@@ -116,18 +116,18 @@
               class:idle={sc.status === "idle"}
               class:pending={sc.status === "pending"}
               class:complete={sc.status === "complete"}
-              title={sc.status === "disabled"
+                  title={sc.status === "disabled"
                 ? "Set ANTHROPIC_API_KEY to enable turn summaries"
                 : sc.status === "idle"
                   ? "Star this session to generate turn summaries"
-                  : `${sc.summarised_turns} of ${sc.total_turns} turns summarised`}
+                  : `${sc.summarised_turns} of ${sc.total_turns} turns summarized`}
             >
               {#if sc.status === "disabled"}
                 Summaries · disabled
               {:else if sc.status === "idle"}
-                Star to summarise
+                Star to summarize
               {:else if sc.status === "pending"}
-                Summarising · {sc.summarised_turns}/{sc.total_turns}
+                Summarizing · {sc.summarised_turns}/{sc.total_turns}
               {:else}
                 Summaries · {sc.total_turns}/{sc.total_turns}
               {/if}
@@ -135,10 +135,16 @@
           {/if}
         </div>
         {#if summaryData.rewind_signal}
-          <RewindSignalBanner signal={summaryData.rewind_signal} />
+          <RewindSignalBanner
+            signal={summaryData.rewind_signal}
+            summaryCoverage={summaryData.summary_coverage}
+          />
         {/if}
         {#if summaryData.compact_signal}
-          <CompactSignalBanner signal={summaryData.compact_signal} />
+          <CompactSignalBanner
+            signal={summaryData.compact_signal}
+            summaryCoverage={summaryData.summary_coverage}
+          />
         {/if}
       </div>
     {/if}

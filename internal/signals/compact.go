@@ -15,6 +15,13 @@ type CompactSignal struct {
 
 	// Suggested focus areas for a targeted compact
 	CompactFocus []string `json:"compact_focus,omitempty"`
+
+	KeepItems        []string `json:"keep_items,omitempty"`
+	DropItems        []string `json:"drop_items,omitempty"`
+	CompactFocusText string   `json:"compact_focus_text,omitempty"`
+	FocusProvenance  string   `json:"focus_provenance,omitempty"`
+	FocusModel       string   `json:"focus_model,omitempty"`
+	EvidenceTurns    []int    `json:"evidence_turns,omitempty"`
 }
 
 // CompactInput holds session-level data for the compact detector.
@@ -27,15 +34,15 @@ type CompactInput struct {
 	Composition map[string]int
 
 	// Timeline summary
-	TurnCount          int
-	AlreadyCompacted   bool // whether session has been compacted before
-	RecentTurnCount    int  // turns in last ~20% of session
-	RecentTurnTokens   int  // tokens from recent turns
-	OlderTurnTokens    int  // tokens from older turns
+	TurnCount        int
+	AlreadyCompacted bool // whether session has been compacted before
+	RecentTurnCount  int  // turns in last ~20% of session
+	RecentTurnTokens int  // tokens from recent turns
+	OlderTurnTokens  int  // tokens from older turns
 
 	// Growth pattern
-	MedianDeltaTokens  int
-	RecentGrowthRate   float64 // avg delta of last 5 turns / median
+	MedianDeltaTokens int
+	RecentGrowthRate  float64 // avg delta of last 5 turns / median
 }
 
 // DetectCompactCandidate analyzes a session and returns a signal
