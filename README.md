@@ -1,7 +1,12 @@
 # Periscope
 
-Browse, search, and track costs across all your AI coding agents. One binary, no
-accounts, everything local.
+Context session visualizer and improver for AI coding agents — built on
+[agentsview](https://github.com/wesm/agentsview).
+
+Browse, search, and track costs across all your AI coding agents. See where
+your context window is going, understand session health, and get guidance on
+when to continue, rewind, compact, or start fresh. One binary, no accounts,
+everything local.
 
 <p align="center">
   <img src="https://agentsview.io/screenshots/dashboard.png" alt="Analytics dashboard" width="720">
@@ -84,6 +89,23 @@ Features:
 - **Keyboard-first** navigation (`j`/`k`/`[`/`]`, `Cmd+K` search, `?` for all
   shortcuts)
 - **Export** sessions as HTML or publish to GitHub Gist
+
+## Context Engineering
+
+Periscope adds a context visualizer and guidance layer on top of the session
+browser. It answers questions that raw transcripts cannot:
+
+- Where did the context budget go?
+- Which tool outputs are now dead weight?
+- Is the session still healthy enough to continue?
+- Would a rewind, compaction, or fresh session be the better move?
+
+It provides a turn-by-turn timeline view with composition breakdowns and token
+accounting, plus a guidance layer that classifies session health, detects
+branch points, and recommends concrete next actions — continue, rewind,
+compact, fork, or delegate. See the full
+[Periscope spec](docs/periscope-spec.md) for detailed design, data model,
+and implementation notes.
 
 ## Supported Agents
 
@@ -191,7 +213,9 @@ jetbrains-plugin/   JetBrains IDE plugin (Kotlin, Gradle)
 
 ## Acknowledgements
 
-Inspired by
+Forked from [agentsview](https://github.com/wesm/agentsview) by Wes McKinney.
+
+Also inspired by
 [claude-history-tool](https://github.com/andyfischer/ai-coding-tools/tree/main/claude-history-tool)
 by Andy Fischer and
 [claude-code-transcripts](https://github.com/simonw/claude-code-transcripts) by
