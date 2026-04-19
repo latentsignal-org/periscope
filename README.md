@@ -1,4 +1,4 @@
-# agentsview
+# Periscope
 
 Browse, search, and track costs across all your AI coding agents. One binary, no
 accounts, everything local.
