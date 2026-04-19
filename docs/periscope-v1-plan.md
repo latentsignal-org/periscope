@@ -6,7 +6,7 @@
 - Date: 2026-04-18
 - Depends on:
   [`periscope-spec.md`](./periscope-spec.md),
-  [`context-visualizer-ui-options.md`](./context-visualizer-ui-options.md)
+  [`v1-ui-spec.md`](./v1-ui-spec.md)
 
 ## Objective
 
@@ -49,7 +49,7 @@ Use the spec-mandated page structure:
 1. `ContextTimeline`
 
 For the timeline, adopt Option C from
-[`context-visualizer-ui-options.md`](/Users/ann/dev/periscope/docs/context-visualizer-ui-options.md):
+[`v1-ui-spec.md`](/Users/ann/dev/periscope/docs/v1-ui-spec.md):
 explicit turn rows, per-turn stacked category bars, inline annotations, and a
 strong compaction divider.
 

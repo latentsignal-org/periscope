@@ -8,7 +8,7 @@
   [`context-session-visualizer-spec.md`](./context-session-visualizer-spec.md),
   [`context-session-visualizer-roadmap.md`](./context-session-visualizer-roadmap.md),
   [`context-session-visualizer-mvp-plan.md`](./context-session-visualizer-mvp-plan.md),
-  [`context-visualizer-ui-options.md`](./context-visualizer-ui-options.md)
+  [`v1-ui-spec.md`](./v1-ui-spec.md)
 
 ## Summary
 

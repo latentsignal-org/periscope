@@ -1,4 +1,4 @@
-# Context Visualizer UI Layout Options
+# Periscope V1 UI Spec
 
 ## Document Status
 
@@ -52,6 +52,27 @@ Three stacked sections fill the page: summary card, composition bar, and a
 continuous area-style timeline chart. The timeline uses turn indices on the
 x-axis and cumulative tokens on the y-axis.
 
+### ASCII Visualization
+
+```text
++--------------------------------------------------------------+
+| Context Summary                                              |
+| 127.4k / 200k (63%)   max: inferred   72.6k remaining        |
++--------------------------------------------------------------+
+| Composition                                                  |
+| [tool██████][assistant███][files██][user█][other]            |
++--------------------------------------------------------------+
+| Timeline                                                     |
+| 127k |                                              __       |
+| 100k |                                       ______/  \__    |
+|  75k |                                ______/            \   |
+|  50k |                         ______/   ▲ spike              |
+|  25k |                ________/                             |
+|   0k +------------------------------------------------------|
+|       1    5    10   15   20   25   30   35   40   45       |
++--------------------------------------------------------------+
+```
+
 ### Strengths
 
 - Simple top-to-bottom reading order.
@@ -76,6 +97,26 @@ Reasonable as a page shell, weak as the primary timeline treatment.
 
 Every turn is a discrete row in a scrollable table. Each row shows the turn
 index, token delta, cumulative total, dominant category, and any event markers.
+
+### ASCII Visualization
+
+```text
++------------------------------------------------------------------+
+| Turn | Delta | Cumul | Dominant    | Event      | Bar            |
+|    1 | +1.2k |  1.2k | user        |            | ██             |
+|----  ------------------------------------------------------------|
+|    2 | +3.8k |  5.0k | assistant   |            | █████          |
+|----  ------------------------------------------------------------|
+|    7 |+14.7k | 30.7k | tool_output | ▲ spike    | ██████████████ |
+|----  ------------------------------------------------------------|
+|   10 |+12.3k | 45.3k | tool_output | ▲ spike    | ████████████   |
+|==================================================================|
+|                       ↻ COMPACTION                               |
+|==================================================================|
+|   11 | +4.2k |  4.2k | summary     |            | ██████         |
+|   13 | +6.1k | 10.9k | assistant   | ● subagent | ████████       |
++------------------------------------------------------------------+
+```
 
 ### Strengths
 
@@ -103,6 +144,26 @@ Each turn is a row, and the main row bar is a stacked horizontal bar showing
 that turn's category mix. Annotation sub-rows call out spikes, compactions, or
 subagent events.
 
+### ASCII Visualization
+
+```text
++------------------------------------------------------------------+
+| Turn | Delta  | Cumul | Composition                              |
+|    1 | +1.2k  |  1.2k | ▓▓                                       |
+|    2 | +4.1k  |  5.3k | ░░░░▓▓▓                                  |
+|    4 | +9.8k  | 15.4k | ████████░░                               |
+|    7 |+14.7k  | 33.8k | ███████████████▲                         |
+|      |        |       | ▲ Grep returned 847 matches              |
+|   10 |+12.3k  | 48.9k | ███████████████▲                         |
+|      |        |       | ▲ Read 6 files, 3 large                  |
+|------+--------+-------+----------- ↻ COMPACTED ------------------|
+|   11 | +4.2k  |  4.2k | ░░░░░                                     |
+|   13 | +7.3k  | 12.1k | ░░░░████●                                |
+|      |        |       | ● Spawned subagent: verify tests         |
++------------------------------------------------------------------+
+Legend: ▓ user  ░ assistant/thinking  █ tool/file
+```
+
 ### Strengths
 
 - Turn boundaries are first-class.
@@ -129,6 +190,22 @@ spec-required current-state composition chart.
 
 Split the page into a growth chart panel and a synchronized turn-detail panel.
 Chart clicks and row clicks stay linked.
+
+### ASCII Visualization
+
+```text
++------------------------------+-----------------------------------+
+| Growth Chart                 | Turn Detail                       |
+| 50k |         ▲              | T7  +14.7k tool_output ▲ spike   |
+| 40k |        / \   ▲         |    Grep returned 847 matches     |
+| 30k |   ____/   \_/ \__      |                                   |
+| 20k | _/      ↻ compact  \   | T10 +12.3k tool_output ▲ spike   |
+| 10k |/                     \ |    Read 6 files, 3 large         |
+|  0k +----------------------- |                                   |
+|      1  5 10 15 20 25 30     | T11 +4.2k summary                |
+| click chart point to jump    | T13 +7.3k assistant ● subagent   |
++------------------------------+-----------------------------------+
+```
 
 ### Strengths
 
