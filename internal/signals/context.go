@@ -121,6 +121,7 @@ type ContextPressureResult struct {
 // contextWindowSizes maps model name prefixes to their context
 // window sizes in tokens.
 var contextWindowSizes = map[string]int{
+	"claude-opus-4-7":   1_000_000,
 	"claude-opus-4-6":   1_000_000,
 	"claude-sonnet-4-6": 200_000,
 	"claude-sonnet-4-5": 200_000,
