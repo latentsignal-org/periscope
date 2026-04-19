@@ -40,14 +40,16 @@
         toolBuffer.push(entry);
         continue;
       }
-      flushTools();
-      // Skip assistant wrappers that only existed to carry tool calls.
+      // Skip assistant wrappers that only existed to carry tool
+      // calls — without flushing, so adjacent tool calls still
+      // group together across the empty wrapper.
       if (
         entry.kind === "assistant_message" &&
         !entry.preview?.trim()
       ) {
         continue;
       }
+      flushTools();
       grouped.push({
         type: "single",
         entry,
@@ -214,12 +216,21 @@
                     <button
                       type="button"
                       class="tool-row"
+                      class:has-output={!!tool.output_preview}
                       onclick={() => jumpToTranscript(tool.ordinal)}
                     >
-                      <span class="tool-chevron" aria-hidden="true">›</span>
-                      <span class="tool-name">{tool.label}</span>
-                      {#if tool.preview}
-                        <span class="tool-snippet">{tool.preview}</span>
+                      <div class="tool-line tool-input-line">
+                        <span class="tool-chevron" aria-hidden="true">$</span>
+                        <span class="tool-name">{tool.label}</span>
+                        {#if tool.preview}
+                          <span class="tool-snippet">{tool.preview}</span>
+                        {/if}
+                      </div>
+                      {#if tool.output_preview}
+                        <div class="tool-line tool-output-line">
+                          <span class="tool-chevron" aria-hidden="true">↳</span>
+                          <span class="tool-snippet">{tool.output_preview}</span>
+                        </div>
                       {/if}
                     </button>
                   {/each}
@@ -508,11 +519,10 @@
     border: none;
     background: transparent;
     color: var(--text-primary);
-    padding: 3px 6px;
+    padding: 4px 6px;
     border-radius: var(--radius-sm);
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
+    display: grid;
+    gap: 2px;
     text-align: left;
     cursor: pointer;
     font-family: var(--font-mono);
@@ -525,9 +535,18 @@
     background: var(--bg-surface-hover);
   }
 
+  .tool-line {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+  }
+
   .tool-chevron {
     color: var(--text-muted);
     flex-shrink: 0;
+    width: 12px;
+    text-align: center;
   }
 
   .tool-name {
@@ -542,6 +561,11 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
+    flex: 1;
+  }
+
+  .tool-output-line .tool-snippet {
+    color: var(--text-secondary);
   }
 
   .annotation {

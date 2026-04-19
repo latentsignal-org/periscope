@@ -108,10 +108,11 @@ type contextTimelineToolPreview struct {
 }
 
 type contextTimelineEntry struct {
-	Kind    string `json:"kind"`
-	Ordinal int    `json:"ordinal"`
-	Label   string `json:"label"`
-	Preview string `json:"preview,omitempty"`
+	Kind          string `json:"kind"`
+	Ordinal       int    `json:"ordinal"`
+	Label         string `json:"label"`
+	Preview       string `json:"preview,omitempty"`
+	OutputPreview string `json:"output_preview,omitempty"`
 }
 
 type contextTimelineTurn struct {
@@ -860,6 +861,7 @@ func buildTimelineTurns(
 		}
 		for _, tc := range msg.ToolCalls {
 			preview := toolCallSnippet(tc)
+			output := toolOutputSnippet(tc)
 			current.turn.ToolCalls = append(
 				current.turn.ToolCalls,
 				contextTimelineToolPreview{
@@ -870,10 +872,11 @@ func buildTimelineTurns(
 			)
 			current.turn.Entries = append(current.turn.Entries,
 				contextTimelineEntry{
-					Kind:    "tool_call",
-					Ordinal: msg.Ordinal,
-					Label:   toolCallLabel(tc),
-					Preview: preview,
+					Kind:          "tool_call",
+					Ordinal:       msg.Ordinal,
+					Label:         toolCallLabel(tc),
+					Preview:       preview,
+					OutputPreview: output,
 				},
 			)
 		}
@@ -977,30 +980,52 @@ func toolCallLabel(tc db.ToolCall) string {
 }
 
 func toolCallSnippet(tc db.ToolCall) string {
+	if tc.InputJSON == "" {
+		return ""
+	}
 	var params map[string]any
-	if tc.InputJSON != "" {
-		if err := json.Unmarshal([]byte(tc.InputJSON), &params); err == nil {
-			keys := []string{
-				"file_path", "path", "pattern", "query", "command",
-				"cmd", "description", "prompt", "skill", "name",
-			}
-			for _, key := range keys {
-				if value, ok := params[key]; ok {
-					if text := truncatePreview(strings.TrimSpace(anyToString(value)), 120); text != "" {
-						return text
-					}
-				}
-			}
-			if len(params) > 0 {
-				if raw, err := json.Marshal(params); err == nil {
-					return truncatePreview(string(raw), 120)
-				}
+	if err := json.Unmarshal([]byte(tc.InputJSON), &params); err != nil {
+		return ""
+	}
+	keys := []string{
+		"file_path", "path", "pattern", "query", "command",
+		"cmd", "description", "prompt", "skill", "name",
+	}
+	for _, key := range keys {
+		if value, ok := params[key]; ok {
+			if text := truncatePreview(strings.TrimSpace(anyToString(value)), 120); text != "" {
+				return text
 			}
 		}
 	}
-	if tc.ResultContent != "" {
-		firstLine := strings.TrimSpace(strings.Split(tc.ResultContent, "\n")[0])
-		return truncatePreview(firstLine, 120)
+	if len(params) > 0 {
+		if raw, err := json.Marshal(params); err == nil {
+			return truncatePreview(string(raw), 120)
+		}
+	}
+	return ""
+}
+
+// toolOutputSnippet returns a short preview of the tool's result
+// content, preferring tc.ResultContent and falling back to the
+// first non-empty ResultEvents content.
+func toolOutputSnippet(tc db.ToolCall) string {
+	if snippet := firstNonEmptyLine(tc.ResultContent); snippet != "" {
+		return truncatePreview(snippet, 160)
+	}
+	for _, ev := range tc.ResultEvents {
+		if snippet := firstNonEmptyLine(ev.Content); snippet != "" {
+			return truncatePreview(snippet, 160)
+		}
+	}
+	return ""
+}
+
+func firstNonEmptyLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
 	}
 	return ""
 }

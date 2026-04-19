@@ -63,6 +63,7 @@ export interface ContextTimelineEntry {
   ordinal: number;
   label: string;
   preview?: string;
+  output_preview?: string;
 }
 
 export interface ContextTimelineTurn {
