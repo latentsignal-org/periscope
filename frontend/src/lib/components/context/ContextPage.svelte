@@ -109,7 +109,7 @@
       warnings={summaryData.warnings ?? []}
     />
     <ContextCompositionChart composition={summaryData.composition} />
-    <ContextTimeline timeline={timelineData.timeline} />
+    <ContextTimeline timeline={timelineData.timeline} {sessionId} />
   {/if}
 </div>
 

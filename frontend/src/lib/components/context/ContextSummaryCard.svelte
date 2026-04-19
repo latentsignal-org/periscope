@@ -87,7 +87,7 @@
     <div class="stat">
       <span class="label">Granularity</span>
       <strong>{summary.row_granularity}</strong>
-      <span class="meta">Visible since row {summary.visible_since_ordinal}</span>
+      <span class="meta">Visible since message {summary.visible_since_ordinal}</span>
     </div>
   </div>
 

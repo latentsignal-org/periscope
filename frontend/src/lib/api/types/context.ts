@@ -47,11 +47,30 @@ export interface ContextCategoryValue {
   tokens: number;
 }
 
-export interface ContextTimelineRow {
+export interface ContextTimelineMessagePreview {
   ordinal: number;
+  preview: string;
+}
+
+export interface ContextTimelineToolPreview {
+  ordinal: number;
+  tool_name: string;
+  snippet?: string;
+}
+
+export interface ContextTimelineEntry {
+  kind: string;
+  ordinal: number;
+  label: string;
+  preview?: string;
+}
+
+export interface ContextTimelineTurn {
+  turn: number;
+  start_ordinal: number;
+  end_ordinal: number;
   timestamp?: string;
   label: string;
-  granularity: string;
   delta_tokens: number;
   delta_provenance: string;
   cumulative_tokens: number;
@@ -60,10 +79,14 @@ export interface ContextTimelineRow {
   categories: ContextCategoryValue[];
   markers?: string[];
   annotations?: string[];
+  user_message?: ContextTimelineMessagePreview;
+  assistant_message?: ContextTimelineMessagePreview;
+  tool_calls?: ContextTimelineToolPreview[];
+  entries?: ContextTimelineEntry[];
 }
 
 export interface SessionContextTimelineResponse {
-  timeline: ContextTimelineRow[];
+  timeline: ContextTimelineTurn[];
   supports: ContextSupports;
   warnings?: string[];
 }

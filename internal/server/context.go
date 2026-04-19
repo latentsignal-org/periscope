@@ -82,6 +82,44 @@ type contextTimelineRow struct {
 	Annotations          []string               `json:"annotations,omitempty"`
 }
 
+type contextTimelineMessagePreview struct {
+	Ordinal int    `json:"ordinal"`
+	Preview string `json:"preview"`
+}
+
+type contextTimelineToolPreview struct {
+	Ordinal  int    `json:"ordinal"`
+	ToolName string `json:"tool_name"`
+	Snippet  string `json:"snippet,omitempty"`
+}
+
+type contextTimelineEntry struct {
+	Kind    string `json:"kind"`
+	Ordinal int    `json:"ordinal"`
+	Label   string `json:"label"`
+	Preview string `json:"preview,omitempty"`
+}
+
+type contextTimelineTurn struct {
+	Turn                 int                            `json:"turn"`
+	StartOrdinal         int                            `json:"start_ordinal"`
+	EndOrdinal           int                            `json:"end_ordinal"`
+	Timestamp            string                         `json:"timestamp,omitempty"`
+	Label                string                         `json:"label,omitempty"`
+	DeltaTokens          int                            `json:"delta_tokens"`
+	DeltaProvenance      string                         `json:"delta_provenance"`
+	CumulativeTokens     int                            `json:"cumulative_tokens"`
+	CumulativeProvenance string                         `json:"cumulative_provenance"`
+	DominantCategory     string                         `json:"dominant_category,omitempty"`
+	Categories           []contextCategoryValue         `json:"categories"`
+	Markers              []string                       `json:"markers,omitempty"`
+	Annotations          []string                       `json:"annotations,omitempty"`
+	UserMessage          *contextTimelineMessagePreview `json:"user_message,omitempty"`
+	AssistantMessage     *contextTimelineMessagePreview `json:"assistant_message,omitempty"`
+	ToolCalls            []contextTimelineToolPreview   `json:"tool_calls,omitempty"`
+	Entries              []contextTimelineEntry         `json:"entries,omitempty"`
+}
+
 type contextSupports struct {
 	LiveUpdates       bool   `json:"live_updates"`
 	StandaloneRoute   bool   `json:"standalone_route"`
@@ -100,16 +138,16 @@ type sessionContextResponse struct {
 }
 
 type sessionContextTimelineResponse struct {
-	Timeline []contextTimelineRow `json:"timeline"`
-	Supports contextSupports      `json:"supports"`
-	Warnings []string             `json:"warnings,omitempty"`
+	Timeline []contextTimelineTurn `json:"timeline"`
+	Supports contextSupports       `json:"supports"`
+	Warnings []string              `json:"warnings,omitempty"`
 }
 
 type sessionContextView struct {
 	Summary     contextSummary
 	Capacity    contextCapacity
 	Composition []contextCompositionItem
-	Timeline    []contextTimelineRow
+	Timeline    []contextTimelineTurn
 	Supports    contextSupports
 	Warnings    []string
 }
@@ -247,10 +285,11 @@ func computeSessionContextView(
 	}
 
 	applySpikeMarkers(rows)
+	timeline := buildTimelineTurns(rows, visible)
 
 	currentTokens := cumulative
 	tokenProv := cumulativeProv
-	if len(rows) == 0 {
+	if len(timeline) == 0 {
 		tokenProv = contextProvenanceUnknown
 	}
 
@@ -278,7 +317,7 @@ func computeSessionContextView(
 			"Context capacity is unknown for this session; occupancy and free-space values are omitted.")
 	}
 	warnings = append(warnings,
-		"Timeline rows are rendered at message granularity in V1.")
+		"Timeline rows are grouped into turns in V1 and link back to transcript messages.")
 
 	composition := buildComposition(compositionTotals, currentTokens, capacity)
 
@@ -290,32 +329,24 @@ func computeSessionContextView(
 			PercentProvenance:   percentProv,
 			RemainingTokens:     remaining,
 			RemainingKnown:      remainingKnown,
-			VisibleRowCount:     len(rows),
+			VisibleRowCount:     len(timeline),
 			VisibleSinceOrdinal: visibleSince,
 			LastUpdatedAt:       lastUpdatedAt,
-			RowGranularity:      contextRowGranularityMessage,
+			RowGranularity:      "turn",
 		},
 		Capacity:    capacity,
 		Composition: composition,
-		Timeline:    mapTimelineRows(rows),
+		Timeline:    timeline,
 		Supports: contextSupports{
 			LiveUpdates:       true,
 			StandaloneRoute:   true,
 			EmbeddedTab:       true,
-			TranscriptJump:    false,
-			RowGranularity:    contextRowGranularityMessage,
+			TranscriptJump:    true,
+			RowGranularity:    "turn",
 			CompactionTrimmed: compactionTrimmed,
 		},
 		Warnings: warnings,
 	}
-}
-
-func mapTimelineRows(rows []contextRowCalc) []contextTimelineRow {
-	out := make([]contextTimelineRow, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, row.row)
-	}
-	return out
 }
 
 func buildComposition(
@@ -705,4 +736,258 @@ func latestNonEmpty(current, next string) string {
 		return next
 	}
 	return current
+}
+
+func buildTimelineTurns(
+	rows []contextRowCalc, msgs []db.Message,
+) []contextTimelineTurn {
+	if len(rows) == 0 || len(rows) != len(msgs) {
+		return nil
+	}
+
+	type turnBuilder struct {
+		turn           contextTimelineTurn
+		categoryTotals map[string]int
+	}
+
+	var turns []contextTimelineTurn
+	var current *turnBuilder
+
+	flush := func() {
+		if current == nil {
+			return
+		}
+		current.turn.Categories = sortedCategoryValues(current.categoryTotals)
+		if len(current.turn.Categories) > 0 {
+			current.turn.DominantCategory = current.turn.Categories[0].Category
+		}
+		turns = append(turns, current.turn)
+		current = nil
+	}
+
+	for i, msg := range msgs {
+		row := rows[i].row
+		if current == nil || startsNewTurn(current.turn, msg) {
+			flush()
+			current = &turnBuilder{
+				turn: contextTimelineTurn{
+					StartOrdinal:         row.Ordinal,
+					EndOrdinal:           row.Ordinal,
+					Timestamp:            row.Timestamp,
+					Label:                row.Label,
+					DeltaTokens:          0,
+					DeltaProvenance:      row.DeltaProvenance,
+					CumulativeTokens:     row.CumulativeTokens,
+					CumulativeProvenance: row.CumulativeProvenance,
+					Markers:              append([]string{}, row.Markers...),
+					Annotations:          append([]string{}, row.Annotations...),
+				},
+				categoryTotals: map[string]int{},
+			}
+		}
+
+		current.turn.EndOrdinal = row.Ordinal
+		current.turn.CumulativeTokens = row.CumulativeTokens
+		current.turn.CumulativeProvenance = row.CumulativeProvenance
+		current.turn.DeltaTokens += row.DeltaTokens
+		current.turn.DeltaProvenance = weakerProvenance(
+			current.turn.DeltaProvenance, row.DeltaProvenance,
+		)
+		if current.turn.Timestamp == "" {
+			current.turn.Timestamp = row.Timestamp
+		}
+
+		for _, marker := range row.Markers {
+			if !slices.Contains(current.turn.Markers, marker) {
+				current.turn.Markers = append(current.turn.Markers, marker)
+			}
+		}
+		for _, annotation := range row.Annotations {
+			if !slices.Contains(current.turn.Annotations, annotation) {
+				current.turn.Annotations = append(current.turn.Annotations, annotation)
+			}
+		}
+		for _, category := range row.Categories {
+			current.categoryTotals[category.Category] += category.Tokens
+		}
+
+		if msg.Role == "user" && !msg.IsSystem &&
+			!msg.IsCompactBoundary && msg.SourceSubtype != "compact_boundary" {
+			if preview := messagePreview(msg); preview != "" {
+				current.turn.UserMessage = &contextTimelineMessagePreview{
+					Ordinal: msg.Ordinal,
+					Preview: preview,
+				}
+			}
+			current.turn.Entries = append(current.turn.Entries,
+				contextTimelineEntry{
+					Kind:    "user_message",
+					Ordinal: msg.Ordinal,
+					Label:   "User",
+					Preview: messagePreview(msg),
+				},
+			)
+		}
+		if msg.Role == "assistant" {
+			if preview := messagePreview(msg); preview != "" {
+				current.turn.AssistantMessage = &contextTimelineMessagePreview{
+					Ordinal: msg.Ordinal,
+					Preview: preview,
+				}
+			}
+			current.turn.Entries = append(current.turn.Entries,
+				contextTimelineEntry{
+					Kind:    "assistant_message",
+					Ordinal: msg.Ordinal,
+					Label:   "Assistant",
+					Preview: messagePreview(msg),
+				},
+			)
+		}
+		for _, tc := range msg.ToolCalls {
+			preview := toolCallSnippet(tc)
+			current.turn.ToolCalls = append(
+				current.turn.ToolCalls,
+				contextTimelineToolPreview{
+					Ordinal:  msg.Ordinal,
+					ToolName: toolCallLabel(tc),
+					Snippet:  preview,
+				},
+			)
+			current.turn.Entries = append(current.turn.Entries,
+				contextTimelineEntry{
+					Kind:    "tool_call",
+					Ordinal: msg.Ordinal,
+					Label:   toolCallLabel(tc),
+					Preview: preview,
+				},
+			)
+		}
+	}
+
+	flush()
+
+	for i := range turns {
+		turns[i].Turn = i + 1
+	}
+
+	return turns
+}
+
+func startsNewTurn(current contextTimelineTurn, msg db.Message) bool {
+	if len(current.Markers) > 0 && slices.Contains(current.Markers, "compaction") {
+		return true
+	}
+	return msg.Role == "user" && !msg.IsSystem
+}
+
+func sortedCategoryValues(totals map[string]int) []contextCategoryValue {
+	out := make([]contextCategoryValue, 0, len(totals))
+	for category, tokens := range totals {
+		if tokens <= 0 {
+			continue
+		}
+		out = append(out, contextCategoryValue{
+			Category: category,
+			Tokens:   tokens,
+		})
+	}
+	slices.SortStableFunc(out, func(a, b contextCategoryValue) int {
+		if a.Tokens == b.Tokens {
+			return strings.Compare(a.Category, b.Category)
+		}
+		return b.Tokens - a.Tokens
+	})
+	return out
+}
+
+func messagePreview(msg db.Message) string {
+	content := strings.TrimSpace(removeThinkingBlocks(msg.Content))
+	content = strings.Join(strings.Fields(content), " ")
+	return truncatePreview(content, 180)
+}
+
+func removeThinkingBlocks(content string) string {
+	const startTag = "[Thinking]\n"
+	const endTag = "\n[/Thinking]"
+	for {
+		start := strings.Index(content, startTag)
+		if start < 0 {
+			return content
+		}
+		end := strings.Index(content[start+len(startTag):], endTag)
+		if end < 0 {
+			return content[:start]
+		}
+		end += start + len(startTag)
+		content = content[:start] + content[end+len(endTag):]
+	}
+}
+
+func truncatePreview(content string, maxLen int) string {
+	if maxLen <= 0 || len(content) <= maxLen {
+		return content
+	}
+	if maxLen == 1 {
+		return "…"
+	}
+	return strings.TrimSpace(content[:maxLen-1]) + "…"
+}
+
+func toolCallLabel(tc db.ToolCall) string {
+	if tc.Category != "" && !strings.EqualFold(tc.Category, "tool") {
+		return tc.Category
+	}
+	if tc.ToolName != "" {
+		return tc.ToolName
+	}
+	return "Tool"
+}
+
+func toolCallSnippet(tc db.ToolCall) string {
+	var params map[string]any
+	if tc.InputJSON != "" {
+		if err := json.Unmarshal([]byte(tc.InputJSON), &params); err == nil {
+			keys := []string{
+				"file_path", "path", "pattern", "query", "command",
+				"cmd", "description", "prompt", "skill", "name",
+			}
+			for _, key := range keys {
+				if value, ok := params[key]; ok {
+					if text := truncatePreview(strings.TrimSpace(anyToString(value)), 120); text != "" {
+						return text
+					}
+				}
+			}
+			if len(params) > 0 {
+				if raw, err := json.Marshal(params); err == nil {
+					return truncatePreview(string(raw), 120)
+				}
+			}
+		}
+	}
+	if tc.ResultContent != "" {
+		firstLine := strings.TrimSpace(strings.Split(tc.ResultContent, "\n")[0])
+		return truncatePreview(firstLine, 120)
+	}
+	return ""
+}
+
+func anyToString(v any) string {
+	switch value := v.(type) {
+	case string:
+		return value
+	case json.Number:
+		return value.String()
+	default:
+		return strings.TrimSpace(strings.ReplaceAll(strings.Trim(fmtAny(value), `"`), "\n", " "))
+	}
+}
+
+func fmtAny(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }

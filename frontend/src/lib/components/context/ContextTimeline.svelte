@@ -1,13 +1,15 @@
 <script lang="ts">
-  import type { ContextTimelineRow } from "../../api/types.js";
+  import type { ContextTimelineTurn } from "../../api/types.js";
   import { formatTimestamp, formatTokenCount } from "../../utils/format.js";
   import { CATEGORY_COLORS, categoryLabel } from "./context-utils.js";
+  import { router } from "../../stores/router.svelte.js";
 
   interface Props {
-    timeline: ContextTimelineRow[];
+    timeline: ContextTimelineTurn[];
+    sessionId: string;
   }
 
-  let { timeline }: Props = $props();
+  let { timeline, sessionId }: Props = $props();
 
   function markerLabel(marker: string): string {
     switch (marker) {
@@ -21,6 +23,23 @@
         return marker;
     }
   }
+
+  function jumpToTranscript(ordinal: number) {
+    router.navigateToSession(sessionId, { msg: String(ordinal) });
+  }
+
+  function entryKindLabel(kind: string): string {
+    switch (kind) {
+      case "user_message":
+        return "User";
+      case "assistant_message":
+        return "Assistant";
+      case "tool_call":
+        return "Tool";
+      default:
+        return kind;
+    }
+  }
 </script>
 
 <section class="panel">
@@ -30,52 +49,81 @@
   </div>
 
   <div class="rows">
-    {#each timeline as row (row.ordinal)}
-      <div class:compaction-row={row.markers?.includes("compaction")} class="row-shell">
-        <div class="row-main">
-          <div class="ordinal">#{row.ordinal}</div>
-          <div class="metric delta">
-            <span class="metric-label">Delta</span>
-            <strong>+{formatTokenCount(row.delta_tokens)}</strong>
-            <span class="metric-meta">{row.delta_provenance}</span>
-          </div>
-          <div class="metric cumul">
-            <span class="metric-label">Cumulative</span>
-            <strong>{formatTokenCount(row.cumulative_tokens)}</strong>
-            <span class="metric-meta">{row.cumulative_provenance}</span>
-          </div>
-          <div class="row-body">
-            <div class="row-topline">
-              <span class="row-label">{row.label}</span>
-              {#if row.timestamp}
-                <span class="row-time">{formatTimestamp(row.timestamp)}</span>
-              {/if}
-              {#each row.markers ?? [] as marker}
-                <span class="marker">{markerLabel(marker)}</span>
-              {/each}
+    {#each timeline as turn (turn.turn)}
+      <details class:compaction-row={turn.markers?.includes("compaction")} class="turn-shell">
+        <summary class="turn-summary">
+          <div class="turn-summary-grid">
+            <div class="ordinal">
+              <span class="ordinal-label">T{turn.turn}</span>
             </div>
-            <div class="bar" aria-hidden="true">
-              {#each row.categories as category (category.category)}
-                <div
-                  class="bar-segment"
-                  title={`${categoryLabel(category.category)} · ${formatTokenCount(category.tokens)} tokens`}
-                  style={`flex:${Math.max(category.tokens, 1)};background:${CATEGORY_COLORS[category.category] ?? CATEGORY_COLORS.other}`}
-                ></div>
-              {/each}
+            <div class="metric">
+              <span class="metric-label">Delta</span>
+              <strong>+{formatTokenCount(turn.delta_tokens)}</strong>
+              <span class="metric-meta">{turn.delta_provenance}</span>
             </div>
-            <div class="category-summary">
-              {#each row.categories.slice(0, 3) as category (category.category)}
-                <span>
-                  {categoryLabel(category.category)} {formatTokenCount(category.tokens)}
+            <div class="metric">
+              <span class="metric-label">Cumulative</span>
+              <strong>{formatTokenCount(turn.cumulative_tokens)}</strong>
+              <span class="metric-meta">{turn.cumulative_provenance}</span>
+            </div>
+            <div class="turn-main">
+              <div class="turn-topline">
+                <span class="turn-label">
+                  {#if turn.markers?.includes("compaction")}
+                    {turn.label || "Compaction seed"}
+                  {:else}
+                    Messages {turn.start_ordinal}-{turn.end_ordinal}
+                  {/if}
                 </span>
-              {/each}
+                {#if turn.timestamp}
+                  <span class="row-time">{formatTimestamp(turn.timestamp)}</span>
+                {/if}
+                {#each turn.markers ?? [] as marker}
+                  <span class="marker">{markerLabel(marker)}</span>
+                {/each}
+              </div>
+              <div class="bar" aria-hidden="true">
+                {#each turn.categories as category (category.category)}
+                  <div
+                    class="bar-segment"
+                    title={`${categoryLabel(category.category)} · ${formatTokenCount(category.tokens)} tokens`}
+                    style={`flex:${Math.max(category.tokens, 1)};background:${CATEGORY_COLORS[category.category] ?? CATEGORY_COLORS.other}`}
+                  ></div>
+                {/each}
+              </div>
+              <div class="category-summary">
+                {#each turn.categories.slice(0, 3) as category (category.category)}
+                  <span>{categoryLabel(category.category)} {formatTokenCount(category.tokens)}</span>
+                {/each}
+              </div>
             </div>
+            <div class="chevron" aria-hidden="true">▾</div>
           </div>
+        </summary>
+
+        <div class="turn-children">
+          {#each turn.entries ?? [] as entry, i (`${entry.kind}-${entry.ordinal}-${i}`)}
+            <button
+              type="button"
+              class="entry-row"
+              onclick={() => jumpToTranscript(entry.ordinal)}
+            >
+              <div class="entry-kind">{entryKindLabel(entry.kind)}</div>
+              <div class="entry-content">
+                <div class="entry-label">{entry.label}</div>
+                {#if entry.preview}
+                  <div class="entry-preview">{entry.preview}</div>
+                {/if}
+              </div>
+              <div class="entry-ordinal">#{entry.ordinal}</div>
+            </button>
+          {/each}
+
+          {#each turn.annotations ?? [] as annotation}
+            <div class="annotation">{annotation}</div>
+          {/each}
         </div>
-        {#each row.annotations ?? [] as annotation}
-          <div class="annotation">{annotation}</div>
-        {/each}
-      </div>
+      </details>
     {/each}
   </div>
 </section>
@@ -108,21 +156,28 @@
     gap: 12px;
   }
 
-  .row-shell {
-    display: grid;
-    gap: 6px;
-    padding-top: 12px;
+  .turn-shell {
     border-top: 1px solid var(--border-default);
+    padding-top: 12px;
   }
 
-  .row-shell.compaction-row {
+  .turn-shell.compaction-row {
     border-top: 4px solid #be123c;
     padding-top: 10px;
   }
 
-  .row-main {
+  .turn-summary {
+    list-style: none;
+    cursor: pointer;
+  }
+
+  .turn-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .turn-summary-grid {
     display: grid;
-    grid-template-columns: 64px 112px 120px minmax(0, 1fr);
+    grid-template-columns: 64px 112px 120px minmax(0, 1fr) 24px;
     gap: 12px;
     align-items: start;
   }
@@ -132,13 +187,15 @@
   .metric-meta,
   .row-time,
   .marker,
-  .annotation,
-  .category-summary {
+  .category-summary,
+  .entry-kind,
+  .entry-ordinal,
+  .annotation {
     font-size: 12px;
     color: var(--text-secondary);
   }
 
-  .ordinal {
+  .ordinal-label {
     font-weight: 700;
   }
 
@@ -147,12 +204,12 @@
     gap: 2px;
   }
 
-  .row-body {
+  .turn-main {
     display: grid;
     gap: 8px;
   }
 
-  .row-topline,
+  .turn-topline,
   .category-summary {
     display: flex;
     gap: 10px;
@@ -160,9 +217,10 @@
     align-items: center;
   }
 
-  .row-label {
+  .turn-label {
     font-size: 13px;
     font-weight: 600;
+    color: var(--text-primary);
   }
 
   .bar {
@@ -183,25 +241,92 @@
     padding: 2px 6px;
   }
 
-  .annotation {
+  .chevron {
+    color: var(--text-secondary);
+    transition: transform 0.15s ease;
+    transform-origin: center;
+    padding-top: 3px;
+  }
+
+  details[open] .chevron {
+    transform: rotate(180deg);
+  }
+
+  .turn-children {
     margin-left: calc(64px + 112px + 120px + 24px);
+    margin-top: 10px;
+    display: grid;
+    gap: 8px;
+  }
+
+  .entry-row {
+    width: 100%;
+    border: 1px solid var(--border-default);
+    background: color-mix(in srgb, var(--bg-surface) 88%, #0f172a 12%);
+    color: var(--text-primary);
+    border-radius: 10px;
+    padding: 10px 12px;
+    display: grid;
+    grid-template-columns: 88px minmax(0, 1fr) 52px;
+    gap: 12px;
+    align-items: start;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .entry-row:hover {
+    background: color-mix(in srgb, var(--bg-surface) 80%, #0f172a 20%);
+  }
+
+  .entry-kind {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 700;
+  }
+
+  .entry-content {
+    display: grid;
+    gap: 4px;
+  }
+
+  .entry-label {
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .entry-preview {
+    font-size: 14px;
+    line-height: 1.35;
+    color: var(--text-primary);
+  }
+
+  .entry-ordinal {
+    text-align: right;
+  }
+
+  .annotation {
+    padding-left: 12px;
   }
 
   @media (max-width: 900px) {
-    .row-main {
-      grid-template-columns: 56px 1fr;
+    .turn-summary-grid {
+      grid-template-columns: 56px 1fr 24px;
     }
 
-    .cumul {
-      grid-column: 2;
+    .turn-main {
+      grid-column: 1 / span 3;
     }
 
-    .row-body {
-      grid-column: 1 / -1;
-    }
-
-    .annotation {
+    .turn-children {
       margin-left: 0;
+    }
+
+    .entry-row {
+      grid-template-columns: 1fr;
+    }
+
+    .entry-ordinal {
+      text-align: left;
     }
   }
 </style>
