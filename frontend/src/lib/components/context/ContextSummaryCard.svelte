@@ -86,7 +86,7 @@
       <strong>
         {formatTokenCount(summary.tokens_in_use)}
         {#if capacity.max_tokens > 0}
-          <span class="stat-pct">({percentLabel(summary.percent_consumed)})</span>
+          <span class="stat-pct">of {formatTokenCount(capacity.max_tokens)} ({percentLabel(summary.percent_consumed)})</span>
         {/if}
       </strong>
     </div>
