@@ -270,7 +270,7 @@
 <section class="panel">
   <div class="panel-header">
     <div class="header-main">
-      <div class="eyebrow">Context Overview</div>
+      <div class="eyebrow">Context Window</div>
       <h3>Visible context by turn and category</h3>
     </div>
   </div>

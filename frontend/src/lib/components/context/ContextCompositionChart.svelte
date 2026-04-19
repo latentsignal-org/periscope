@@ -17,7 +17,7 @@
 <section class="panel">
   <div class="panel-header">
     <div>
-      <div class="eyebrow">Composition</div>
+      <div class="eyebrow">Composition by category</div>
       <h3>What is consuming the visible window</h3>
     </div>
   </div>

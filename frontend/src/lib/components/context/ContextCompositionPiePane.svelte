@@ -19,8 +19,8 @@
 
 <section class="subpanel">
   <div class="subheader">
-    <div class="title">Composition</div>
-    <div class="subtitle">What is consuming the visible window</div>
+    <div class="title">Composition by category</div>
+    <div class="subtitle">Visible window by category</div>
   </div>
 
   <div class="layout">

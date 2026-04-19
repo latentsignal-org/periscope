@@ -26,7 +26,7 @@
 
 <section class="subpanel">
   <div class="subheader">
-    <div class="title">Turn shares</div>
+    <div class="title">Composition by turn</div>
     <div class="subtitle">Visible window split by turn</div>
   </div>
 

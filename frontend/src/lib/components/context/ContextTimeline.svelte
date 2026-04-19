@@ -124,7 +124,7 @@
   <div class="panel-header">
     <div>
       <div class="eyebrow">Timeline</div>
-      <h3>Visible history, row by row</h3>
+      <h3>Visible context, turn by turn</h3>
     </div>
     <button
       type="button"

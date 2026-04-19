@@ -66,16 +66,10 @@
       </div>
     </div>
     <div class="occupancy">
-      <div class="tokens">
-        {formatTokenCount(summary.tokens_in_use)}
-        {#if capacity.max_tokens > 0}
-          <span class="tokens-of">of {formatTokenCount(capacity.max_tokens)}</span>
-          <span class="tokens-pct">({percentLabel(summary.percent_consumed)})</span>
-        {/if}
+      <div class="tokens">{summary.visible_row_count.toLocaleString()}</div>
+      <div class="tokens-meta">
+        {summary.visible_row_count === 1 ? "turn" : "turns"}
       </div>
-      {#if capacity.max_tokens <= 0}
-        <div class="tokens-meta">capacity unknown</div>
-      {/if}
     </div>
   </div>
 
