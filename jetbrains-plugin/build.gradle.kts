@@ -8,6 +8,10 @@ plugins {
     alias(libs.plugins.changelog)
 }
 
+kotlin {
+    jvmToolchain(21)
+}
+
 repositories {
     mavenCentral()
 
