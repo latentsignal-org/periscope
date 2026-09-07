@@ -1,0 +1,605 @@
+{
+  "adoption": {
+    "claude_only": true,
+    "distinct_skills": 1,
+    "plan_mode_rate": 0.14285714285714285,
+    "subagents_per_session": 0.2857142857142857
+  },
+  "agent_portfolio": {
+    "by_messages": {
+      "claude": 318,
+      "codex": 20,
+      "cursor": 6
+    },
+    "by_messages_human": {
+      "claude": 318,
+      "codex": 20,
+      "cursor": 6
+    },
+    "by_sessions": {
+      "claude": 7,
+      "codex": 1,
+      "cursor": 1
+    },
+    "by_sessions_human": {
+      "claude": 7,
+      "codex": 1,
+      "cursor": 1
+    },
+    "by_tokens": {
+      "claude": 151020
+    },
+    "by_tokens_human": {
+      "claude": 151020
+    },
+    "primary": "claude",
+    "primary_human": "claude"
+  },
+  "archetypes": {
+    "automation": 0,
+    "deep": 2,
+    "marathon": 1,
+    "primary": "standard",
+    "primary_human": "standard",
+    "quick": 3,
+    "standard": 3
+  },
+  "cache_economics": {
+    "cache_hit_ratio": {
+      "buckets": [
+        {
+          "count": 0,
+          "edge": [
+            0,
+            0.25
+          ]
+        },
+        {
+          "count": 0,
+          "edge": [
+            0.25,
+            0.5
+          ]
+        },
+        {
+          "count": 7,
+          "edge": [
+            0.5,
+            0.75
+          ]
+        },
+        {
+          "count": 0,
+          "edge": [
+            0.75,
+            0.95
+          ]
+        },
+        {
+          "count": 0,
+          "edge": [
+            0.95,
+            1
+          ]
+        }
+      ],
+      "overall": 0.579437494120967
+    },
+    "claude_only": true,
+    "saved_vs_uncached": {
+      "microdollars": 2370225
+    },
+    "spent": {
+      "microdollars": 6742035
+    }
+  },
+  "code_attribution": {
+    "sources": [
+      {
+        "provider": "cursor",
+        "scope": "machine_local",
+        "status": "unavailable",
+        "warnings": [
+          "Cursor attribution database is unavailable on this machine"
+        ]
+      }
+    ]
+  },
+  "distributions": {
+    "duration_minutes": {
+      "scope_all": {
+        "buckets": [
+          {
+            "count": 0,
+            "edge": [
+              0,
+              1
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              1,
+              5
+            ]
+          },
+          {
+            "count": 2,
+            "edge": [
+              5,
+              20
+            ]
+          },
+          {
+            "count": 4,
+            "edge": [
+              20,
+              60
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              60,
+              120
+            ]
+          },
+          {
+            "count": 3,
+            "edge": [
+              120,
+              null
+            ]
+          }
+        ],
+        "mean": 72.77777777777777
+      },
+      "scope_human": {
+        "buckets": [
+          {
+            "count": 0,
+            "edge": [
+              0,
+              1
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              1,
+              5
+            ]
+          },
+          {
+            "count": 2,
+            "edge": [
+              5,
+              20
+            ]
+          },
+          {
+            "count": 4,
+            "edge": [
+              20,
+              60
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              60,
+              120
+            ]
+          },
+          {
+            "count": 3,
+            "edge": [
+              120,
+              null
+            ]
+          }
+        ],
+        "mean": 72.77777777777777
+      }
+    },
+    "peak_context_tokens": {
+      "claude_only": false,
+      "null_count": 2,
+      "scope_all": {
+        "buckets": [
+          {
+            "count": 0,
+            "edge": [
+              0,
+              10000
+            ]
+          },
+          {
+            "count": 1,
+            "edge": [
+              10000,
+              50000
+            ]
+          },
+          {
+            "count": 3,
+            "edge": [
+              50000,
+              100000
+            ]
+          },
+          {
+            "count": 1,
+            "edge": [
+              100000,
+              150000
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              150000,
+              200000
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              200000,
+              null
+            ]
+          }
+        ],
+        "mean": 75000
+      },
+      "scope_human": {
+        "buckets": [
+          {
+            "count": 0,
+            "edge": [
+              0,
+              10000
+            ]
+          },
+          {
+            "count": 1,
+            "edge": [
+              10000,
+              50000
+            ]
+          },
+          {
+            "count": 3,
+            "edge": [
+              50000,
+              100000
+            ]
+          },
+          {
+            "count": 1,
+            "edge": [
+              100000,
+              150000
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              150000,
+              200000
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              200000,
+              null
+            ]
+          }
+        ],
+        "mean": 75000
+      }
+    },
+    "tools_per_turn": {
+      "scope_all": {
+        "buckets": [
+          {
+            "count": 7,
+            "edge": [
+              0,
+              1
+            ]
+          },
+          {
+            "count": 2,
+            "edge": [
+              1,
+              2
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              2,
+              4
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              4,
+              7
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              7,
+              11
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              11,
+              null
+            ]
+          }
+        ],
+        "mean": 0.39055555555555554
+      },
+      "scope_human": {
+        "buckets": [
+          {
+            "count": 7,
+            "edge": [
+              0,
+              1
+            ]
+          },
+          {
+            "count": 2,
+            "edge": [
+              1,
+              2
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              2,
+              4
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              4,
+              7
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              7,
+              11
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              11,
+              null
+            ]
+          }
+        ],
+        "mean": 0.39055555555555554
+      }
+    },
+    "user_messages": {
+      "scope_all": {
+        "buckets": [
+          {
+            "count": 0,
+            "edge": [
+              0,
+              2
+            ]
+          },
+          {
+            "count": 3,
+            "edge": [
+              2,
+              6
+            ]
+          },
+          {
+            "count": 3,
+            "edge": [
+              6,
+              16
+            ]
+          },
+          {
+            "count": 2,
+            "edge": [
+              16,
+              31
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              31,
+              51
+            ]
+          },
+          {
+            "count": 1,
+            "edge": [
+              51,
+              null
+            ]
+          }
+        ],
+        "mean": 19.11111111111111
+      },
+      "scope_human": {
+        "buckets": [
+          {
+            "count": 3,
+            "edge": [
+              2,
+              6
+            ]
+          },
+          {
+            "count": 3,
+            "edge": [
+              6,
+              16
+            ]
+          },
+          {
+            "count": 2,
+            "edge": [
+              16,
+              31
+            ]
+          },
+          {
+            "count": 0,
+            "edge": [
+              31,
+              51
+            ]
+          },
+          {
+            "count": 1,
+            "edge": [
+              51,
+              null
+            ]
+          }
+        ],
+        "mean": 19.11111111111111
+      }
+    }
+  },
+  "filters": {
+    "agent": "all",
+    "projects_excluded": [],
+    "timezone": "UTC"
+  },
+  "model_mix": {
+    "by_tokens": {
+      "claude-opus-4-20250514": 33740,
+      "claude-sonnet-4-20250514": 117280
+    }
+  },
+  "outcomes": {
+    "avg_edit_churn": 1,
+    "claude_only": true,
+    "compactions_per_session": 0.42857142857142855,
+    "failure": 1,
+    "grade_distribution": {
+      "A": 3,
+      "B": 3,
+      "C": 1
+    },
+    "success": 6,
+    "tool_retry_rate": 0.23076923076923078,
+    "unknown": 0
+  },
+  "schema_version": 2,
+  "temporal": {
+    "hourly_utc": [
+      {
+        "sessions": 1,
+        "ts": "2026-04-06T10:00:00Z",
+        "user_messages": 3
+      },
+      {
+        "sessions": 1,
+        "ts": "2026-04-07T10:00:00Z",
+        "user_messages": 3
+      },
+      {
+        "sessions": 1,
+        "ts": "2026-04-08T10:00:00Z",
+        "user_messages": 10
+      },
+      {
+        "sessions": 1,
+        "ts": "2026-04-08T14:00:00Z",
+        "user_messages": 10
+      },
+      {
+        "sessions": 1,
+        "ts": "2026-04-09T10:00:00Z",
+        "user_messages": 30
+      },
+      {
+        "sessions": 1,
+        "ts": "2026-04-09T14:00:00Z",
+        "user_messages": 3
+      },
+      {
+        "sessions": 1,
+        "ts": "2026-04-10T10:00:00Z",
+        "user_messages": 25
+      },
+      {
+        "sessions": 1,
+        "ts": "2026-04-11T10:00:00Z",
+        "user_messages": 60
+      },
+      {
+        "sessions": 1,
+        "ts": "2026-04-11T11:00:00Z",
+        "user_messages": 20
+      },
+      {
+        "sessions": 1,
+        "ts": "2026-04-12T10:00:00Z",
+        "user_messages": 8
+      }
+    ],
+    "reporter_timezone": "UTC"
+  },
+  "tool_mix": {
+    "by_category": {
+      "file": 10,
+      "other": 5,
+      "search": 8,
+      "shell": 3
+    },
+    "total_calls": 26
+  },
+  "totals": {
+    "messages_total": 344,
+    "sessions_all": 9,
+    "sessions_automation": 0,
+    "sessions_human": 9,
+    "sessions_subagent": 0,
+    "user_messages_total": 172
+  },
+  "velocity": {
+    "first_response_seconds": {
+      "mean": 10,
+      "p50": 10,
+      "p90": 10
+    },
+    "messages_per_active_hour": 125.47112462006079,
+    "turn_cycle_seconds": {
+      "mean": 10,
+      "p50": 10,
+      "p90": 10
+    }
+  },
+  "window": {
+    "days": 14,
+    "since": "2026-04-01T00:00:00Z",
+    "until": "2026-04-15T00:00:00Z"
+  }
+}

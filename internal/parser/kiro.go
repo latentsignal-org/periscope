@@ -28,10 +28,10 @@ type kiroMeta struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
-// DiscoverKiroSessions finds all .jsonl session files under the
-// Kiro CLI sessions directory. Layout:
+// discoverLegacyJSONL finds all .jsonl session files under a Kiro
+// CLI sessions directory. Layout:
 // <sessionsDir>/<uuid>.jsonl  (with companion <uuid>.json)
-func DiscoverKiroSessions(sessionsDir string) []DiscoveredFile {
+func (s kiroSourceSet) discoverLegacyJSONL(sessionsDir string) []DiscoveredFile {
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		return nil
@@ -58,9 +58,9 @@ func DiscoverKiroSessions(sessionsDir string) []DiscoveredFile {
 	return files
 }
 
-// FindKiroSourceFile locates a Kiro session file by its raw
+// legacySourceFile locates a legacy Kiro JSONL session file by its raw
 // session ID (without the "kiro:" prefix).
-func FindKiroSourceFile(sessionsDir, rawID string) string {
+func (s kiroSourceSet) legacySourceFile(sessionsDir, rawID string) string {
 	if sessionsDir == "" || !IsValidSessionID(rawID) {
 		return ""
 	}
@@ -72,6 +72,17 @@ func FindKiroSourceFile(sessionsDir, rawID string) string {
 		return ""
 	}
 	return candidate
+}
+
+// KiroSessionIDFromPath returns the logical raw session ID for a
+// legacy JSONL-backed Kiro session, preferring companion metadata
+// when present because the filename is only a storage detail.
+func KiroSessionIDFromPath(jsonlPath string) string {
+	if meta := loadKiroMeta(jsonlPath); meta != nil &&
+		meta.SessionID != "" {
+		return meta.SessionID
+	}
+	return strings.TrimSuffix(filepath.Base(jsonlPath), ".jsonl")
 }
 
 // loadKiroMeta reads the companion .json metadata file for a
@@ -89,10 +100,10 @@ func loadKiroMeta(jsonlPath string) *kiroMeta {
 	return &m
 }
 
-// ParseKiroSession parses a Kiro CLI session from its JSONL file.
+// parseLegacySession parses a Kiro CLI session from its JSONL file.
 // Returns (nil, nil, nil) if the file doesn't exist or contains
 // no user/assistant messages.
-func ParseKiroSession(
+func (p *kiroProvider) parseLegacySession(
 	path, machine string,
 ) (*ParsedSession, []ParsedMessage, error) {
 	info, err := os.Stat(path)
@@ -110,6 +121,7 @@ func ParseKiroSession(
 	defer f.Close()
 
 	lr := newLineReader(f, maxLineSize)
+	defer releaseLineReader(lr)
 	var messages []ParsedMessage
 	var firstMessage string
 	ordinal := 0

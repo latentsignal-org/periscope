@@ -3,10 +3,11 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/wesm/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/db"
 )
 
 const attachToolCallBatchSize = 500
@@ -28,7 +29,7 @@ func (s *Store) GetMessages(
 	}
 
 	query := fmt.Sprintf(`
-		SELECT session_id, ordinal, role, content,
+		SELECT session_id, ordinal, role, content, thinking_text,
 			timestamp, has_thinking, has_tool_use,
 			content_length, is_system, model, token_usage,
 			context_tokens, output_tokens,
@@ -62,13 +63,164 @@ func (s *Store) GetMessages(
 	return msgs, nil
 }
 
+const pgMessageCols = `session_id, ordinal, role, content, thinking_text,
+	timestamp, has_thinking, has_tool_use,
+	content_length, is_system, model, token_usage,
+	context_tokens, output_tokens,
+	has_context_tokens, has_output_tokens,
+	claude_message_id, claude_request_id,
+	source_type, source_subtype, source_uuid,
+	source_parent_uuid, is_sidechain,
+	is_compact_boundary`
+
+// GetMessagesWindow mirrors internal/db's GetMessagesWindow: linear mode
+// (optionally role-filtered) delegates to GetMessages when Roles is empty;
+// Around mode merges three queries (before/anchor/after) into one ascending
+// slice. The anchor query has no role predicate so the anchor row is always
+// present regardless of Roles; before/after apply the role filter first, so
+// Before/After count role-matching messages, not raw ordinal distance.
+func (s *Store) GetMessagesWindow(
+	ctx context.Context, sessionID string, w db.MessageWindow,
+) ([]db.Message, error) {
+	if w.Around != nil {
+		return s.getMessagesAroundAnchor(ctx, sessionID, w)
+	}
+	from := 0
+	if w.From != nil {
+		from = *w.From
+	}
+	if len(w.Roles) == 0 {
+		return s.GetMessages(ctx, sessionID, from, w.Limit, w.Asc)
+	}
+	return s.getMessagesLinearRoleFiltered(ctx, sessionID, from, w.Limit, w.Asc, w.Roles)
+}
+
+func (s *Store) getMessagesLinearRoleFiltered(
+	ctx context.Context,
+	sessionID string, from, limit int, asc bool, roles []string,
+) ([]db.Message, error) {
+	if limit <= 0 || limit > db.MaxMessageLimit {
+		limit = db.DefaultMessageLimit
+	}
+	dir := "ASC"
+	op := ">="
+	if !asc {
+		dir = "DESC"
+		op = "<="
+	}
+	roleClause, roleArgs := pgRoleFilterClause(roles, 3)
+	query := fmt.Sprintf(`
+		SELECT %s
+		FROM messages
+		WHERE session_id = $1 AND ordinal %s $2%s
+		ORDER BY ordinal %s
+		LIMIT $%d`, pgMessageCols, op, roleClause, dir, len(roleArgs)+3)
+	args := append([]any{sessionID, from}, roleArgs...)
+	args = append(args, limit)
+
+	rows, err := s.pg.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying role-filtered messages: %w", err)
+	}
+	defer rows.Close()
+	msgs, err := scanPGMessages(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.attachToolCalls(ctx, msgs); err != nil {
+		return nil, err
+	}
+	return msgs, nil
+}
+
+func (s *Store) getMessagesAroundAnchor(
+	ctx context.Context, sessionID string, w db.MessageWindow,
+) ([]db.Message, error) {
+	anchor := *w.Around
+	beforeLimit := max(w.Before, 0)
+	afterLimit := max(w.After, 0)
+	roleClause, roleArgs := pgRoleFilterClause(w.Roles, 3)
+
+	beforeQuery := fmt.Sprintf(`
+		SELECT %s FROM messages
+		WHERE session_id = $1 AND ordinal < $2%s
+		ORDER BY ordinal DESC LIMIT $%d`,
+		pgMessageCols, roleClause, len(roleArgs)+3)
+	beforeArgs := append([]any{sessionID, anchor}, roleArgs...)
+	beforeArgs = append(beforeArgs, beforeLimit)
+	before, err := s.queryMessageRows(ctx, beforeQuery, beforeArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("querying before-window messages: %w", err)
+	}
+	slices.Reverse(before)
+
+	anchorQuery := fmt.Sprintf(`
+		SELECT %s FROM messages WHERE session_id = $1 AND ordinal = $2`,
+		pgMessageCols)
+	anchorMsgs, err := s.queryMessageRows(ctx, anchorQuery, sessionID, anchor)
+	if err != nil {
+		return nil, fmt.Errorf("querying anchor message: %w", err)
+	}
+
+	afterQuery := fmt.Sprintf(`
+		SELECT %s FROM messages
+		WHERE session_id = $1 AND ordinal > $2%s
+		ORDER BY ordinal ASC LIMIT $%d`,
+		pgMessageCols, roleClause, len(roleArgs)+3)
+	afterArgs := append([]any{sessionID, anchor}, roleArgs...)
+	afterArgs = append(afterArgs, afterLimit)
+	after, err := s.queryMessageRows(ctx, afterQuery, afterArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("querying after-window messages: %w", err)
+	}
+
+	msgs := make([]db.Message, 0, len(before)+len(anchorMsgs)+len(after))
+	msgs = append(msgs, before...)
+	msgs = append(msgs, anchorMsgs...)
+	msgs = append(msgs, after...)
+	if err := s.attachToolCalls(ctx, msgs); err != nil {
+		return nil, err
+	}
+	return msgs, nil
+}
+
+// queryMessageRows runs query and scans the resulting message rows without
+// attaching tool calls; callers batch that across the merged window set.
+func (s *Store) queryMessageRows(
+	ctx context.Context, query string, args ...any,
+) ([]db.Message, error) {
+	rows, err := s.pg.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPGMessages(rows)
+}
+
+// pgRoleFilterClause returns an "AND role IN ($n, ...)" clause and its bind
+// args for the given roles, or ("", nil) when roles is empty. startAt is the
+// first placeholder ordinal to use (the caller's query already consumes
+// $1..$(startAt-1)).
+func pgRoleFilterClause(roles []string, startAt int) (string, []any) {
+	if len(roles) == 0 {
+		return "", nil
+	}
+	placeholders := make([]string, len(roles))
+	args := make([]any, len(roles))
+	for i, r := range roles {
+		placeholders[i] = fmt.Sprintf("$%d", startAt+i)
+		args[i] = r
+	}
+	return " AND role IN (" + strings.Join(placeholders, ",") + ")", args
+}
+
 // GetAllMessages returns all messages for a session ordered
 // by ordinal.
 func (s *Store) GetAllMessages(
 	ctx context.Context, sessionID string,
 ) ([]db.Message, error) {
 	rows, err := s.pg.QueryContext(ctx, `
-		SELECT session_id, ordinal, role, content,
+		SELECT session_id, ordinal, role, content, thinking_text,
 			timestamp, has_thinking, has_tool_use,
 			content_length, is_system, model, token_usage,
 			context_tokens, output_tokens,
@@ -97,6 +249,37 @@ func (s *Store) GetAllMessages(
 	return msgs, nil
 }
 
+func (s *Store) GetResumeModelCounts(
+	ctx context.Context, sessionID string,
+) ([]db.ModelCount, error) {
+	rows, err := s.pg.QueryContext(ctx, `
+		SELECT model, COUNT(*)
+		FROM messages
+		WHERE session_id = $1
+			AND role = 'assistant'
+			AND model != ''
+			AND model != '<synthetic>'
+		GROUP BY model`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying postgres resume model counts: %w", err)
+	}
+	defer rows.Close()
+	var counts []db.ModelCount
+	for rows.Next() {
+		var count db.ModelCount
+		if err := rows.Scan(&count.Model, &count.Count); err != nil {
+			return nil, fmt.Errorf("scanning postgres resume model count: %w", err)
+		}
+		counts = append(counts, count)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating postgres resume model counts: %w", err)
+	}
+	return counts, nil
+}
+
 // SearchSession performs ILIKE substring search within a single
 // session's messages, returning matching ordinals.
 func (s *Store) SearchSession(
@@ -114,7 +297,7 @@ func (s *Store) SearchSession(
 			AND tc.message_ordinal = m.ordinal
 		WHERE m.session_id = $1
 			AND m.is_system = FALSE
-			AND `+db.SystemPrefixSQL("m.content", "m.role")+`
+			AND `+db.PostgresSystemPrefixSQL("m.content", "m.role")+`
 			AND (m.content ILIKE $2
 				OR tc.result_content ILIKE $2)
 		ORDER BY m.ordinal ASC`,
@@ -143,22 +326,16 @@ func (s *Store) SearchSession(
 // HasFTS returns true because ILIKE search is available.
 func (s *Store) HasFTS() bool { return true }
 
+// HasSemantic reports whether a PG vector searcher was wired at startup
+// (pg serve found a generation matching its embeddings fingerprint). When
+// false, SearchContent rejects "semantic"/"hybrid" modes up front with
+// db.ErrSemanticUnavailable.
+func (s *Store) HasSemantic() bool { return s.getVectorSearcher() != nil }
+
 // escapeLike escapes SQL LIKE metacharacters so the bind
 // parameter is treated as a literal substring.
 func escapeLike(v string) string {
-	r := strings.NewReplacer(
-		`\`, `\\`, `%`, `\%`, `_`, `\_`,
-	)
-	return r.Replace(v)
-}
-
-// stripFTSQuotes removes surrounding double quotes that
-// prepareFTSQuery adds for SQLite FTS phrase matching.
-func stripFTSQuotes(v string) string {
-	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
-		return v[1 : len(v)-1]
-	}
-	return v
+	return db.EscapeLikePattern(v)
 }
 
 // Search performs ILIKE-based full-text search across messages,
@@ -171,10 +348,21 @@ func (s *Store) Search(
 		f.Limit = db.DefaultSearchLimit
 	}
 
-	searchTerm := stripFTSQuotes(f.Query)
-	if searchTerm == "" {
+	// plainTerm is the de-quoted query joined back into one string. It feeds
+	// the name-branch ILIKE (matching the typed text against the short session
+	// name) and centers the message snippet, mirroring SQLite's plainQuery.
+	// terms is the per-term decomposition: every term must appear in the
+	// message content (AND), matching SQLite FTS5's implicit AND so the same
+	// user query behaves identically across backends. An explicit exact phrase
+	// (user-supplied leading quote) collapses to a single term, preserving the
+	// exact-phrase opt-in.
+	plainTerm := db.StripFTSQuotes(f.Query)
+	terms := db.FTSTerms(f.Query)
+	if plainTerm == "" || len(terms) == 0 {
 		return db.SearchPage{}, nil
 	}
+	// firstTerm anchors POSITION-based ordering and snippet centering.
+	firstTerm := terms[0]
 
 	// Validate Sort before interpolating into ORDER BY.
 	// session_id ASC is a deterministic tie-breaker for both modes,
@@ -194,10 +382,22 @@ func (s *Store) Search(
 		outerOrderBy = "session_ended_at DESC NULLS LAST, session_id ASC"
 	}
 
-	// $1 = escaped ILIKE pattern (for WHERE clause)
-	// $2 = raw search term (for POSITION — case folded in expression)
-	args := []any{escapeLike(searchTerm), searchTerm}
+	// $1 = escaped ILIKE pattern for the name branch (full plain term)
+	// $2 = raw first term (for POSITION — case folded in expression)
+	args := []any{escapeLike(plainTerm), firstTerm}
 	argIdx := 3
+
+	// Message branch matches every term (AND). Each term gets its own escaped
+	// ILIKE placeholder so a multi-word query requires all terms to be present
+	// without demanding they be contiguous, exactly like SQLite FTS5.
+	termClauses := make([]string, len(terms))
+	for i, t := range terms {
+		termClauses[i] = fmt.Sprintf(
+			"m.content ILIKE '%%' || $%d || '%%' ESCAPE E'\\\\'", argIdx)
+		args = append(args, escapeLike(t))
+		argIdx++
+	}
+	msgTermPredicate := strings.Join(termClauses, "\n\t\t\t\t\tAND ")
 
 	msgProjectClause := ""
 	nameProjectClause := ""
@@ -214,7 +414,7 @@ func (s *Store) Search(
 				m.session_id,
 				s.project,
 				s.agent,
-				COALESCE(s.display_name, s.first_message, '') AS name,
+				COALESCE(s.display_name, s.session_name, s.first_message, '') AS name,
 				COALESCE(s.ended_at, s.started_at) AS session_ended_at,
 				m.ordinal,
 				POSITION(LOWER($2) IN LOWER(m.content)) AS match_pos,
@@ -230,10 +430,10 @@ func (s *Store) Search(
 				END AS snippet
 			FROM messages m
 			JOIN sessions s ON m.session_id = s.id
-			WHERE m.content ILIKE '%%' || $1 || '%%' ESCAPE E'\\'
+			WHERE %s
 				AND s.deleted_at IS NULL
 				AND m.is_system = FALSE
-				AND `+db.SystemPrefixSQL("m.content", "m.role")+`
+				AND `+db.PostgresSystemPrefixSQL("m.content", "m.role")+`
 				%s
 			ORDER BY m.session_id,
 				POSITION(LOWER($2) IN LOWER(m.content)) ASC,
@@ -244,26 +444,26 @@ func (s *Store) Search(
 				s.id AS session_id,
 				s.project,
 				s.agent,
-				COALESCE(s.display_name, s.first_message, '') AS name,
+				COALESCE(s.display_name, s.session_name, s.first_message, '') AS name,
 				COALESCE(s.ended_at, s.started_at) AS session_ended_at,
 				-1 AS ordinal,
 				0 AS match_pos,
 				CASE
-					WHEN s.display_name ILIKE '%%' || $1 || '%%' ESCAPE E'\\'
-						THEN COALESCE(s.display_name, '')
+					WHEN COALESCE(s.display_name, s.session_name) ILIKE '%%' || $1 || '%%' ESCAPE E'\\'
+						THEN COALESCE(s.display_name, s.session_name, '')
 					WHEN s.first_message ILIKE '%%' || $1 || '%%' ESCAPE E'\\'
 						THEN COALESCE(s.first_message, '')
-					ELSE COALESCE(s.display_name, s.first_message, '')
+					ELSE COALESCE(s.display_name, s.session_name, s.first_message, '')
 				END AS snippet
 			FROM sessions s
-			WHERE (s.display_name ILIKE '%%' || $1 || '%%' ESCAPE E'\\'
+			WHERE (COALESCE(s.display_name, s.session_name) ILIKE '%%' || $1 || '%%' ESCAPE E'\\'
 				OR s.first_message ILIKE '%%' || $1 || '%%' ESCAPE E'\\')
 				AND s.deleted_at IS NULL
 				AND EXISTS (
 					SELECT 1 FROM messages mx
 					WHERE mx.session_id = s.id
 					  AND mx.is_system = FALSE
-					  AND `+db.SystemPrefixSQL("mx.content", "mx.role")+`
+					  AND `+db.PostgresSystemPrefixSQL("mx.content", "mx.role")+`
 				)
 				AND s.id NOT IN (SELECT session_id FROM msg_matches)
 				%s
@@ -281,6 +481,7 @@ func (s *Store) Search(
 		) combined
 		ORDER BY %s
 		LIMIT $%d OFFSET $%d`,
+		msgTermPredicate,
 		msgProjectClause,
 		nameProjectClause,
 		outerOrderBy,
@@ -387,7 +588,9 @@ func (s *Store) attachToolCallsBatch(
 			COALESCE(skill_name, ''),
 			COALESCE(result_content_length, 0),
 			COALESCE(result_content, ''),
-			COALESCE(subagent_session_id, '')
+			COALESCE(subagent_session_id, ''),
+			COALESCE(file_path, ''),
+			COALESCE(call_index, 0)
 		FROM tool_calls
 		WHERE session_id = $1
 			AND message_ordinal IN (%s)
@@ -411,6 +614,7 @@ func (s *Store) attachToolCallsBatch(
 			&tc.ToolUseID, &tc.InputJSON, &tc.SkillName,
 			&tc.ResultContentLength, &tc.ResultContent,
 			&tc.SubagentSessionID,
+			&tc.FilePath, &tc.CallIndex,
 		); err != nil {
 			return fmt.Errorf(
 				"scanning tool_call: %w", err,
@@ -517,6 +721,15 @@ func (s *Store) attachToolResultEventsBatch(
 
 // scanPGMessages scans message rows from PostgreSQL,
 // converting TIMESTAMPTZ to string.
+//
+// The PG messages table has no id column (composite PK on
+// session_id, ordinal), so we synthesize Message.ID = int64(ordinal)
+// to match the convention used by TurnRow.MessageID and
+// CallRow.MessageID in session_timing.go. The frontend keys
+// {#each messages (message.id)} and looks up turns via
+// turnByMessage.get(message.id); both depend on Message.ID being
+// non-zero, unique within a session, and equal to int64(ordinal)
+// so it joins with TurnRow.MessageID.
 func scanPGMessages(rows interface {
 	Next() bool
 	Scan(dest ...any) error
@@ -530,7 +743,7 @@ func scanPGMessages(rows interface {
 		var tokenUsage string
 		if err := rows.Scan(
 			&m.SessionID, &m.Ordinal, &m.Role,
-			&m.Content, &ts, &m.HasThinking,
+			&m.Content, &m.ThinkingText, &ts, &m.HasThinking,
 			&m.HasToolUse, &m.ContentLength, &m.IsSystem,
 			&m.Model, &tokenUsage,
 			&m.ContextTokens, &m.OutputTokens,
@@ -544,6 +757,7 @@ func scanPGMessages(rows interface {
 				"scanning message: %w", err,
 			)
 		}
+		m.ID = int64(m.Ordinal)
 		if ts != nil {
 			m.Timestamp = FormatISO8601(*ts)
 		}

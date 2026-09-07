@@ -1,13 +1,20 @@
 <script lang="ts">
   import { analytics } from "../../stores/analytics.svelte.js";
+  import { m } from "../../i18n/index.js";
 
   const CELL_SIZE = 17;
   const CELL_GAP = 2;
   const CELL_STEP = CELL_SIZE + CELL_GAP;
   const ROW_LABEL_WIDTH = 29;
   const COL_LABEL_HEIGHT = 18;
-  const DAY_LABELS = [
-    "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun",
+  const DAYS = [
+    { label: "Sun", dayIdx: 6 },
+    { label: "Mon", dayIdx: 0 },
+    { label: "Tue", dayIdx: 1 },
+    { label: "Wed", dayIdx: 2 },
+    { label: "Thu", dayIdx: 3 },
+    { label: "Fri", dayIdx: 4 },
+    { label: "Sat", dayIdx: 5 },
   ];
 
   const LEVEL_COLORS_LIGHT = [
@@ -71,21 +78,25 @@
         level: number;
       }[];
     }[] = [];
-    for (let d = 0; d < 7; d++) {
+    for (const day of DAYS) {
       const hours: {
         hour: number;
         value: number;
         level: number;
       }[] = [];
       for (let h = 0; h < 24; h++) {
-        const value = lookup.get(`${d}:${h}`) ?? 0;
+        const value = lookup.get(`${day.dayIdx}:${h}`) ?? 0;
         hours.push({
           hour: h,
           value,
           level: assignLevel(value, max),
         });
       }
-      rows.push({ day: DAY_LABELS[d]!, dayIdx: d, hours });
+      rows.push({
+        day: day.label,
+        dayIdx: day.dayIdx,
+        hours,
+      });
     }
     return rows;
   });
@@ -106,7 +117,12 @@
     tooltip = {
       x: rect.left + rect.width / 2,
       y: rect.top - 4,
-      text: `${day} ${h}:00 - ${value.toLocaleString()} messages`,
+      text: m.analytics_hour_of_week_tooltip({
+        day,
+        hour: h,
+        count: value,
+        countLabel: value.toLocaleString(),
+      }),
     };
   }
 
@@ -147,7 +163,7 @@
         class="retry-btn"
         onclick={() => analytics.fetchHourOfWeek()}
       >
-        Retry
+        {m.shared_retry()}
       </button>
     </div>
   {:else if grid}
@@ -236,7 +252,7 @@
       </div>
     {/if}
   {:else}
-    <div class="empty">No data for this period</div>
+    <div class="empty">{m.shared_no_data_for_period()}</div>
   {/if}
 </div>
 
@@ -298,7 +314,7 @@
     border-radius: var(--radius-sm);
     white-space: nowrap;
     pointer-events: none;
-    z-index: 100;
+    z-index: var(--z-tooltip);
   }
 
   .empty {

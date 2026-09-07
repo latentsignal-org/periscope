@@ -7,6 +7,7 @@ import {
   observeWindowOffset,
   observeWindowRect,
   windowScroll,
+  // kit-ui-check-ignore: local wrapper preserves TanStack scroll reconciliation and measurement-cache semantics used by MessageList; replacing it with kit-ui VirtualList is a separate migration.
 } from "@tanstack/virtual-core";
 
 type PartialKeys<T, K extends keyof T> = Omit<T, K> &
@@ -98,8 +99,9 @@ function createBaseVirtualizer<
 
     cacheKeyChanged = false;
     if (opts.measureCacheKey !== lastMeasureCacheKey) {
-      // @ts-expect-error accessing private itemSizeCache
-      instance.itemSizeCache = new Map();
+      (instance as typeof instance & {
+        itemSizeCache: Map<unknown, unknown>;
+      }).itemSizeCache = new Map();
       cacheKeyChanged = true;
     }
     lastMeasureCacheKey = opts.measureCacheKey;
@@ -116,6 +118,7 @@ function createBaseVirtualizer<
 
   return {
     get instance() {
+      // eslint-disable-next-line @typescript-eslint/no-unused-expressions -- reactive dependency: re-read instance when the virtualizer version bumps
       _version;
       return instance;
     },

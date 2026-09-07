@@ -82,7 +82,7 @@
     border-radius: var(--radius-sm);
     padding: 12px;
     display: grid;
-    gap: 10px;
+    gap: var(--space-5);
     align-content: start;
     min-height: 100%;
   }

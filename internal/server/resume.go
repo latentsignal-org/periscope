@@ -1,34 +1,32 @@
 package server
 
 import (
-	"encoding/json"
-	"errors"
+	"bufio"
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
-	"io"
-	"log"
-	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-
-	"bufio"
+	"unicode/utf16"
 
 	"github.com/google/shlex"
+	"go.kenn.io/agentsview/internal/config"
+	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/parser"
 	"github.com/tidwall/gjson"
-	"github.com/wesm/agentsview/internal/config"
-	"github.com/wesm/agentsview/internal/db"
-	"github.com/wesm/agentsview/internal/parser"
 )
 
 // resumeRequest is the JSON body for POST /api/v1/sessions/{id}/resume.
 type resumeRequest struct {
-	SkipPermissions bool   `json:"skip_permissions"`
-	ForkSession     bool   `json:"fork_session"`
-	CommandOnly     bool   `json:"command_only"`
-	OpenerID        string `json:"opener_id"`
+	SkipPermissions bool   `json:"skip_permissions,omitempty"`
+	ForkSession     bool   `json:"fork_session,omitempty"`
+	FromOrdinal     *int   `json:"from_ordinal,omitempty"`
+	CommandOnly     bool   `json:"command_only,omitempty"`
+	OpenerID        string `json:"opener_id,omitempty"`
 }
 
 // resumeResponse is the JSON response for a resume request.
@@ -50,6 +48,66 @@ var resumeAgents = map[string]string{
 	"gemini":   "gemini --resume %s",
 	"opencode": "opencode --session %s",
 	"amp":      "amp --resume %s",
+	"kiro":     "kiro-cli chat --resume-id %s",
+}
+
+const syntheticModel = "<synthetic>"
+
+func resumeCommand(agent, tmpl, rawID, model string) string {
+	cmd := fmt.Sprintf(tmpl, shellQuote(rawID))
+	if !resumeAgentNeedsModel(agent) {
+		return cmd
+	}
+	if model == "" {
+		return cmd
+	}
+	switch agent {
+	case "claude":
+		cmd += " --model " + shellQuote(model)
+	case "codex":
+		cmd += " -m " + shellQuote(model)
+	}
+	return cmd
+}
+
+func resumeAgentNeedsModel(agent string) bool {
+	return agent == "claude" || agent == "codex"
+}
+
+func primaryResumeModel(counts []db.ModelCount) string {
+	best := ""
+	bestN := 0
+	for _, count := range counts {
+		if !resumeModelEligible(count.Model) {
+			continue
+		}
+		model, n := count.Model, count.Count
+		if best == "" || n > bestN ||
+			(n == bestN && utf16LexLess(model, best)) {
+			best = model
+			bestN = n
+		}
+	}
+	return best
+}
+
+func resumeModelEligible(model string) bool {
+	return model != "" && model != syntheticModel
+}
+
+func utf16LexLess(a, b string) bool {
+	if b == "" {
+		return a != ""
+	}
+	aUnits := utf16.Encode([]rune(a))
+	bUnits := utf16.Encode([]rune(b))
+	for i := 0; i < len(aUnits) && i < len(bUnits); i++ {
+		if aUnits[i] == bUnits[i] {
+			continue
+		}
+		return aUnits[i] < bUnits[i]
+	}
+	return len(aUnits) < len(bUnits)
 }
 
 // terminalCandidates lists terminal emulators to try on Linux, in
@@ -68,255 +126,6 @@ var terminalCandidates = []struct {
 	{"tilix", []string{"-e"}},
 	{"xterm", []string{"-e"}},
 	{"x-terminal-emulator", []string{"-e"}},
-}
-
-func (s *Server) handleResumeSession(
-	w http.ResponseWriter, r *http.Request,
-) {
-	id := r.PathValue("id")
-
-	// Look up the session with full file metadata so
-	// resolveSessionDir can read the session file for cwd.
-	session, err := s.db.GetSessionFull(r.Context(), id)
-	if err != nil {
-		if handleContextError(w, err) {
-			return
-		}
-		log.Printf("resume: session lookup failed: %v", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	if session == nil || session.DeletedAt != nil {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	// Remote sessions have host-prefixed IDs (host~rawID).
-	// They cannot be resumed locally.
-	if host, _ := parser.StripHostPrefix(id); host != "" {
-		writeError(
-			w, http.StatusBadRequest,
-			"cannot resume remote session",
-		)
-		return
-	}
-
-	// Check if this agent supports resumption.
-	tmpl, ok := resumeAgents[string(session.Agent)]
-	if !ok {
-		writeError(
-			w, http.StatusBadRequest,
-			fmt.Sprintf("agent %q does not support resume", session.Agent),
-		)
-		return
-	}
-
-	// Parse optional flags.
-	var req resumeRequest
-	if r.Body != nil {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			writeError(w, http.StatusBadRequest, "invalid JSON body")
-			return
-		}
-	}
-
-	// Strip agent prefix from compound ID only when it matches the
-	// expected agent (e.g. "codex:abc" → "abc"). Raw IDs that
-	// happen to contain ":" are left untouched.
-	prefix := string(session.Agent) + ":"
-	rawID := strings.TrimPrefix(id, prefix)
-
-	// Build the CLI command.
-	var cmd string
-	if strings.Contains(tmpl, "%s") {
-		cmd = fmt.Sprintf(tmpl, shellQuote(rawID))
-	} else {
-		cmd = tmpl
-	}
-	if string(session.Agent) == "claude" {
-		if req.SkipPermissions {
-			cmd += " --dangerously-skip-permissions"
-		}
-		if req.ForkSession {
-			cmd += " --fork-session"
-		}
-	}
-
-	// Resolve the terminal launch directory. Cursor resume needs the
-	// shell to start in the latest session cwd so the resumed chat
-	// inherits the same working directory it last used.
-	launchDir, workspaceDir := resolveResumePaths(session)
-	if string(session.Agent) == "cursor" && workspaceDir != "" {
-		cmd += " --workspace " + shellQuote(workspaceDir)
-	}
-
-	responseCmd := cmd
-	switch string(session.Agent) {
-	case "claude", "kiro":
-		responseCmd = commandWithCwd(cmd, launchDir)
-	}
-
-	// If the caller only wants the command string (e.g. for
-	// clipboard copy), skip terminal detection and launch.
-	if req.CommandOnly {
-		writeJSON(w, http.StatusOK, resumeResponse{
-			Launched: false,
-			Command:  responseCmd,
-			Cwd:      launchDir,
-		})
-		return
-	}
-
-	// Block actual launches in read-only mode. command_only
-	// requests above are safe and remain available.
-	if s.db.ReadOnly() {
-		writeError(w, http.StatusNotImplemented,
-			"session launch not available in remote mode")
-		return
-	}
-
-	// If the caller specified a terminal opener, use it directly.
-	if req.OpenerID != "" {
-		openers := detectOpeners()
-		var opener *Opener
-		for i := range openers {
-			if openers[i].ID == req.OpenerID {
-				opener = &openers[i]
-				break
-			}
-		}
-		if opener == nil {
-			writeError(w, http.StatusBadRequest,
-				fmt.Sprintf("opener %q not found", req.OpenerID))
-			return
-		}
-
-		// Claude Desktop: hand off via claude:// URL scheme.
-		if opener.ID == "claude-desktop" {
-			if string(session.Agent) != "claude" {
-				writeError(w, http.StatusBadRequest,
-					"Claude Desktop resume only supports Claude sessions")
-				return
-			}
-			proc := launchClaudeDesktop(rawID, launchDir)
-			if err := proc.Start(); err != nil {
-				log.Printf("resume: Claude Desktop launch failed: %v", err)
-				writeJSON(w, http.StatusOK, resumeResponse{
-					Launched: false,
-					Command:  responseCmd,
-					Cwd:      launchDir,
-					Error:    "desktop_launch_failed",
-				})
-				return
-			}
-			go func() { _ = proc.Wait() }()
-			writeJSON(w, http.StatusOK, resumeResponse{
-				Launched: true,
-				Terminal: opener.Name,
-				Command:  responseCmd,
-				Cwd:      launchDir,
-			})
-			return
-		}
-
-		openerCwd := resumeLaunchCwd(
-			string(session.Agent), opener.ID, runtime.GOOS, launchDir,
-		)
-		proc := launchResumeInOpener(*opener, cmd, openerCwd)
-		if proc == nil {
-			writeJSON(w, http.StatusOK, resumeResponse{
-				Launched: false,
-				Command:  responseCmd,
-				Cwd:      launchDir,
-				Error:    "unsupported_opener",
-			})
-			return
-		}
-		if err := proc.Start(); err != nil {
-			log.Printf("resume: opener start failed: %v", err)
-			writeJSON(w, http.StatusOK, resumeResponse{
-				Launched: false,
-				Command:  responseCmd,
-				Cwd:      launchDir,
-				Error:    "terminal_launch_failed",
-			})
-			return
-		}
-		go func() { _ = proc.Wait() }()
-		writeJSON(w, http.StatusOK, resumeResponse{
-			Launched: true,
-			Terminal: opener.Name,
-			Command:  responseCmd,
-			Cwd:      launchDir,
-		})
-		return
-	}
-
-	// Check terminal config.
-	s.mu.RLock()
-	termCfg := s.cfg.Terminal
-	s.mu.RUnlock()
-
-	if termCfg.Mode == "clipboard" {
-		// User explicitly chose clipboard-only mode.
-		writeJSON(w, http.StatusOK, resumeResponse{
-			Launched: false,
-			Command:  responseCmd,
-			Cwd:      launchDir,
-		})
-		return
-	}
-
-	// Detect and launch a terminal.
-	detectCwd := launchDir
-	if termCfg.Mode == "auto" {
-		detectCwd = resumeLaunchCwd(
-			string(session.Agent), "auto", runtime.GOOS, launchDir,
-		)
-	}
-	termBin, termArgs, termName, termErr := detectTerminal(cmd, detectCwd, termCfg)
-	if termErr != nil {
-		// Can't launch — return the command for clipboard fallback.
-		log.Printf("resume: terminal detection failed: %v", termErr)
-		writeJSON(w, http.StatusOK, resumeResponse{
-			Launched: false,
-			Command:  responseCmd,
-			Cwd:      launchDir,
-			Error:    "no_terminal_found",
-		})
-		return
-	}
-
-	// Fire and forget — we don't need the terminal process to
-	// complete before responding.
-	proc := exec.Command(termBin, termArgs...)
-	proc.Stdout = nil
-	proc.Stderr = nil
-	proc.Stdin = nil
-	if detectCwd != "" {
-		proc.Dir = detectCwd
-	}
-
-	if err := proc.Start(); err != nil {
-		log.Printf("resume: terminal start failed: %v", err)
-		writeJSON(w, http.StatusOK, resumeResponse{
-			Launched: false,
-			Command:  responseCmd,
-			Cwd:      launchDir,
-			Error:    "terminal_launch_failed",
-		})
-		return
-	}
-
-	// Detach — don't wait for the terminal process.
-	go func() { _ = proc.Wait() }()
-
-	writeJSON(w, http.StatusOK, resumeResponse{
-		Launched: true,
-		Terminal: termName,
-		Command:  responseCmd,
-		Cwd:      launchDir,
-	})
 }
 
 // shellQuote applies POSIX single-quote escaping.
@@ -345,6 +154,182 @@ func commandWithCwd(cmd, cwd string) string {
 		return cmd
 	}
 	return fmt.Sprintf("cd %s && %s", shellQuote(cwd), cmd)
+}
+
+func commandWithCleanup(cmd, cleanupPath string) string {
+	if cleanupPath == "" {
+		return cmd
+	}
+	return cmd + "; rm -f -- " + shellQuote(cleanupPath)
+}
+
+func claudeMessagePointLaunchCommand(
+	promptPath string, skipPermissions bool,
+) string {
+	cmd := "claude"
+	if skipPermissions {
+		cmd += " --dangerously-skip-permissions"
+	}
+	cmd += " < " + shellQuote(promptPath)
+	return commandWithCleanup(cmd, promptPath)
+}
+
+func claudeMessagePointResponseCommand(
+	promptPath string, skipPermissions bool, cwd string, goos string,
+) string {
+	if goos == "windows" {
+		return claudeMessagePointWindowsCommand(
+			promptPath, skipPermissions, cwd,
+		)
+	}
+	return commandWithCwd(
+		claudeMessagePointLaunchCommand(promptPath, skipPermissions),
+		cwd,
+	)
+}
+
+func claudeMessagePointWindowsCommand(
+	promptPath string, skipPermissions bool, cwd string,
+) string {
+	script := claudeMessagePointWindowsScript(
+		promptPath, skipPermissions, cwd,
+	)
+	return "powershell.exe -NoProfile -EncodedCommand " +
+		powerShellEncodedCommand(script)
+}
+
+func claudeMessagePointWindowsScript(
+	promptPath string, skipPermissions bool, cwd string,
+) string {
+	var b strings.Builder
+	b.WriteString("try { ")
+	if cwd != "" {
+		b.WriteString("Set-Location -LiteralPath ")
+		b.WriteString(powerShellSingleQuote(cwd))
+		b.WriteString("; ")
+	}
+	b.WriteString("Get-Content -Raw -Encoding UTF8 -LiteralPath ")
+	b.WriteString(powerShellSingleQuote(promptPath))
+	b.WriteString(" | & 'claude'")
+	if skipPermissions {
+		b.WriteString(" --dangerously-skip-permissions")
+	}
+	b.WriteString(" } finally { Remove-Item -LiteralPath ")
+	b.WriteString(powerShellSingleQuote(promptPath))
+	b.WriteString(" -Force -ErrorAction SilentlyContinue }")
+	return b.String()
+}
+
+func powerShellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+func powerShellEncodedCommand(script string) string {
+	codeUnits := utf16.Encode([]rune(script))
+	raw := make([]byte, len(codeUnits)*2)
+	for i, unit := range codeUnits {
+		binary.LittleEndian.PutUint16(raw[i*2:], unit)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+func claudeMessagePointPromptPath(sessionID string, ordinal int) (string, error) {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(cacheDir, "agentsview", "claude-message-points")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	prefix := sanitizeFilename(
+		fmt.Sprintf("%s-ordinal-%d-", sessionID, ordinal),
+	)
+	f, err := os.CreateTemp(dir, prefix+"*.txt")
+	if err != nil {
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+func renderClaudeMessagePointPrompt(
+	session *db.Session, msgs []db.Message, ordinal int,
+) string {
+	var b strings.Builder
+	b.WriteString("You are continuing a Claude Code conversation forked from AgentsView.\n")
+	b.WriteString("Treat the transcript below as the full context through the selected message ordinal.\n")
+	b.WriteString("Continue the conversation from the next turn.\n\n")
+	b.WriteString("Session: ")
+	b.WriteString(session.ID)
+	b.WriteString("\n")
+	if session.Project != "" {
+		b.WriteString("Project: ")
+		b.WriteString(session.Project)
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "Fork point ordinal: %d\n\n", ordinal)
+	b.WriteString("Transcript:\n")
+	for _, msg := range msgs {
+		fmt.Fprintf(&b, "\n## Message %d\n", msg.Ordinal)
+		b.WriteString("Role: ")
+		b.WriteString(msg.Role)
+		b.WriteString("\n")
+		if msg.Timestamp != "" {
+			b.WriteString("Timestamp: ")
+			b.WriteString(msg.Timestamp)
+			b.WriteString("\n")
+		}
+		if msg.Model != "" {
+			b.WriteString("Model: ")
+			b.WriteString(msg.Model)
+			b.WriteString("\n")
+		}
+		if body := renderClaudeMessagePointMessage(msg); body != "" {
+			b.WriteString("\n")
+			b.WriteString(body)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+func renderClaudeMessagePointMessage(msg db.Message) string {
+	var parts []string
+	if msg.Content != "" {
+		parts = append(parts, msg.Content)
+	}
+	for _, tc := range msg.ToolCalls {
+		header := tc.ToolName
+		if header == "" {
+			header = "Tool"
+		}
+		parts = append(parts, "["+header+"]")
+		if tc.InputJSON != "" {
+			parts = append(parts, tc.InputJSON)
+		}
+		if tc.ResultContent != "" {
+			parts = append(parts, tc.ResultContent)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func writeClaudeMessagePointPrompt(
+	session *db.Session, msgs []db.Message, ordinal int,
+) (string, error) {
+	path, err := claudeMessagePointPromptPath(session.ID, ordinal)
+	if err != nil {
+		return "", err
+	}
+	prompt := renderClaudeMessagePointPrompt(session, msgs, ordinal)
+	if err := os.WriteFile(path, []byte(prompt), 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // resumeLaunchCwd returns the cwd a terminal launcher should apply for
@@ -451,72 +436,6 @@ func detectTerminalDarwin(
 		return "osascript", []string{"-e", appleScript}, "Terminal", nil
 	}
 	return "", nil, "", fmt.Errorf("osascript not found on macOS")
-}
-
-func (s *Server) handleGetTerminalConfig(
-	w http.ResponseWriter, _ *http.Request,
-) {
-	s.mu.RLock()
-	tc := s.cfg.Terminal
-	s.mu.RUnlock()
-	if tc.Mode == "" {
-		tc.Mode = "auto"
-	}
-	writeJSON(w, http.StatusOK, tc)
-}
-
-func (s *Server) handleSetTerminalConfig(
-	w http.ResponseWriter, r *http.Request,
-) {
-	var tc config.TerminalConfig
-	if err := json.NewDecoder(r.Body).Decode(&tc); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
-		return
-	}
-
-	switch tc.Mode {
-	case "auto", "custom", "clipboard":
-		// ok
-	default:
-		writeError(w, http.StatusBadRequest,
-			`mode must be "auto", "custom", or "clipboard"`)
-		return
-	}
-
-	if tc.Mode == "custom" && tc.CustomBin == "" {
-		writeError(w, http.StatusBadRequest,
-			`custom_bin is required when mode is "custom"`)
-		return
-	}
-
-	// Only validate custom_args when mode is "custom" — stale
-	// args from a previous config shouldn't block saving other modes.
-	if tc.Mode == "custom" {
-		if tc.CustomArgs != "" &&
-			!strings.Contains(tc.CustomArgs, "{cmd}") {
-			writeError(w, http.StatusBadRequest,
-				`custom_args must contain the {cmd} placeholder so the `+
-					`resume command is passed to the terminal`)
-			return
-		}
-		if tc.CustomArgs != "" {
-			if _, splitErr := shlex.Split(tc.CustomArgs); splitErr != nil {
-				writeError(w, http.StatusBadRequest,
-					fmt.Sprintf("custom_args has invalid shell syntax: %v", splitErr))
-				return
-			}
-		}
-	}
-
-	s.mu.Lock()
-	err := s.cfg.SaveTerminalConfig(tc)
-	s.mu.Unlock()
-	if err != nil {
-		log.Printf("save terminal config: %v", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	writeJSON(w, http.StatusOK, tc)
 }
 
 // readSessionCwd reads the first few lines of a session JSONL file
@@ -701,16 +620,31 @@ func resolveResumeDir(session *db.Session) string {
 	return launchDir
 }
 
+func isVirtualSessionPath(path string) bool {
+	if _, _, ok := parser.ParseVirtualSourcePathForBase(path, "data.sqlite3"); ok {
+		return true
+	}
+	if _, _, ok := parser.ParseVirtualSourcePathForBase(path, "opencode.db"); ok {
+		return true
+	}
+	return false
+}
+
 // resolveSessionDir determines the project directory for a session.
-// It tries the session file's embedded cwd first, then Cursor's
-// transcript-derived workspace path, then falls back to the session's
-// project field. All returned candidates must be absolute paths
-// pointing to existing directories.
+// It tries the session file's embedded cwd first, then the cached cwd,
+// then Cursor's transcript-derived workspace path, then falls back to
+// the session's project field. Virtual DB-backed file paths are storage
+// locators only, so they skip source-file cwd reads and use cached cwd.
+// All returned candidates must be absolute paths pointing to existing
+// directories.
 func resolveSessionDir(session *db.Session) string {
-	if session.FilePath != nil {
+	if session.FilePath != nil && !isVirtualSessionPath(*session.FilePath) {
 		if cwd := readSessionCwd(*session.FilePath); isDir(cwd) {
 			return cwd
 		}
+	}
+	if isDir(session.Cwd) {
+		return session.Cwd
 	}
 	if session.Agent == "cursor" {
 		if dir := resolveCursorWorkspaceDir(session); dir != "" {
@@ -762,7 +696,10 @@ func isDir(path string) bool {
 		return false
 	}
 	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
+	if err != nil || info == nil {
+		return false
+	}
+	return info.IsDir()
 }
 
 func detectTerminalLinux(cmd string) (string, []string, string, error) {

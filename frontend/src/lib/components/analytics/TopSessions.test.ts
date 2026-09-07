@@ -7,7 +7,7 @@ import {
   afterEach,
   beforeEach,
   type MockInstance,
-} from "vitest";
+} from "vite-plus/test";
 import { mount, unmount, tick } from "svelte";
 // @ts-ignore
 import TopSessions from "./TopSessions.svelte";
@@ -46,7 +46,14 @@ describe("TopSessions", () => {
     // @ts-ignore
     analytics.errors = savedErrors;
     sessions.filters.includeOneShot = false;
+    sessions.filters.termination = "";
+    router.route = "sessions";
+    router.params = {};
+    router.sessionId = null;
     window.history.replaceState(null, "", "/");
+    // Clear any orphaned DOM left behind by tests that fail
+    // before their unmount call.
+    document.body.innerHTML = "";
   });
 
   function mountWithData() {
@@ -58,7 +65,9 @@ describe("TopSessions", () => {
           project: "proj",
           first_message: "hello",
           message_count: 10,
+          output_tokens: 0,
           duration_min: 5,
+          active_duration_min: 5,
         },
       ],
     };
@@ -86,6 +95,7 @@ describe("TopSessions", () => {
 
   it("sets filter and navigates when analytics includeOneShot is enabled", async () => {
     analytics.includeOneShot = true;
+    sessions.filters.includeOneShot = false;
     const component = mountWithData();
     await tick();
 
@@ -94,7 +104,41 @@ describe("TopSessions", () => {
 
     expect(sessions.filters.includeOneShot).toBe(true);
     expect(cacheSpy).toHaveBeenCalledOnce();
-    expect(navSpy).toHaveBeenCalledWith("sess-1");
+    expect(navSpy).toHaveBeenCalledWith(
+      "sess-1",
+      undefined,
+      ["include_one_shot"],
+    );
+
+    unmount(component);
+  });
+
+  it("drops stale one-shot URL state when opening a one-shot result", async () => {
+    navSpy.mockRestore();
+    window.history.replaceState(
+      null,
+      "",
+      "/sessions?include_one_shot=false&window_days=14",
+    );
+    router.route = "sessions";
+    router.sessionId = null;
+    router.params = {
+      include_one_shot: "false",
+      window_days: "14",
+    };
+    analytics.includeOneShot = true;
+    sessions.filters.includeOneShot = false;
+    const component = mountWithData();
+    await tick();
+
+    clickRow();
+    await tick();
+
+    expect(window.location.pathname).toBe(
+      "/sessions/sess-1",
+    );
+    expect(window.location.search).toContain("window_days=14");
+    expect(window.location.search).not.toContain("include_one_shot=false");
 
     unmount(component);
   });
@@ -127,5 +171,228 @@ describe("TopSessions", () => {
     expect(navSpy).toHaveBeenCalledWith("sess-1");
 
     unmount(component);
+  });
+
+  it("renders display names before first-message previews", async () => {
+    analytics.topSessions = {
+      metric: "messages",
+      sessions: [
+        {
+          id: "sess-1",
+          project: "proj",
+          first_message: "raw first message",
+          display_name: "Renamed sidebar title",
+          message_count: 10,
+          output_tokens: 0,
+          duration_min: 5,
+          active_duration_min: 5,
+        },
+      ],
+    };
+    // @ts-ignore — loading is reactive state
+    analytics.loading = {
+      ...analytics.loading,
+      topSessions: false,
+    };
+    // @ts-ignore
+    analytics.errors = {
+      ...analytics.errors,
+      topSessions: null,
+    };
+
+    const component = mount(TopSessions, { target: document.body });
+    await tick();
+
+    expect(
+      document.querySelector(".session-label")?.textContent?.trim(),
+    ).toBe("Renamed sidebar title");
+
+    unmount(component);
+  });
+
+  it("shows active duration as primary with total duration context", async () => {
+    // @ts-ignore — topMetric is a reactive store field
+    analytics.topMetric = "duration";
+    analytics.topSessions = {
+      metric: "duration",
+      sessions: [
+        {
+          id: "sess-1",
+          project: "proj",
+          first_message: "hello",
+          message_count: 10,
+          output_tokens: 0,
+          duration_min: 120,
+          active_duration_min: 2.5,
+        },
+      ],
+    };
+    // @ts-ignore — loading is reactive state
+    analytics.loading = {
+      ...analytics.loading,
+      topSessions: false,
+    };
+    // @ts-ignore
+    analytics.errors = {
+      ...analytics.errors,
+      topSessions: null,
+    };
+
+    const component = mount(TopSessions, { target: document.body });
+    await tick();
+
+    expect(
+      document.querySelector(".session-metric")?.textContent?.trim(),
+    ).toBe("3m (2h total)");
+
+    unmount(component);
+  });
+
+  describe("status column", () => {
+    function mountWithFourStates() {
+      analytics.topSessions = {
+        metric: "messages",
+        sessions: [
+          {
+            id: "s1",
+            project: "p",
+            first_message: "clean session",
+            message_count: 1,
+            output_tokens: 0,
+            duration_min: 0,
+            active_duration_min: 0,
+            termination_status: "clean",
+          },
+          {
+            id: "s2",
+            project: "p",
+            first_message: "tcp session",
+            message_count: 1,
+            output_tokens: 0,
+            duration_min: 0,
+            active_duration_min: 0,
+            termination_status: "tool_call_pending",
+          },
+          {
+            id: "s3",
+            project: "p",
+            first_message: "trunc session",
+            message_count: 1,
+            output_tokens: 0,
+            duration_min: 0,
+            active_duration_min: 0,
+            termination_status: "truncated",
+          },
+          {
+            id: "s4",
+            project: "p",
+            first_message: "unknown session",
+            message_count: 1,
+            output_tokens: 0,
+            duration_min: 0,
+            active_duration_min: 0,
+            termination_status: null,
+          },
+        ],
+      };
+      // @ts-ignore — loading is reactive state
+      analytics.loading = {
+        ...analytics.loading,
+        topSessions: false,
+      };
+      // @ts-ignore
+      analytics.errors = {
+        ...analytics.errors,
+        topSessions: null,
+      };
+      return mount(TopSessions, { target: document.body });
+    }
+
+    it("renders distinct status indicators per termination_status", async () => {
+      const component = mountWithFourStates();
+      await tick();
+
+      // Two flagged statuses (tool_call_pending + truncated)
+      // resolve to "unclean" once past the active window —
+      // the sessions in this fixture have no timestamps, so
+      // age comparisons fail and they fall straight into the
+      // unclean tier.
+      expect(
+        document.querySelectorAll(".kit-status-dot--unclean").length,
+      ).toBe(2);
+
+      // The clean and NULL sessions resolve to "quiet" — a
+      // transparent dot is still rendered so the layout column
+      // stays consistent.
+      expect(
+        document.querySelectorAll(".kit-status-dot--quiet").length,
+      ).toBe(2);
+
+      unmount(component);
+    });
+
+    it("shows the unclean count pill and triggers termination filter on click", async () => {
+      const setSpy = vi
+        .spyOn(sessions, "setTerminationFilter")
+        .mockImplementation(() => {});
+
+      const component = mountWithFourStates();
+      await tick();
+
+      const pill = document.querySelector(
+        ".status-count-pill",
+      ) as HTMLButtonElement | null;
+      expect(pill).toBeTruthy();
+      expect(pill!.textContent?.trim()).toBe("2 unclean");
+
+      pill!.dispatchEvent(
+        new MouseEvent("click", { bubbles: true }),
+      );
+      await tick();
+
+      expect(setSpy).toHaveBeenCalledWith("unclean");
+
+      setSpy.mockRestore();
+      unmount(component);
+    });
+
+    it("hides the count pill when no rows are unclean", async () => {
+      analytics.topSessions = {
+        metric: "messages",
+        sessions: [
+          {
+            id: "s1",
+            project: "p",
+            first_message: "clean only",
+            message_count: 1,
+            output_tokens: 0,
+            duration_min: 0,
+            active_duration_min: 0,
+            termination_status: "clean",
+          },
+        ],
+      };
+      // @ts-ignore
+      analytics.loading = {
+        ...analytics.loading,
+        topSessions: false,
+      };
+      // @ts-ignore
+      analytics.errors = {
+        ...analytics.errors,
+        topSessions: null,
+      };
+
+      const component = mount(TopSessions, {
+        target: document.body,
+      });
+      await tick();
+
+      expect(
+        document.querySelector(".status-count-pill"),
+      ).toBeNull();
+
+      unmount(component);
+    });
   });
 });

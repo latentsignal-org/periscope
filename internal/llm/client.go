@@ -214,7 +214,7 @@ func buildRequestBody(req Request) ([]byte, error) {
 	}
 	msgs := make([]msgBlock, 0, len(req.Messages))
 	for _, m := range req.Messages {
-		msgs = append(msgs, msgBlock{Role: m.Role, Content: m.Content})
+		msgs = append(msgs, msgBlock(m))
 	}
 	body["messages"] = msgs
 	return json.Marshal(body)

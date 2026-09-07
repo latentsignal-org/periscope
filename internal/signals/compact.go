@@ -1,6 +1,9 @@
 package signals
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // CompactSignal holds the result of analyzing whether a session
 // should be compacted.
@@ -110,10 +113,7 @@ func DetectCompactCandidate(in CompactInput) CompactSignal {
 
 	// Estimate reclaimable tokens: older turn tokens minus a
 	// conservative estimate for what the compact summary retains (~20%).
-	reclaimable := int(float64(in.OlderTurnTokens) * 0.8)
-	if reclaimable < 0 {
-		reclaimable = 0
-	}
+	reclaimable := max(0, int(float64(in.OlderTurnTokens)*0.8))
 
 	return CompactSignal{
 		ShouldCompact:        true,
@@ -306,13 +306,15 @@ func joinStrings(parts []string) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	result := parts[0]
+	var b strings.Builder
+	b.WriteString(parts[0])
 	for i := 1; i < len(parts); i++ {
 		if i == len(parts)-1 {
-			result += " and " + parts[i]
+			b.WriteString(" and ")
 		} else {
-			result += ", " + parts[i]
+			b.WriteString(", ")
 		}
+		b.WriteString(parts[i])
 	}
-	return result
+	return b.String()
 }

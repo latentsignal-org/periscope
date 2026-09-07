@@ -6,19 +6,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wesm/agentsview/internal/testjsonl"
+	"go.kenn.io/agentsview/internal/testjsonl"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func parseTestContent(t *testing.T, name, content string, expectedLen int) []ParseResult {
 	t.Helper()
 	path := createTestFile(t, name, content)
-	results, err := ParseClaudeSession(path, "proj", "local")
-	if err != nil {
-		t.Fatalf("ParseClaudeSession: %v", err)
-	}
-	if len(results) != expectedLen {
-		t.Fatalf("got %d results, want %d", len(results), expectedLen)
-	}
+	results, err := parseClaudeSession(path, "proj", "local")
+	require.NoError(t, err, "ParseClaudeSession")
+	require.Len(t, results, expectedLen)
 	return results
 }
 
@@ -83,26 +81,15 @@ func TestForkDetection_LargeGapFork(t *testing.T) {
 	main := results[0]
 	assertSessionMeta(t, &main.Session, "fork", "proj", AgentClaude)
 	assertMessageCount(t, len(main.Messages), 10)
-	if main.Session.ParentSessionID != "" {
-		t.Errorf("main ParentSessionID = %q, want empty", main.Session.ParentSessionID)
-	}
+	assert.Empty(t, main.Session.ParentSessionID, "main ParentSessionID")
 
 	// Fork session: entries on fork branch (i,j)
 	fork := results[1]
-	wantForkID := "fork-i"
-	if fork.Session.ID != wantForkID {
-		t.Errorf("fork session ID = %q, want %q", fork.Session.ID, wantForkID)
-	}
+	assert.Equal(t, "fork-i", fork.Session.ID, "fork session ID")
 	assertMessageCount(t, len(fork.Messages), 2)
-	if fork.Session.ParentSessionID != "fork" {
-		t.Errorf("fork ParentSessionID = %q, want %q", fork.Session.ParentSessionID, "fork")
-	}
-	if fork.Session.RelationshipType != RelFork {
-		t.Errorf("fork RelationshipType = %q, want %q", fork.Session.RelationshipType, RelFork)
-	}
-	if fork.Session.FirstMessage != "fork q1" {
-		t.Errorf("fork FirstMessage = %q, want %q", fork.Session.FirstMessage, "fork q1")
-	}
+	assert.Equal(t, "fork", fork.Session.ParentSessionID, "fork ParentSessionID")
+	assert.Equal(t, RelFork, fork.Session.RelationshipType, "fork RelationshipType")
+	assert.Equal(t, "fork q1", fork.Session.FirstMessage, "fork FirstMessage")
 }
 
 func TestForkDetection_SmallGapRetry(t *testing.T) {
@@ -128,6 +115,47 @@ func TestForkDetection_SmallGapRetry(t *testing.T) {
 	assertMessage(t, results[0].Messages[1], RoleAssistant, "hi")
 	assertMessage(t, results[0].Messages[2], RoleUser, "retry")
 	assertMessage(t, results[0].Messages[3], RoleAssistant, "retry answer")
+}
+
+func TestForkDetection_ReminderPrefixedIDEContextDoesNotPromoteObsoleteBranch(
+	t *testing.T,
+) {
+	const reminder = "<system-reminder>context</system-reminder>\n"
+	content := testjsonl.NewSessionBuilder().
+		AddClaudeUserWithUUID("2024-01-01T10:00:00Z", "start", "a", "").
+		AddClaudeAssistantWithUUID("2024-01-01T10:00:01Z", "ok", "b", "a").
+		AddClaudeUserWithUUID(
+			"2024-01-01T10:00:02Z",
+			reminder+"<ide_opened_file>one</ide_opened_file>",
+			"c", "b",
+		).
+		AddClaudeUserWithUUID(
+			"2024-01-01T10:00:03Z",
+			reminder+"<ide_selection>two</ide_selection>",
+			"d", "c",
+		).
+		AddClaudeUserWithUUID(
+			"2024-01-01T10:00:04Z",
+			reminder+"<ide_opened_file>three</ide_opened_file>",
+			"e", "d",
+		).
+		AddClaudeUserWithUUID(
+			"2024-01-01T10:00:05Z",
+			reminder+"<ide_selection>four</ide_selection>",
+			"f", "e",
+		).
+		AddClaudeUserWithUUID(
+			"2024-01-01T10:01:00Z", "real retry", "z", "b",
+		).
+		AddClaudeAssistantWithUUID(
+			"2024-01-01T10:01:01Z", "retry answer", "zz", "z",
+		).
+		String()
+
+	results := parseTestContent(t, "ide-context-fork.jsonl", content, 1)
+	require.Len(t, results[0].Messages, 4)
+	assert.Equal(t, "real retry", results[0].Messages[2].Content)
+	assert.Equal(t, "retry answer", results[0].Messages[3].Content)
 }
 
 func TestForkDetection_NoUUIDs(t *testing.T) {
@@ -201,41 +229,20 @@ func TestForkDetection_NestedFork(t *testing.T) {
 
 	// Nested fork from n (discovered first during depth-first walk): w,x = 2 messages
 	nested := results[1]
-	if nested.Session.ID != "nested-fork-w" {
-		t.Errorf("nested ID = %q, want %q", nested.Session.ID, "nested-fork-w")
-	}
+	assert.Equal(t, "nested-fork-w", nested.Session.ID, "nested ID")
 	assertMessageCount(t, len(nested.Messages), 2)
-	if nested.Session.RelationshipType != RelFork {
-		t.Errorf("nested RelationshipType = %q, want %q", nested.Session.RelationshipType, RelFork)
-	}
+	assert.Equal(t, RelFork, nested.Session.RelationshipType, "nested RelationshipType")
 	// Nested fork's parent should be the fork branch it split
 	// from, not the root session.
-	wantNestedParent := "nested-fork-m"
-	if nested.Session.ParentSessionID != wantNestedParent {
-		t.Errorf(
-			"nested ParentSessionID = %q, want %q",
-			nested.Session.ParentSessionID,
-			wantNestedParent,
-		)
-	}
+	assert.Equal(t, "nested-fork-m", nested.Session.ParentSessionID, "nested ParentSessionID")
 
 	// Fork from b: m,n,o,p,q,r,s,tt,u,v = 10 messages
 	fork := results[2]
-	if fork.Session.ID != "nested-fork-m" {
-		t.Errorf("fork ID = %q, want %q", fork.Session.ID, "nested-fork-m")
-	}
+	assert.Equal(t, "nested-fork-m", fork.Session.ID, "fork ID")
 	assertMessageCount(t, len(fork.Messages), 10)
-	if fork.Session.RelationshipType != RelFork {
-		t.Errorf("fork RelationshipType = %q, want %q", fork.Session.RelationshipType, RelFork)
-	}
+	assert.Equal(t, RelFork, fork.Session.RelationshipType, "fork RelationshipType")
 	// Fork from b's parent should be the root session.
-	if fork.Session.ParentSessionID != "nested-fork" {
-		t.Errorf(
-			"fork ParentSessionID = %q, want %q",
-			fork.Session.ParentSessionID,
-			"nested-fork",
-		)
-	}
+	assert.Equal(t, "nested-fork", fork.Session.ParentSessionID, "fork ParentSessionID")
 }
 
 func TestForkDetection_MultipleRoots(t *testing.T) {
@@ -296,10 +303,7 @@ func TestSessionBoundsIncludeNonMessageEvents(t *testing.T) {
 	results := parseTestContent(t, "queue-ts.jsonl", content, 1)
 
 	sess := results[0].Session
-	wantEnd := "2024-01-01T11:00:00Z"
-	if got := formatTime(sess.EndedAt); got != wantEnd {
-		t.Errorf("EndedAt = %q, want %q", got, wantEnd)
-	}
+	assert.Equal(t, "2024-01-01T11:00:00Z", formatTime(sess.EndedAt), "EndedAt")
 }
 
 func TestSessionBoundsStartedAtFromLeadingEvent(t *testing.T) {
@@ -317,10 +321,7 @@ func TestSessionBoundsStartedAtFromLeadingEvent(t *testing.T) {
 	results := parseTestContent(t, "early-queue.jsonl", content, 1)
 
 	sess := results[0].Session
-	wantStart := "2024-01-01T09:00:00Z"
-	if got := formatTime(sess.StartedAt); got != wantStart {
-		t.Errorf("StartedAt = %q, want %q", got, wantStart)
-	}
+	assert.Equal(t, "2024-01-01T09:00:00Z", formatTime(sess.StartedAt), "StartedAt")
 }
 
 func TestForkDetection_NestedForkCountsFullSubtree(t *testing.T) {
@@ -385,13 +386,8 @@ func TestForkDetection_NestedForkCountsFullSubtree(t *testing.T) {
 	// first child has <= 3 user turns — here "e" is a dead
 	// end with 0 user turns so the nested fork follows "f").
 	main := results[0]
-	if main.Session.MessageCount < 8 {
-		t.Errorf(
-			"main MessageCount = %d, want >= 8 "+
-				"(first child subtree should not be discarded)",
-			main.Session.MessageCount,
-		)
-	}
+	assert.GreaterOrEqual(t, main.Session.MessageCount, 8,
+		"main MessageCount (first child subtree should not be discarded)")
 
 	// The trivial "retry" branch should be the fork.
 	fork := results[1]
@@ -427,20 +423,8 @@ func TestSessionBoundsDAGMainWidenedNotFork(t *testing.T) {
 	results := parseTestContent(t, "dag-queue.jsonl", content, 2)
 
 	// Main session EndedAt should be widened to queue timestamp.
-	mainEnd := formatTime(results[0].Session.EndedAt)
-	if mainEnd != "2024-01-01T12:00:00Z" {
-		t.Errorf(
-			"main EndedAt = %q, want 2024-01-01T12:00:00Z",
-			mainEnd,
-		)
-	}
+	assert.Equal(t, "2024-01-01T12:00:00Z", formatTime(results[0].Session.EndedAt), "main EndedAt")
 
 	// Fork session EndedAt should NOT be widened.
-	forkEnd := formatTime(results[1].Session.EndedAt)
-	if forkEnd != "2024-01-01T10:01:01Z" {
-		t.Errorf(
-			"fork EndedAt = %q, want 2024-01-01T10:01:01Z",
-			forkEnd,
-		)
-	}
+	assert.Equal(t, "2024-01-01T10:01:01Z", formatTime(results[1].Session.EndedAt), "fork EndedAt")
 }

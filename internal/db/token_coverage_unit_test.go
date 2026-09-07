@@ -1,6 +1,11 @@
 package db
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 func TestComputeSessionCoverageUpdates(t *testing.T) {
 	tests := []struct {
@@ -53,22 +58,11 @@ func TestComputeSessionCoverageUpdates(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := ComputeSessionCoverageUpdates(tc.candidates, tc.msgCoverage)
 
-			if len(got) != len(tc.want) {
-				t.Fatalf("len(got) = %d, want %d; got = %v",
-					len(got), len(tc.want), got)
-			}
+			require.Len(t, got, len(tc.want), "len mismatch; got = %v", got)
 			for i, w := range tc.want {
-				if got[i].ID != w.ID {
-					t.Errorf("[%d] ID = %q, want %q", i, got[i].ID, w.ID)
-				}
-				if got[i].HasTotal != w.HasTotal {
-					t.Errorf("[%d] HasTotal = %v, want %v",
-						i, got[i].HasTotal, w.HasTotal)
-				}
-				if got[i].HasPeak != w.HasPeak {
-					t.Errorf("[%d] HasPeak = %v, want %v",
-						i, got[i].HasPeak, w.HasPeak)
-				}
+				assert.Equal(t, w.ID, got[i].ID, "[%d] ID", i)
+				assert.Equal(t, w.HasTotal, got[i].HasTotal, "[%d] HasTotal", i)
+				assert.Equal(t, w.HasPeak, got[i].HasPeak, "[%d] HasPeak", i)
 			}
 		})
 	}

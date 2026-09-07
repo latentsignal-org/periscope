@@ -3,6 +3,9 @@ package db
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -12,10 +15,10 @@ const (
 	snippetTokenLength = 32
 )
 
-// SystemMsgPrefixes lists content prefixes that identify system-injected
-// user messages. These are excluded from search results even when the
-// is_system column has not been backfilled (e.g. Claude sessions parsed
-// before schema version 2). Keep in sync with the frontend list in
+// SystemMsgPrefixes lists non-goal content prefixes that identify
+// system-injected user messages. These are excluded from search results even
+// when the is_system column has not been backfilled (e.g. Claude sessions
+// parsed before schema version 2). Keep in sync with the frontend list in
 // frontend/src/lib/utils/messages.ts.
 var SystemMsgPrefixes = []string{
 	"This session is being continued",
@@ -27,30 +30,273 @@ var SystemMsgPrefixes = []string{
 	"Stop hook feedback:",
 }
 
+const (
+	systemReminderOpenTag  = "<system-reminder>"
+	systemReminderCloseTag = "</system-reminder>"
+)
+
+const (
+	legacyGoalContextPrefix        = "<goal_context>"
+	codexInternalContextTagPrefix  = "<codex_internal_context"
+	goalContextSourceAttr          = `source="goal"`
+	goalContextSourceAttrSQLPrefix = ` source="goal"`
+)
+
+var goalContextSourceAttrRe = regexp.MustCompile(`(?:^|\s)` +
+	regexp.QuoteMeta(goalContextSourceAttr) + `(?:\s|/|$)`)
+
+// IsGoalContextPrefixed reports whether a user-role message is a legacy
+// Codex /goal continuation wrapper that may already be stored in older
+// archives or read-only stores.
+func IsGoalContextPrefixed(content, role string) bool {
+	if role != "user" {
+		return false
+	}
+	trimmed := strings.TrimLeft(content, systemPrefixTrimCutset)
+	if strings.HasPrefix(trimmed, legacyGoalContextPrefix) {
+		return true
+	}
+	if strings.HasPrefix(trimmed, codexInternalContextTagPrefix) {
+		openTag, _, ok := strings.Cut(trimmed, ">")
+		return ok && goalContextSourceAttrRe.MatchString(openTag)
+	}
+	return false
+}
+
+type systemPrefixSQLDialect int
+
+const (
+	systemPrefixSQLite systemPrefixSQLDialect = iota
+	systemPrefixPostgres
+	systemPrefixDuckDB
+)
+
 // SystemPrefixSQL returns a SQL clause that excludes user messages
-// matching any system prefix. The column alias for content must be
-// passed (e.g. "m.content" or "m2.content"). Uses case-sensitive
-// substr comparison, which behaves identically on SQLite and
-// PostgreSQL (unlike LIKE, which is case-insensitive on SQLite).
+// matching any system prefix. The column alias for content must be passed
+// (e.g. "m.content" or "m2.content"). Uses case-sensitive substr and
+// position checks instead of LIKE, which is case-insensitive on SQLite.
 func SystemPrefixSQL(contentCol, roleCol string) string {
+	return systemPrefixSQL(contentCol, roleCol, systemPrefixSQLite)
+}
+
+// PostgresSystemPrefixSQL is the PostgreSQL form of SystemPrefixSQL.
+func PostgresSystemPrefixSQL(contentCol, roleCol string) string {
+	return systemPrefixSQL(contentCol, roleCol, systemPrefixPostgres)
+}
+
+// DuckDBSystemPrefixSQL is the DuckDB form of SystemPrefixSQL.
+func DuckDBSystemPrefixSQL(contentCol, roleCol string) string {
+	return systemPrefixSQL(contentCol, roleCol, systemPrefixDuckDB)
+}
+
+func systemPrefixSQL(
+	contentCol, roleCol string, dialect systemPrefixSQLDialect,
+) string {
 	// LTRIM strips the same whitespace as Go's strings.TrimSpace,
 	// JS .trim(), and the parser's isSystem helpers: ASCII whitespace,
 	// BOM (U+FEFF), and Unicode
 	// spaces (U+0085, U+00A0, U+1680, U+2000–U+200A, U+2028,
-	// U+2029, U+202F, U+205F, U+3000). Both SQLite and PostgreSQL
+	// U+2029, U+202F, U+205F, U+3000). SQLite, PostgreSQL, and DuckDB
 	// handle multi-byte UTF-8 characters in the trim set correctly.
-	trimmed := "LTRIM(" + contentCol + ", ' \t\n\v\f\r" +
+	trimmed := systemPrefixSQLTrimmed(contentCol)
+	parts := make([]string, 0, len(SystemMsgPrefixes)+1)
+	for _, p := range SystemMsgPrefixes {
+		parts = append(parts, fmt.Sprintf(
+			"substr(%s, 1, %d) = '%s'", trimmed, len(p), p,
+		))
+	}
+	parts = append(parts, systemReminderTerminalSQL(trimmed, dialect))
+	parts = append(parts, goalContextPrefixSQL(trimmed, dialect))
+	guard := ""
+	if dialect == systemPrefixSQLite {
+		guard = systemPrefixFirstCPGuardSQL(contentCol) + " AND "
+	}
+	return "NOT (" + roleCol + " = 'user' AND " + guard + "(" +
+		strings.Join(parts, " OR ") + "))"
+}
+
+// systemPrefixFirstCPGuardSQL builds a cheap prefilter implied by every
+// prefix branch of systemPrefixSQL: for any branch to match, the raw
+// content's first code point must be a trimmable whitespace character or the
+// first character of one of the known prefixes. unicode() returns the first
+// code point as an integer (NULL for empty content, COALESCEd to 0, which is
+// never in the set), so rows with ordinary content skip the repeated
+// LTRIM/prefix chain after one integer IN test. The guard is AND'ed inside
+// the NOT(...), so a false guard reproduces exactly the all-branches-false
+// result. SQLite-only for now: PG (ascii) and DuckDB (unicode) analogues
+// need their own empty-string audits before the other dialects adopt it.
+func systemPrefixFirstCPGuardSQL(contentCol string) string {
+	seen := make(map[rune]bool)
+	var cps []int
+	add := func(r rune) {
+		if !seen[r] {
+			seen[r] = true
+			cps = append(cps, int(r))
+		}
+	}
+	for _, p := range SystemMsgPrefixes {
+		add([]rune(p)[0])
+	}
+	add([]rune(legacyGoalContextPrefix)[0])
+	add([]rune(codexInternalContextTagPrefix)[0])
+	for _, r := range systemPrefixTrimCutset {
+		add(r)
+	}
+	sort.Ints(cps)
+	items := make([]string, len(cps))
+	for i, cp := range cps {
+		items[i] = strconv.Itoa(cp)
+	}
+	return "COALESCE(unicode(" + contentCol + "), 0) IN (" +
+		strings.Join(items, ", ") + ")"
+}
+
+func systemPrefixSQLTrimmed(contentCol string) string {
+	return "LTRIM(" + contentCol + ", ' \t\n\v\f\r" +
 		"\u0085\u00A0\u1680" +
 		"\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A" +
 		"\u2028\u2029\u202F\u205F\u3000\uFEFF')"
-	parts := make([]string, len(SystemMsgPrefixes))
-	for i, p := range SystemMsgPrefixes {
-		parts[i] = fmt.Sprintf(
-			"substr(%s, 1, %d) = '%s'", trimmed, len(p), p,
-		)
+}
+
+func systemReminderTerminalSQL(
+	trimmed string, dialect systemPrefixSQLDialect,
+) string {
+	closePos := sqlPosition(dialect, systemReminderCloseTag, "rest")
+	next := systemPrefixSQLTrimmed(fmt.Sprintf(
+		"substr(rest, (%s) + %d)", closePos, len(systemReminderCloseTag),
+	))
+	terminal := fmt.Sprintf(
+		"(substr(rest, 1, %d) <> '%s' OR %s = 0)",
+		len(systemReminderOpenTag), systemReminderOpenTag, closePos,
+	)
+	classification := terminalRemainderSQL("rest", dialect)
+	seedReminder := fmt.Sprintf(
+		"substr(%s, 1, %d) = '%s'",
+		trimmed, len(systemReminderOpenTag), systemReminderOpenTag,
+	)
+	return fmt.Sprintf(`(%s AND EXISTS (WITH RECURSIVE reminder_remainder(rest) AS (
+SELECT %s
+UNION ALL
+SELECT %s FROM reminder_remainder
+WHERE substr(rest, 1, %d) = '%s' AND %s > 0
+)
+SELECT 1 FROM reminder_remainder
+WHERE %s AND (rest = '' OR %s)
+LIMIT 1))`, seedReminder, trimmed, next,
+		len(systemReminderOpenTag), systemReminderOpenTag, closePos,
+		terminal, classification)
+}
+
+func terminalRemainderSQL(content string, dialect systemPrefixSQLDialect) string {
+	parts := make([]string, 0, len(SystemMsgPrefixes)+1)
+	for _, p := range SystemMsgPrefixes {
+		parts = append(parts, fmt.Sprintf(
+			"substr(%s, 1, %d) = '%s'", content, len(p), p,
+		))
 	}
-	return "NOT (" + roleCol + " = 'user' AND (" +
-		strings.Join(parts, " OR ") + "))"
+	parts = append(parts, goalContextPrefixSQL(content, dialect))
+	return strings.Join(parts, " OR ")
+}
+
+func goalContextPrefixSQL(trimmed string, dialect systemPrefixSQLDialect) string {
+	legacy := fmt.Sprintf("substr(%s, 1, %d) = '%s'",
+		trimmed, len(legacyGoalContextPrefix), legacyGoalContextPrefix)
+	current := fmt.Sprintf(
+		"(substr(%[1]s, 1, %[2]d) = '%[3]s' AND %[4]s)",
+		trimmed, len(codexInternalContextTagPrefix),
+		codexInternalContextTagPrefix,
+		goalContextSourceAttrSQL(openingTagSQL(trimmed, dialect), dialect),
+	)
+	return "(" + legacy + " OR " + current + ")"
+}
+
+func openingTagSQL(trimmed string, dialect systemPrefixSQLDialect) string {
+	return fmt.Sprintf("substr(%s, 1, %s)",
+		trimmed, sqlPosition(dialect, ">", trimmed))
+}
+
+func goalContextSourceAttrSQL(
+	openTag string, dialect systemPrefixSQLDialect,
+) string {
+	normalized := openTag
+	for _, ws := range []string{"\t", "\n", "\v", "\f", "\r"} {
+		normalized = fmt.Sprintf("replace(%s, '%s', ' ')", normalized, ws)
+	}
+	checks := []string{
+		sqlContains(dialect, normalized, goalContextSourceAttrSQLPrefix+" "),
+		sqlContains(dialect, normalized, goalContextSourceAttrSQLPrefix+">"),
+		sqlContains(dialect, normalized, goalContextSourceAttrSQLPrefix+"/>"),
+	}
+	return "(" + strings.Join(checks, " OR ") + ")"
+}
+
+func sqlContains(
+	dialect systemPrefixSQLDialect, haystack, needle string,
+) string {
+	return sqlPosition(dialect, needle, haystack) + " > 0"
+}
+
+func sqlPosition(
+	dialect systemPrefixSQLDialect, needle, haystack string,
+) string {
+	quotedNeedle := "'" + needle + "'"
+	if dialect == systemPrefixPostgres {
+		return fmt.Sprintf("POSITION(%s IN %s)", quotedNeedle, haystack)
+	}
+	return fmt.Sprintf("instr(%s, %s)", haystack, quotedNeedle)
+}
+
+// systemPrefixTrimCutset is the leading-whitespace set SystemPrefixSQL's
+// LTRIM strips: ASCII whitespace, BOM, and the Unicode spaces. Kept
+// identical so the Go and SQL system-prefix checks agree.
+const systemPrefixTrimCutset = " \t\n\v\f\r" +
+	"\u0085\u00A0\u1680" +
+	"\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A" +
+	"\u2028\u2029\u202F\u205F\u3000\uFEFF"
+
+// IsSystemPrefixed reports whether a user-role message is a system-injected
+// message identified by a SystemMsgPrefixes prefix. It is the Go equivalent
+// of SystemPrefixSQL for callers that filter in Go rather than SQL: only
+// user-role messages match, and leading whitespace is trimmed with the same
+// cutset before the case-sensitive prefix comparison.
+func IsSystemPrefixed(content, role string) bool {
+	if role != "user" {
+		return false
+	}
+	trimmed := strings.TrimLeft(content, systemPrefixTrimCutset)
+	remainder, stripped := stripLeadingSystemReminderBlocks(trimmed)
+	if stripped {
+		if remainder == "" {
+			return true
+		}
+		trimmed = remainder
+	}
+	if IsGoalContextPrefixed(trimmed, role) {
+		return true
+	}
+	for _, p := range SystemMsgPrefixes {
+		if strings.HasPrefix(trimmed, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func stripLeadingSystemReminderBlocks(content string) (string, bool) {
+	rest := strings.TrimLeft(content, systemPrefixTrimCutset)
+	stripped := false
+	for strings.HasPrefix(rest, systemReminderOpenTag) {
+		closeIdx := strings.Index(rest, systemReminderCloseTag)
+		if closeIdx < 0 {
+			return "", false
+		}
+		rest = strings.TrimLeft(
+			rest[closeIdx+len(systemReminderCloseTag):],
+			systemPrefixTrimCutset,
+		)
+		stripped = true
+	}
+	return rest, stripped
 }
 
 // SearchResult holds a session-level match with the best-ranked snippet.
@@ -99,6 +345,7 @@ func (db *DB) Search(
 	if f.Limit <= 0 || f.Limit > MaxSearchLimit {
 		f.Limit = DefaultSearchLimit
 	}
+	f.Query = PrepareFTSQuery(f.Query)
 
 	// ORDER BY for the outer query. FTS5 ranks are negative (lower = better),
 	// so rank ASC places message matches (negative rank) before name-only rows
@@ -132,11 +379,11 @@ func (db *DB) Search(
 	}
 
 	innerWhereSQL := strings.Join(innerWhere, " AND ")
-	// Strip FTS phrase-matching quotes before substring operations.
-	// The HTTP handler wraps multi-word queries in double quotes for FTS
-	// (e.g. "fix bug" → `"fix bug"`). LIKE and instr() must use the
-	// plain text form so name/content substring searches work correctly.
-	plainQuery := stripFTSQuotes(f.Query)
+	// Strip FTS quoting before substring operations. PrepareFTSQuery wraps
+	// each term in double quotes for FTS (e.g. "fix bug" → `"fix" "bug"`).
+	// LIKE and instr() must use the plain text form so name/content substring
+	// searches work correctly.
+	plainQuery := StripFTSQuotes(f.Query)
 	if plainQuery == "" {
 		return SearchPage{}, nil
 	}
@@ -146,26 +393,26 @@ func (db *DB) Search(
 	// Position 0 (? AS best_query in the ROW_NUMBER SELECT) is
 	// prepended after this block — see args2 below.
 	//
-	//  pos | SQL clause                              | value
-	//  ----+-----------------------------------------+------------
-	//   0  | SELECT ? AS best_query (ROW_NUMBER)     | plainQuery  ← prepended in args2
-	//   1  | WHERE messages_fts MATCH ? (ROW_NUMBER) | ftsArgs[0] (f.Query)
-	//  [1+]| AND s2.project = ? (if project set)     | ftsArgs[1] (f.Project)
-	//   2  | WHERE messages_fts MATCH ? (outer JOIN) | f.Query
-	//   3  | WHEN s.display_name LIKE ? (CASE)       | likePattern
-	//   4  | WHEN s.first_message LIKE ? (CASE)      | likePattern
-	//   5  | WHERE s.display_name LIKE ? (name WHERE)| likePattern
-	//   6  | WHERE s.first_message LIKE ? (name WHERE)| likePattern
-	//  [7] | AND s.project = ? (name branch, optional)| f.Project
-	//   8  | WHERE messages_fts MATCH ? (NOT IN)     | ftsArgs[0]
-	//  [8+]| AND s2.project = ? (NOT IN, if set)     | ftsArgs[1]
-	//   9  | LIMIT ? OFFSET ?                        | f.Limit+1, f.Cursor
+	//  pos | SQL clause                                  | value
+	//  ----+---------------------------------------------+------------
+	//   0  | SELECT ? AS best_query (ROW_NUMBER)         | plainQuery  ← prepended in args2
+	//   1  | WHERE messages_fts MATCH ? (ROW_NUMBER)     | ftsArgs[0] (f.Query)
+	//  [1+]| AND s2.project = ? (if project set)         | ftsArgs[1] (f.Project)
+	//   2  | WHERE messages_fts MATCH ? (outer JOIN)     | f.Query
+	//   3  | WHEN COALESCE(display_name,session_name) LIKE ? (CASE) | likePattern
+	//   4  | WHEN s.first_message LIKE ? (CASE)          | likePattern
+	//   5  | WHERE COALESCE(display_name,session_name) LIKE ? (name WHERE) | likePattern
+	//   6  | WHERE s.first_message LIKE ? (name WHERE)   | likePattern
+	//  [7] | AND s.project = ? (name branch, optional)   | f.Project
+	//   8  | WHERE messages_fts MATCH ? (NOT IN)         | ftsArgs[0]
+	//  [8+]| AND s2.project = ? (NOT IN, if set)         | ftsArgs[1]
+	//   9  | LIMIT ? OFFSET ?                            | f.Limit+1, f.Cursor
 	args := make([]any, 0, len(ftsArgs)*2+6+len(nameProjectArgs))
 	args = append(args, ftsArgs...)          // (1) ROW_NUMBER WHERE
 	args = append(args, f.Query)             // (2) outer MATCH re-filter
-	args = append(args, likePattern)         // (3) CASE display_name LIKE
+	args = append(args, likePattern)         // (3) CASE COALESCE(display_name,session_name) LIKE
 	args = append(args, likePattern)         // (4) CASE first_message LIKE
-	args = append(args, likePattern)         // (5) name WHERE display_name LIKE
+	args = append(args, likePattern)         // (5) name WHERE COALESCE(display_name,session_name) LIKE
 	args = append(args, likePattern)         // (6) name WHERE first_message LIKE
 	args = append(args, nameProjectArgs...)  // (7) optional name branch project
 	args = append(args, ftsArgs...)          // (8) NOT IN WHERE
@@ -177,7 +424,7 @@ func (db *DB) Search(
 		FROM (
 			-- FTS branch: message content matches
 			SELECT m.session_id, s.project, s.agent,
-				COALESCE(s.display_name, s.first_message, '') AS name,
+				COALESCE(s.display_name, s.session_name, s.first_message, '') AS name,
 				COALESCE(s.ended_at, s.started_at, '') AS session_ended_at,
 				best.best_ordinal AS ordinal,
 				snippet(messages_fts, 0, '<mark>', '</mark>',
@@ -212,22 +459,22 @@ func (db *DB) Search(
 
 			UNION ALL
 
-			-- Name branch: display_name / first_message matches not in FTS branch
+			-- Name branch: display_name / session_name / first_message matches not in FTS branch
 			SELECT s.id, s.project, s.agent,
-				COALESCE(s.display_name, s.first_message, '') AS name,
+				COALESCE(s.display_name, s.session_name, s.first_message, '') AS name,
 				COALESCE(s.ended_at, s.started_at, '') AS session_ended_at,
 				-1 AS ordinal,
 				CASE
-					WHEN s.display_name LIKE ? ESCAPE '\'
-						THEN COALESCE(s.display_name, '')
+					WHEN COALESCE(s.display_name, s.session_name) LIKE ? ESCAPE '\'
+						THEN COALESCE(s.display_name, s.session_name, '')
 					WHEN s.first_message LIKE ? ESCAPE '\'
 						THEN COALESCE(s.first_message, '')
-					ELSE COALESCE(s.display_name, s.first_message, '')
+					ELSE COALESCE(s.display_name, s.session_name, s.first_message, '')
 				END AS snippet,
 				0.0 AS rank,
 				0 AS match_pos
 			FROM sessions s
-			WHERE (s.display_name LIKE ? ESCAPE '\'
+			WHERE (COALESCE(s.display_name, s.session_name) LIKE ? ESCAPE '\'
 				OR s.first_message LIKE ? ESCAPE '\')
 				AND s.deleted_at IS NULL
 				AND EXISTS (
@@ -344,12 +591,97 @@ func (db *DB) SearchSession(
 	return ordinals, rows.Err()
 }
 
-// stripFTSQuotes removes surrounding double quotes added by the HTTP
-// handler's prepareFTSQuery for FTS phrase matching, returning the plain
-// search term for substring operations (LIKE, instr).
-func stripFTSQuotes(v string) string {
-	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
-		return v[1 : len(v)-1]
+// PrepareFTSQuery turns a user's raw search input into a well-formed SQLite
+// FTS5 MATCH expression. Each whitespace-separated term is wrapped in double
+// quotes (with any embedded quote doubled, per FTS5 escaping), which makes
+// punctuation literal inside the term and combines the terms under FTS5's
+// implicit AND. Quoting is what prevents a single token containing an FTS5
+// operator character (e.g. "error-401" or "status:500") from being parsed as
+// query syntax and raising a malformed-query error (an HTTP 500).
+//
+// An empty/whitespace-only input is returned unchanged. An input the caller
+// already opened with a double quote is treated as a deliberate FTS5 expression
+// (including an explicit "exact phrase") and is passed through untouched, so
+// exact-phrase matching remains opt-in via a leading quote.
+//
+// This is the single source of truth shared by the SQLite, PostgreSQL, and HTTP
+// search paths so the same user query behaves identically across backends.
+func PrepareFTSQuery(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.HasPrefix(raw, `"`) {
+		return raw
 	}
-	return v
+	var b strings.Builder
+	for i, term := range strings.Fields(raw) {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteByte('"')
+		b.WriteString(strings.ReplaceAll(term, `"`, `""`))
+		b.WriteByte('"')
+	}
+	return b.String()
+}
+
+// FTSTerms decomposes a PrepareFTSQuery output back into its individual terms,
+// un-doubling escaped quotes inside quoted terms and collecting bare tokens. A
+// multi-term AND query like `"error" "401"` yields ["error", "401"], a single
+// quoted operator token `"error-401"` yields ["error-401"], and an explicit
+// exact phrase `"fix bug"` yields a single ["fix bug"] term. This lets the
+// substring backends (SQLite name-branch LIKE/instr, PostgreSQL ILIKE)
+// reconstruct the same AND-of-terms vs. exact-phrase semantics the FTS engine
+// applies, keeping behavior identical across backends.
+func FTSTerms(v string) []string {
+	if !strings.Contains(v, `"`) {
+		if v = strings.TrimSpace(v); v == "" {
+			return nil
+		}
+		return strings.Fields(v)
+	}
+	var terms []string
+	var cur strings.Builder
+	inQuote := false
+	hasTerm := false
+	flush := func() {
+		if hasTerm {
+			terms = append(terms, cur.String())
+			cur.Reset()
+			hasTerm = false
+		}
+	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		switch {
+		case c == '"':
+			if inQuote && i+1 < len(v) && v[i+1] == '"' {
+				// Doubled quote inside a quoted term is a literal quote.
+				cur.WriteByte('"')
+				hasTerm = true
+				i++
+				continue
+			}
+			inQuote = !inQuote
+			hasTerm = true
+		case !inQuote && (c == ' ' || c == '\t' || c == '\n' || c == '\r'):
+			flush()
+		default:
+			cur.WriteByte(c)
+			hasTerm = true
+		}
+	}
+	flush()
+	return terms
+}
+
+// StripFTSQuotes reverses PrepareFTSQuery into a plain substring suitable for
+// LIKE and instr() operations (name-branch matching, snippet centering). It
+// rejoins the parsed FTS terms with single spaces. So `"unique" "phrase"`
+// becomes "unique phrase", a single quoted token like `"error-401"` becomes
+// "error-401", and an explicit phrase `"fix bug"` becomes "fix bug". Input with
+// no quotes is returned unchanged.
+func StripFTSQuotes(v string) string {
+	if !strings.Contains(v, `"`) {
+		return v
+	}
+	return strings.Join(FTSTerms(v), " ")
 }

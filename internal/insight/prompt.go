@@ -5,18 +5,22 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/wesm/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/money"
 )
 
 const maxSessions = 50
 
 // GenerateRequest describes what insight to generate.
 type GenerateRequest struct {
-	Type     string
-	DateFrom string
-	DateTo   string
-	Project  string
-	Prompt   string
+	Type           string
+	DateFrom       string
+	DateTo         string
+	Project        string
+	Prompt         string
+	SessionID      string
+	AutomatedScope string
+	Summary        *RangeSummary // non-nil only for multi-day ranges
 }
 
 // BuildPrompt queries sessions for the given date and assembles
@@ -26,10 +30,18 @@ func BuildPrompt(
 	database db.Store,
 	req GenerateRequest,
 ) (string, error) {
+	if req.SessionID != "" {
+		return buildSessionPrompt(ctx, database, req)
+	}
+	automatedScope := req.AutomatedScope
+	if automatedScope == "" {
+		automatedScope = "human"
+	}
 	filter := db.SessionFilter{
-		DateFrom: req.DateFrom,
-		DateTo:   req.DateTo,
-		Limit:    maxSessions + 1,
+		DateFrom:       req.DateFrom,
+		DateTo:         req.DateTo,
+		Limit:          maxSessions + 1,
+		AutomatedScope: automatedScope,
 	}
 	if req.Project != "" {
 		filter.Project = req.Project
@@ -57,6 +69,10 @@ func BuildPrompt(
 		b.WriteString("## Project: ")
 		b.WriteString(req.Project)
 		b.WriteString("\n\n")
+	}
+
+	if req.Summary != nil {
+		req.Summary.WriteTo(&b)
 	}
 
 	sessions := page.Sessions
@@ -120,6 +136,85 @@ func BuildPrompt(
 		b.WriteString("\n")
 	}
 
+	return b.String(), nil
+}
+
+func buildSessionPrompt(
+	ctx context.Context,
+	database db.Store,
+	req GenerateRequest,
+) (string, error) {
+	sess, err := database.GetSession(ctx, req.SessionID)
+	if err != nil {
+		return "", fmt.Errorf("getting session: %w", err)
+	}
+	if sess == nil {
+		return "", fmt.Errorf("session not found: %s", req.SessionID)
+	}
+	msgs, err := database.GetAllMessages(ctx, req.SessionID)
+	if err != nil {
+		return "", fmt.Errorf("getting messages: %w", err)
+	}
+	timing, err := database.GetSessionTiming(ctx, req.SessionID)
+	if err != nil {
+		return "", fmt.Errorf("getting timing: %w", err)
+	}
+	usage, err := database.GetSessionUsage(ctx, req.SessionID, false)
+	if err != nil {
+		return "", fmt.Errorf("getting usage: %w", err)
+	}
+
+	var b strings.Builder
+	writeSystemInstruction(&b, req.Type)
+	fmt.Fprintf(&b, "\n## Session: %s\n\n", req.SessionID)
+	fmt.Fprintf(&b, "- Project: %s\n", sess.Project)
+	fmt.Fprintf(&b, "- Agent: %s\n", sess.Agent)
+	if sess.StartedAt != nil {
+		fmt.Fprintf(&b, "- Started: %s\n", *sess.StartedAt)
+	}
+	if sess.EndedAt != nil {
+		fmt.Fprintf(&b, "- Ended: %s\n", *sess.EndedAt)
+	}
+	fmt.Fprintf(&b, "- Messages: %d\n", sess.MessageCount)
+	if usage != nil && usage.HasTokenData {
+		fmt.Fprintf(&b, "- Output tokens: %d\n", usage.TotalOutputTokens)
+		fmt.Fprintf(&b, "- Peak context tokens: %d\n", usage.PeakContextTokens)
+	}
+	if usage != nil && usage.HasCost {
+		fmt.Fprintf(&b, "- Cost: %s\n", money.FormatUSD(usage.Cost, money.DisplayCents))
+	}
+	if timing != nil {
+		fmt.Fprintf(&b, "- Duration: %.1fs\n", float64(timing.TotalDurationMs)/1000)
+		fmt.Fprintf(&b, "- Tool calls: %d\n", timing.ToolCallCount)
+	}
+
+	b.WriteString("\n## Messages\n\n")
+	if len(msgs) == 0 {
+		b.WriteString("No messages found for this session.\n")
+	} else {
+		for _, m := range msgs {
+			if m.IsSystem {
+				continue
+			}
+			fmt.Fprintf(&b, "### Message %d: %s\n", m.Ordinal, m.Role)
+			if m.Timestamp != "" {
+				fmt.Fprintf(&b, "- Timestamp: %s\n", m.Timestamp)
+			}
+			if m.Model != "" {
+				fmt.Fprintf(&b, "- Model: %s\n", m.Model)
+			}
+			if hasContext, hasOutput := m.TokenPresence(); hasContext || hasOutput {
+				fmt.Fprintf(&b, "- Context tokens: %d\n", m.ContextTokens)
+				fmt.Fprintf(&b, "- Output tokens: %d\n", m.OutputTokens)
+			}
+			fmt.Fprintf(&b, "\n%s\n\n", truncateString(m.Content, 800))
+		}
+	}
+	if req.Prompt != "" {
+		b.WriteString("## User Query\n\n")
+		b.WriteString(req.Prompt)
+		b.WriteString("\n")
+	}
 	return b.String(), nil
 }
 

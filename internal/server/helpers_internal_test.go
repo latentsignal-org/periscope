@@ -8,14 +8,18 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/wesm/agentsview/internal/config"
-	"github.com/wesm/agentsview/internal/db"
-	"github.com/wesm/agentsview/internal/parser"
-	"github.com/wesm/agentsview/internal/sync"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.kenn.io/agentsview/internal/config"
+	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/dbtest"
+	"go.kenn.io/agentsview/internal/parser"
+	"go.kenn.io/agentsview/internal/service"
+	"go.kenn.io/agentsview/internal/sync"
 )
 
 // testServer creates a Server for internal tests with the given
@@ -28,11 +32,7 @@ func testServer(
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
-	database, err := db.Open(dbPath)
-	if err != nil {
-		t.Fatalf("opening db: %v", err)
-	}
-	t.Cleanup(func() { database.Close() })
+	database := dbtest.OpenTestDBAt(t, dbPath)
 
 	cfg := config.Config{
 		Host:         "127.0.0.1",
@@ -61,42 +61,26 @@ func withHandlerDelay(d time.Duration) Option {
 // a JSON body containing "request timed out" and the correct
 // Content-Type header.
 func assertTimeoutResponse(
-	t *testing.T, resp *http.Response,
+	t *testing.T, resp *http.Response, detailSubstrings ...string,
 ) {
 	t.Helper()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf(
-			"status = %d, want %d",
-			resp.StatusCode, http.StatusServiceUnavailable,
-		)
-	}
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("reading body: %v", err)
-	}
+	require.NoError(t, err)
 	resp.Body = struct {
 		io.Reader
 		io.Closer
 	}{bytes.NewReader(body), resp.Body}
 	var je jsonError
-	if err := json.Unmarshal(body, &je); err != nil {
-		t.Fatalf(
-			"body is not valid JSON: %v (body=%q)",
-			err, string(body),
-		)
+	require.NoError(t, json.Unmarshal(body, &je),
+		"body is not valid JSON; body=%q", string(body))
+	t.Logf("timeout body: %s", string(body))
+	require.Equal(t, "request timed out", je.Error)
+	require.NotEmpty(t, je.Detail)
+	for _, want := range detailSubstrings {
+		require.Contains(t, je.Detail, want)
 	}
-	if je.Error != "request timed out" {
-		t.Fatalf(
-			"error = %q, want %q",
-			je.Error, "request timed out",
-		)
-	}
-	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
-		t.Fatalf(
-			"Content-Type = %q, want %q",
-			ct, "application/json",
-		)
-	}
+	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
 }
 
 // isTimeoutResponse returns true when the response is a 503
@@ -138,18 +122,43 @@ func newTestRequest(
 		httptest.NewRequest(http.MethodGet, target, nil)
 }
 
+// newRoutedTestServerWithStore creates a lightweight Server
+// backed by the given Store with routes registered. Use this for
+// internal handler tests that drive requests through s.mux
+// without a real database or sync engine.
+func newRoutedTestServerWithStore(
+	t *testing.T, store db.Store,
+) *Server {
+	t.Helper()
+	s := &Server{
+		cfg:      config.Config{Host: "127.0.0.1"},
+		db:       store,
+		sessions: service.NewReadOnlyBackend(store),
+		mux:      http.NewServeMux(),
+	}
+	s.routes()
+	return s
+}
+
+// serveGet issues a GET request for path through the server's
+// mux and returns the recorder.
+func serveGet(
+	t *testing.T, s *Server, path string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	w := httptest.NewRecorder()
+	s.mux.ServeHTTP(w, req)
+	return w
+}
+
 // assertRecorderStatus checks that the recorder has the
 // expected HTTP status code.
 func assertRecorderStatus(
 	t *testing.T, w *httptest.ResponseRecorder, code int,
 ) {
 	t.Helper()
-	if w.Code != code {
-		t.Fatalf(
-			"expected status %d, got %d: %s",
-			code, w.Code, w.Body.String(),
-		)
-	}
+	require.Equal(t, code, w.Code, "body: %s", w.Body.String())
 }
 
 // assertContentType checks that the recorder has the expected
@@ -158,11 +167,7 @@ func assertContentType(
 	t *testing.T, w *httptest.ResponseRecorder, expected string,
 ) {
 	t.Helper()
-	if got := w.Header().Get("Content-Type"); got != expected {
-		t.Errorf(
-			"Content-Type = %q, want %q", got, expected,
-		)
-	}
+	assert.Equal(t, expected, w.Header().Get("Content-Type"))
 }
 
 // newTestServerMinimal creates a lightweight Server with only the
@@ -195,12 +200,7 @@ func assertContainsAll(
 ) {
 	t.Helper()
 	for _, want := range wants {
-		if !strings.Contains(got, want) {
-			t.Errorf(
-				"expected to contain %q, got:\n%s",
-				want, got,
-			)
-		}
+		assert.Contains(t, got, want)
 	}
 }
 
@@ -211,11 +211,6 @@ func assertContainsNone(
 ) {
 	t.Helper()
 	for _, bad := range bads {
-		if strings.Contains(got, bad) {
-			t.Errorf(
-				"expected NOT to contain %q, got:\n%s",
-				bad, got,
-			)
-		}
+		assert.NotContains(t, got, bad)
 	}
 }

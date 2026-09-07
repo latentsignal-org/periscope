@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -9,43 +10,49 @@ import (
 	"os"
 	"time"
 
-	"github.com/wesm/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/db"
+	duckdbsync "go.kenn.io/agentsview/internal/duckdb"
+	"go.kenn.io/agentsview/internal/money"
 )
 
 type sessionSpec struct {
-	project          string
-	suffix           string
-	msgCount         int
-	userMsgCount     int
-	parentSessionID  string
-	relationshipType string
+	project           string
+	suffix            string
+	msgCount          int
+	userMsgCount      int
+	parentSessionID   string
+	relationshipType  string
+	terminationStatus string
 }
 
 var specs = []sessionSpec{
-	{"project-alpha", "small-2", 2, 2, "", ""},
-	{"project-alpha", "small-5", 5, 3, "", ""},
-	{"project-beta", "mixed-content-7", 7, 3, "", ""},
-	{"project-beta", "medium-8", 8, 4, "", ""},
-	{"project-beta", "medium-100", 100, 50, "", ""},
-	{"project-gamma", "large-200", 200, 100, "", ""},
-	{"project-gamma", "large-1500", 1500, 750, "", ""},
-	{"project-delta", "xlarge-5500", 5500, 2750, "", ""},
+	{"project-alpha", "small-2", 2, 2, "", "", ""},
+	{"project-alpha", "small-5", 5, 3, "", "", ""},
+	// One unclean session for e2e termination tests.
+	{"project-beta", "mixed-content-7", 7, 3, "", "",
+		"tool_call_pending"},
+	{"project-beta", "medium-8", 8, 4, "", "", ""},
+	{"project-beta", "medium-100", 100, 50, "", "", ""},
+	{"project-gamma", "large-200", 200, 100, "", "", ""},
+	{"project-gamma", "large-1500", 1500, 750, "", "", ""},
+	{"project-delta", "xlarge-5500", 5500, 2750, "", "", ""},
 
 	// Sub-agent and fork sessions: must NOT appear in session
 	// list, stats, or analytics summary counts.
 	{"project-alpha", "subagent-1", 12, 6,
-		"test-session-small-5", "subagent"},
+		"test-session-small-5", "subagent", ""},
 	{"project-alpha", "subagent-2", 8, 4,
-		"test-session-small-5", "subagent"},
+		"test-session-small-5", "subagent", ""},
 	{"project-beta", "fork-1", 15, 7,
-		"test-session-medium-8", "fork"},
+		"test-session-medium-8", "fork", ""},
 
 	// Empty session (0 messages): must also be excluded.
-	{"project-gamma", "empty-0", 0, 0, "", ""},
+	{"project-gamma", "empty-0", 0, 0, "", "", ""},
 }
 
 func main() {
 	out := flag.String("out", "", "output database path")
+	duckDBOut := flag.String("duckdb-out", "", "optional output DuckDB mirror path")
 	flag.Parse()
 	if *out == "" {
 		fmt.Fprintln(os.Stderr, "usage: testfixture -out <path>")
@@ -67,17 +74,17 @@ func main() {
 	if err := database.UpsertModelPricing([]db.ModelPricing{
 		{
 			ModelPattern:         "claude-sonnet-4-20250514",
-			InputPerMTok:         3.0,
-			OutputPerMTok:        15.0,
-			CacheCreationPerMTok: 3.75,
-			CacheReadPerMTok:     0.30,
+			InputPerMTok:         money.Money{Microdollars: 3_000_000},
+			OutputPerMTok:        money.Money{Microdollars: 15_000_000},
+			CacheCreationPerMTok: money.Money{Microdollars: 3_750_000},
+			CacheReadPerMTok:     money.Money{Microdollars: 300_000},
 		},
 		{
 			ModelPattern:         "claude-opus-4-20250514",
-			InputPerMTok:         15.0,
-			OutputPerMTok:        75.0,
-			CacheCreationPerMTok: 18.75,
-			CacheReadPerMTok:     1.50,
+			InputPerMTok:         money.Money{Microdollars: 15_000_000},
+			OutputPerMTok:        money.Money{Microdollars: 75_000_000},
+			CacheCreationPerMTok: money.Money{Microdollars: 18_750_000},
+			CacheReadPerMTok:     money.Money{Microdollars: 1_500_000},
 		},
 	}); err != nil {
 		log.Fatalf("seeding model pricing: %v", err)
@@ -100,10 +107,44 @@ func main() {
 		)
 	}
 
+	if err := createDurationShowcaseFixture(
+		database, base.Add(72*time.Hour),
+	); err != nil {
+		log.Fatalf("creating duration showcase: %v", err)
+	}
+
+	if err := createRecentEditsFixture(
+		database, base.Add(96*time.Hour),
+	); err != nil {
+		log.Fatalf("creating recent-edits fixture: %v", err)
+	}
+
 	fmt.Printf("Fixture DB written to %s\n", *out)
+	if *duckDBOut != "" {
+		if err := writeDuckDBMirror(database, *duckDBOut); err != nil {
+			log.Fatalf("writing DuckDB mirror: %v", err)
+		}
+		fmt.Printf("Fixture DuckDB mirror written to %s\n", *duckDBOut)
+	}
 }
 
-func ptr[T any](v T) *T { return &v }
+func writeDuckDBMirror(database *db.DB, path string) error {
+	if err := os.Remove(path); err != nil &&
+		!errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("removing existing DuckDB mirror: %w", err)
+	}
+	ctx := context.Background()
+	result, err := duckdbsync.Push(
+		ctx, path, database, "test-machine", duckdbsync.SyncOptions{}, true, nil,
+	)
+	if err != nil {
+		return err
+	}
+	if result.Errors > 0 {
+		return fmt.Errorf("DuckDB push had %d session error(s)", result.Errors)
+	}
+	return nil
+}
 
 func createSessionFixture(
 	database *db.DB, spec sessionSpec,
@@ -122,17 +163,20 @@ func createSessionFixture(
 		Project:          spec.project,
 		Machine:          "test-machine",
 		Agent:            "claude",
-		StartedAt:        ptr(startedAt.Format(time.RFC3339Nano)),
-		EndedAt:          ptr(endedAt.Format(time.RFC3339Nano)),
+		StartedAt:        new(startedAt.Format(time.RFC3339Nano)),
+		EndedAt:          new(endedAt.Format(time.RFC3339Nano)),
 		MessageCount:     spec.msgCount,
 		UserMessageCount: spec.userMsgCount,
 		RelationshipType: spec.relationshipType,
 	}
 	if spec.parentSessionID != "" {
-		sess.ParentSessionID = ptr(spec.parentSessionID)
+		sess.ParentSessionID = new(spec.parentSessionID)
+	}
+	if spec.terminationStatus != "" {
+		sess.TerminationStatus = new(spec.terminationStatus)
 	}
 	if spec.msgCount > 0 {
-		sess.FirstMessage = ptr(
+		sess.FirstMessage = new(
 			fmt.Sprintf("First message for %s", spec.project),
 		)
 	}
@@ -313,4 +357,513 @@ func generateContent(role string, idx, total int) string {
 			"Let me explain the key components.",
 		idx, total,
 	)
+}
+
+// createDurationShowcaseFixture builds a parent session that
+// exercises every shape the Session Vital Signs UX renders:
+// solo tool call, parallel turn with a sub-agent, and a slow
+// solo Bash. Together with the linked sub-agent session it
+// gives the right-panel timing query stable data to display.
+//
+// Timeline (relative to start):
+//
+//	T+0:00  msg 0  user      "investigate auth"
+//	T+0:02  msg 1  assistant solo Read (tool_use)
+//	T+0:04  msg 2  user      tool_result for Read
+//	T+0:14  msg 3  assistant parallel: 2 Reads + 1 Task
+//	T+2:14  msg 4  user      tool_results for all 3
+//	T+2:24  msg 5  assistant solo Bash
+//	T+2:52  msg 6  user      tool_result for Bash
+//	T+2:55  session ends
+//
+// Per the timing spec, turn durations come from the gap to
+// the next message; sub-agent calls take their duration from
+// the linked child session's started_at/ended_at.
+func createDurationShowcaseFixture(
+	database *db.DB, start time.Time,
+) error {
+	const (
+		parentID   = "test-session-duration-showcase"
+		subagentID = "test-session-duration-subagent-1"
+		project    = "project-duration"
+		model      = "claude-sonnet-4-20250514"
+	)
+
+	// Per-message timestamps anchored on `start`.
+	t0 := start
+	t1 := start.Add(2 * time.Second)
+	t2 := start.Add(4 * time.Second)
+	t3 := start.Add(14 * time.Second)
+	t4 := start.Add(2*time.Minute + 14*time.Second)
+	t5 := start.Add(2*time.Minute + 24*time.Second)
+	t6 := start.Add(2*time.Minute + 52*time.Second)
+	endParent := start.Add(2*time.Minute + 55*time.Second)
+
+	// Sub-agent runs alongside the parallel turn so its
+	// duration covers the full ~2 minutes of that turn.
+	subStart := t3
+	subEnd := t4
+	subAgentMessages := buildDurationSubagentMessages(
+		subagentID, subStart,
+	)
+
+	subSess := db.Session{
+		ID:               subagentID,
+		Project:          project,
+		Machine:          "test-machine",
+		Agent:            "claude",
+		StartedAt:        new(subStart.Format(time.RFC3339Nano)),
+		EndedAt:          new(subEnd.Format(time.RFC3339Nano)),
+		MessageCount:     len(subAgentMessages),
+		UserMessageCount: countUserMessages(subAgentMessages),
+		ParentSessionID:  new(parentID),
+		RelationshipType: "subagent",
+		FirstMessage: new(
+			"Inspect middleware request flow",
+		),
+	}
+	if err := database.UpsertSession(subSess); err != nil {
+		return fmt.Errorf(
+			"upserting subagent session: %w", err,
+		)
+	}
+	if err := database.InsertMessages(
+		subAgentMessages,
+	); err != nil {
+		return fmt.Errorf(
+			"inserting subagent messages: %w", err,
+		)
+	}
+	fmt.Printf(
+		"  %s: %d messages (subagent)\n",
+		subagentID, len(subAgentMessages),
+	)
+
+	parentMessages := buildDurationShowcaseMessages(
+		parentID, subagentID, model,
+		t0, t1, t2, t3, t4, t5, t6,
+	)
+
+	parentSess := db.Session{
+		ID:               parentID,
+		Project:          project,
+		Machine:          "test-machine",
+		Agent:            "claude",
+		StartedAt:        new(t0.Format(time.RFC3339Nano)),
+		EndedAt:          new(endParent.Format(time.RFC3339Nano)),
+		MessageCount:     len(parentMessages),
+		UserMessageCount: countUserMessages(parentMessages),
+		FirstMessage: new(
+			"Investigate auth middleware performance",
+		),
+	}
+	if err := database.UpsertSession(parentSess); err != nil {
+		return fmt.Errorf(
+			"upserting showcase session: %w", err,
+		)
+	}
+	if err := database.InsertMessages(
+		parentMessages,
+	); err != nil {
+		return fmt.Errorf(
+			"inserting showcase messages: %w", err,
+		)
+	}
+	fmt.Printf(
+		"  %s: %d messages (duration showcase)\n",
+		parentID, len(parentMessages),
+	)
+	return nil
+}
+
+func countUserMessages(msgs []db.Message) int {
+	n := 0
+	for _, m := range msgs {
+		if m.Role == "user" {
+			n++
+		}
+	}
+	return n
+}
+
+// buildDurationShowcaseMessages assembles the parent session's
+// messages and tool calls. ToolUseIDs are stable strings so the
+// IDs surface intact in the tool_calls table; matching results
+// would arrive in the next user message in a real transcript,
+// but the result_content_length lives on the originating call
+// row in this DB schema, so it's set there directly.
+func buildDurationShowcaseMessages(
+	sessionID, subagentID, model string,
+	t0, t1, t2, t3, t4, t5, t6 time.Time,
+) []db.Message {
+	const (
+		readSoloID = "tu_read_solo"
+		readPar1ID = "tu_read_par1"
+		readPar2ID = "tu_read_par2"
+		taskID     = "tu_task_subagent"
+		bashSlowID = "tu_bash_slow"
+	)
+
+	tokenUsage := func(seed int) json.RawMessage {
+		input := 600 + seed*150
+		output := 220 + seed*80
+		cacheCr := 60 + seed*15
+		cacheRd := 1100 + seed*40
+		return json.RawMessage(fmt.Sprintf(
+			`{"input_tokens":%d,`+
+				`"output_tokens":%d,`+
+				`"cache_creation_input_tokens":%d,`+
+				`"cache_read_input_tokens":%d}`,
+			input, output, cacheCr, cacheRd,
+		))
+	}
+
+	msg0Content := "Take a look at the auth middleware " +
+		"and figure out where time is going."
+	msg1Content := "Reading the middleware so I can map " +
+		"the request flow."
+	msg2Content := "[tool_result]"
+	msg3Content := "Fanning out: two reads plus a sub-agent " +
+		"to dig into the session helpers."
+	msg4Content := "[tool_results]"
+	msg5Content := "Running the auth test suite to confirm " +
+		"the slow path matches what I read."
+	msg6Content := "[tool_result]"
+
+	return []db.Message{
+		{
+			SessionID:     sessionID,
+			Ordinal:       0,
+			Role:          "user",
+			Content:       msg0Content,
+			Timestamp:     t0.Format(time.RFC3339Nano),
+			ContentLength: len(msg0Content),
+		},
+		{
+			SessionID:     sessionID,
+			Ordinal:       1,
+			Role:          "assistant",
+			Content:       msg1Content,
+			Timestamp:     t1.Format(time.RFC3339Nano),
+			HasToolUse:    true,
+			ContentLength: len(msg1Content),
+			Model:         model,
+			TokenUsage:    tokenUsage(1),
+			ToolCalls: []db.ToolCall{
+				{
+					ToolName:  "Read",
+					Category:  "Read",
+					ToolUseID: readSoloID,
+					InputJSON: `{"file_path":` +
+						`"/src/auth/middleware.go"}`,
+					ResultContentLength: 412,
+				},
+			},
+		},
+		{
+			SessionID:     sessionID,
+			Ordinal:       2,
+			Role:          "user",
+			Content:       msg2Content,
+			Timestamp:     t2.Format(time.RFC3339Nano),
+			ContentLength: len(msg2Content),
+		},
+		{
+			SessionID:     sessionID,
+			Ordinal:       3,
+			Role:          "assistant",
+			Content:       msg3Content,
+			Timestamp:     t3.Format(time.RFC3339Nano),
+			HasToolUse:    true,
+			ContentLength: len(msg3Content),
+			Model:         model,
+			TokenUsage:    tokenUsage(2),
+			ToolCalls: []db.ToolCall{
+				{
+					ToolName:  "Read",
+					Category:  "Read",
+					ToolUseID: readPar1ID,
+					InputJSON: `{"file_path":` +
+						`"/src/auth/session.go"}`,
+					ResultContentLength: 510,
+				},
+				{
+					ToolName:  "Read",
+					Category:  "Read",
+					ToolUseID: readPar2ID,
+					InputJSON: `{"file_path":` +
+						`"/src/auth/tokens.go"}`,
+					ResultContentLength: 388,
+				},
+				{
+					ToolName:          "Task",
+					Category:          "Task",
+					ToolUseID:         taskID,
+					SubagentSessionID: subagentID,
+					InputJSON: `{"description":` +
+						`"audit session helpers",` +
+						`"prompt":"Walk through ` +
+						`session helpers and report ` +
+						`anything that touches the DB ` +
+						`on the hot path."}`,
+					ResultContentLength: 1280,
+				},
+			},
+		},
+		{
+			SessionID:     sessionID,
+			Ordinal:       4,
+			Role:          "user",
+			Content:       msg4Content,
+			Timestamp:     t4.Format(time.RFC3339Nano),
+			ContentLength: len(msg4Content),
+		},
+		{
+			SessionID:     sessionID,
+			Ordinal:       5,
+			Role:          "assistant",
+			Content:       msg5Content,
+			Timestamp:     t5.Format(time.RFC3339Nano),
+			HasToolUse:    true,
+			ContentLength: len(msg5Content),
+			Model:         model,
+			TokenUsage:    tokenUsage(3),
+			ToolCalls: []db.ToolCall{
+				{
+					ToolName:  "Bash",
+					Category:  "Bash",
+					ToolUseID: bashSlowID,
+					InputJSON: `{"command":` +
+						`"go test ./... -count=10",` +
+						`"description":"rerun ` +
+						`auth tests"}`,
+					ResultContentLength: 940,
+				},
+			},
+		},
+		{
+			SessionID:     sessionID,
+			Ordinal:       6,
+			Role:          "user",
+			Content:       msg6Content,
+			Timestamp:     t6.Format(time.RFC3339Nano),
+			ContentLength: len(msg6Content),
+		},
+	}
+}
+
+// buildDurationSubagentMessages builds a small but realistic
+// sub-agent transcript: a Read followed by a Grep, then a
+// final report. The exact gaps don't drive the parent timing
+// UI (that uses the child session's start/end window), so we
+// keep the messages evenly spaced for readability.
+func buildDurationSubagentMessages(
+	sessionID string, start time.Time,
+) []db.Message {
+	const model = "claude-sonnet-4-20250514"
+
+	tokenUsage := func(seed int) json.RawMessage {
+		input := 350 + seed*90
+		output := 180 + seed*55
+		cacheCr := 40 + seed*12
+		cacheRd := 700 + seed*30
+		return json.RawMessage(fmt.Sprintf(
+			`{"input_tokens":%d,`+
+				`"output_tokens":%d,`+
+				`"cache_creation_input_tokens":%d,`+
+				`"cache_read_input_tokens":%d}`,
+			input, output, cacheCr, cacheRd,
+		))
+	}
+
+	t0 := start
+	t1 := start.Add(20 * time.Second)
+	t2 := start.Add(40 * time.Second)
+	t3 := start.Add(70 * time.Second)
+	t4 := start.Add(95 * time.Second)
+	t5 := start.Add(115 * time.Second)
+
+	msg0 := "Audit the session helpers and report any " +
+		"hot-path DB calls."
+	msg1 := "Reading the helper module first."
+	msg2 := "[tool_result]"
+	msg3 := "Now scanning the cache layer for sync calls."
+	msg4 := "[tool_result]"
+	msg5 := "Two helpers issue a synchronous DB read on " +
+		"every request. Report attached."
+
+	return []db.Message{
+		{
+			SessionID:     sessionID,
+			Ordinal:       0,
+			Role:          "user",
+			Content:       msg0,
+			Timestamp:     t0.Format(time.RFC3339Nano),
+			ContentLength: len(msg0),
+		},
+		{
+			SessionID:     sessionID,
+			Ordinal:       1,
+			Role:          "assistant",
+			Content:       msg1,
+			Timestamp:     t1.Format(time.RFC3339Nano),
+			HasToolUse:    true,
+			ContentLength: len(msg1),
+			Model:         model,
+			TokenUsage:    tokenUsage(1),
+			ToolCalls: []db.ToolCall{
+				{
+					ToolName:  "Read",
+					Category:  "Read",
+					ToolUseID: "tu_sub_read1",
+					InputJSON: `{"file_path":` +
+						`"/src/auth/helpers.go"}`,
+					ResultContentLength: 320,
+				},
+			},
+		},
+		{
+			SessionID:     sessionID,
+			Ordinal:       2,
+			Role:          "user",
+			Content:       msg2,
+			Timestamp:     t2.Format(time.RFC3339Nano),
+			ContentLength: len(msg2),
+		},
+		{
+			SessionID:     sessionID,
+			Ordinal:       3,
+			Role:          "assistant",
+			Content:       msg3,
+			Timestamp:     t3.Format(time.RFC3339Nano),
+			HasToolUse:    true,
+			ContentLength: len(msg3),
+			Model:         model,
+			TokenUsage:    tokenUsage(2),
+			ToolCalls: []db.ToolCall{
+				{
+					ToolName:  "Grep",
+					Category:  "Grep",
+					ToolUseID: "tu_sub_grep1",
+					InputJSON: `{"pattern":` +
+						`"db.Query","path":` +
+						`"/src/auth"}`,
+					ResultContentLength: 210,
+				},
+			},
+		},
+		{
+			SessionID:     sessionID,
+			Ordinal:       4,
+			Role:          "user",
+			Content:       msg4,
+			Timestamp:     t4.Format(time.RFC3339Nano),
+			ContentLength: len(msg4),
+		},
+		{
+			SessionID:     sessionID,
+			Ordinal:       5,
+			Role:          "assistant",
+			Content:       msg5,
+			Timestamp:     t5.Format(time.RFC3339Nano),
+			ContentLength: len(msg5),
+			Model:         model,
+			TokenUsage:    tokenUsage(3),
+		},
+	}
+}
+
+// createRecentEditsFixture seeds one session that carries a real
+// Edit tool call with FilePath set. The feed at GET /api/v1/recent-edits
+// filters on category IN ('Edit','Write') AND file_path IS NOT NULL, so
+// FilePath must be set directly on the ToolCall — InputJSON alone does
+// not propagate to the file_path column.
+func createRecentEditsFixture(
+	database *db.DB, start time.Time,
+) error {
+	const (
+		sessionID = "test-session-recent-edits"
+		project   = "project-edits"
+		model     = "claude-sonnet-4-20250514"
+		editPath  = "/src/server/handler.go"
+	)
+
+	endedAt := start.Add(5 * time.Minute)
+	firstMsg := "Add request logging to the HTTP handler."
+
+	sess := db.Session{
+		ID:               sessionID,
+		Project:          project,
+		Machine:          "test-machine",
+		Agent:            "claude",
+		StartedAt:        new(start.Format(time.RFC3339Nano)),
+		EndedAt:          new(endedAt.Format(time.RFC3339Nano)),
+		MessageCount:     3,
+		UserMessageCount: 1,
+		FirstMessage:     new(firstMsg),
+	}
+	if err := database.UpsertSession(sess); err != nil {
+		return fmt.Errorf("upserting recent-edits session: %w", err)
+	}
+
+	msgs := []db.Message{
+		{
+			SessionID:     sessionID,
+			Ordinal:       0,
+			Role:          "user",
+			Content:       firstMsg,
+			Timestamp:     start.Format(time.RFC3339Nano),
+			ContentLength: len(firstMsg),
+		},
+		{
+			SessionID:  sessionID,
+			Ordinal:    1,
+			Role:       "assistant",
+			HasToolUse: true,
+			Content:    "[Edit /src/server/handler.go]",
+			Timestamp: start.Add(1 * time.Minute).
+				Format(time.RFC3339Nano),
+			ContentLength: 29,
+			Model:         model,
+			TokenUsage: json.RawMessage(
+				`{"input_tokens":800,` +
+					`"output_tokens":320,` +
+					`"cache_creation_input_tokens":80,` +
+					`"cache_read_input_tokens":1500}`,
+			),
+			ToolCalls: []db.ToolCall{
+				{
+					ToolName:  "Edit",
+					Category:  "Edit",
+					ToolUseID: "tu_edit_handler",
+					// FilePath must be set directly; InputJSON
+					// alone is not propagated to the DB column.
+					FilePath: editPath,
+					InputJSON: `{"file_path":"` + editPath + `",` +
+						`"old_string":"func handler(",` +
+						`"new_string":"func handler(// + logging\n"}`,
+					ResultContentLength: 0,
+				},
+			},
+		},
+		{
+			SessionID: sessionID,
+			Ordinal:   2,
+			Role:      "user",
+			Content:   "[tool_result]",
+			Timestamp: start.Add(2 * time.Minute).
+				Format(time.RFC3339Nano),
+			ContentLength: 13,
+		},
+	}
+	if err := database.InsertMessages(msgs); err != nil {
+		return fmt.Errorf(
+			"inserting recent-edits messages: %w", err,
+		)
+	}
+	fmt.Printf(
+		"  %s: %d messages (recent-edits fixture)\n",
+		sessionID, len(msgs),
+	)
+	return nil
 }

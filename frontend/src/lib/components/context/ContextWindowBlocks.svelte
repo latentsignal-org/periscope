@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Card, EmptyState } from "@kenn-io/kit-ui";
   import type {
     ContextCapacity,
     ContextCompositionItem,
@@ -52,7 +53,7 @@
   ];
 
   function turnColor(index: number): string {
-    return TURN_COLORS[index % TURN_COLORS.length];
+    return TURN_COLORS[index % TURN_COLORS.length] ?? TURN_COLORS[0]!;
   }
 
   function turnLabel(turn: ContextTimelineTurn): string {
@@ -131,16 +132,16 @@
       .map((value, index) => ({
         index,
         remainder: value - Math.floor(value),
-        weight: safeValues[index],
+        weight: safeValues[index] ?? 0,
       }))
       .sort((a, b) => {
         if (b.remainder !== a.remainder) return b.remainder - a.remainder;
-        return b.weight - a.weight;
+        return (b.weight ?? 0) - (a.weight ?? 0);
       });
 
     for (const item of order) {
       if (remaining <= 0) break;
-      base[item.index] += 1;
+      base[item.index] = (base[item.index] ?? 0) + 1;
       remaining -= 1;
     }
 
@@ -178,7 +179,7 @@
     parts.push(Math.max(0, capacity.max_tokens - cappedTokensInUse));
 
     const blocks = allocateBlocks(parts, TOTAL_BLOCKS);
-    const turnSegments =
+    const turnSegments: Segment[] =
       visibleTurns.length > 0
         ? visibleTurns.map((turn, index) => ({
             key: `turn-${turn.turn}`,
@@ -258,7 +259,7 @@
       const slice = {
         ...item,
         label: categoryLabel(item.category),
-        color: CATEGORY_COLORS[item.category] ?? CATEGORY_COLORS.other,
+        color: CATEGORY_COLORS[item.category] ?? CATEGORY_COLORS.other ?? "var(--text-muted)",
         path: describeArc(72, 72, 56, startAngle, endAngle),
       };
       startAngle = endAngle;
@@ -267,7 +268,7 @@
   });
 </script>
 
-<section class="panel">
+<Card level="default" padding="none" class="panel">
   <div class="panel-header">
     <div class="header-main">
       <div class="eyebrow">Context Window</div>
@@ -276,9 +277,10 @@
   </div>
 
   {#if unknownCapacity}
-    <div class="empty-state">
-      This session does not have a known model context window, so the block map cannot be rendered.
-    </div>
+    <EmptyState
+      title="Context window unknown"
+      description="This session does not have a known model context window, so the block map cannot be rendered."
+    />
   {:else}
     <div class="viz-layout">
       <ContextWindowMapPane
@@ -301,13 +303,10 @@
       />
     </div>
   {/if}
-</section>
+</Card>
 
 <style>
-  .panel {
-    border: 1px solid var(--border-muted);
-    background: var(--bg-surface);
-    border-radius: var(--radius-md);
+  :global(.panel) {
     padding: 12px;
     display: grid;
     gap: 12px;
@@ -343,16 +342,6 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 16px;
     align-items: start;
-  }
-
-  .empty-state {
-    border: 1px dashed var(--border-muted);
-    background: var(--bg-inset);
-    border-radius: var(--radius-sm);
-    padding: 16px;
-    color: var(--text-secondary);
-    font-size: 12px;
-    line-height: 1.4;
   }
 
   @media (max-width: 900px) {

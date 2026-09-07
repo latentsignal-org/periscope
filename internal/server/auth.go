@@ -24,10 +24,22 @@ func isRemoteAuth(r *http.Request) bool {
 	return v
 }
 
-// isLocalhostRequest returns true when the request originates from
-// a loopback address (127.0.0.0/8, ::1). It checks RemoteAddr,
-// which is set by net/http to the client's IP.
+// isLocalhostRequest returns true only for a request that arrived as a
+// direct loopback connection (127.0.0.0/8, ::1) and was not relayed by a
+// reverse proxy. Callers use it to gate exposure of secrets (the auth token,
+// unredacted search snippets) to "local only" clients.
+//
+// RemoteAddr alone is insufficient: a managed Caddy proxy reverse-proxies to
+// the loopback backend, so every proxied request — including ones from remote
+// LAN clients allowed through the proxy — would carry a loopback RemoteAddr.
+// Proxies add X-Forwarded-For/X-Real-IP/Forwarded, so any of those headers
+// means the connection is not a direct local one and must not be trusted. A
+// genuinely local attacker spoofing these headers only denies themselves, so
+// the check fails closed.
 func isLocalhostRequest(r *http.Request) bool {
+	if hasForwardingHeader(r) {
+		return false
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
@@ -39,13 +51,32 @@ func isLocalhostRequest(r *http.Request) bool {
 	return ip.IsLoopback()
 }
 
-// authMiddleware enforces Bearer token authentication when
-// require_auth is enabled. Non-API routes (static assets) are
-// never gated.
+// hasForwardingHeader reports whether the request carries any header a reverse
+// proxy adds when relaying a client, which indicates the connection reached
+// the server through a proxy rather than directly.
+func hasForwardingHeader(r *http.Request) bool {
+	return r.Header.Get("X-Forwarded-For") != "" ||
+		r.Header.Get("X-Real-IP") != "" ||
+		r.Header.Get("Forwarded") != ""
+}
+
+// protectedPath reports whether a path is subject to bearer auth and
+// Host validation: every /api/ route, plus /debug/pprof/ when the
+// profiling handlers are mounted. With pprof disabled the path is
+// SPA fallback and stays ungated like other static assets.
+func (s *Server) protectedPath(path string) bool {
+	return strings.HasPrefix(path, "/api/") ||
+		(s.pprofEnabled && strings.HasPrefix(path, "/debug/pprof/"))
+}
+
+// authMiddleware enforces Bearer token authentication for protected
+// routes (/api/ including /api/ping, and /debug/pprof/ when enabled)
+// when require_auth is on. Non-protected routes such as static
+// assets are never gated.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Only gate /api/ routes — static assets are always served.
-		if !strings.HasPrefix(r.URL.Path, "/api/") {
+		// Static assets are always served.
+		if !s.protectedPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -71,13 +102,24 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// When auth is not required, skip token checks entirely.
-		if !authRequired {
+		remoteSyncAuth := isRemoteSyncPath(r.URL.Path)
+
+		// When auth is not required, skip token checks entirely
+		// except for machine-to-machine remote sync archive APIs,
+		// which must still set ctxKeyRemoteAuth before host/CORS
+		// middleware runs.
+		if !authRequired && !remoteSyncAuth {
 			next.ServeHTTP(w, r)
 			return
 		}
 		// Auth required but no token configured — fail closed.
 		if token == "" {
+			if remoteSyncAuth {
+				http.Error(w,
+					"server misconfiguration: auth token required for remote sync",
+					http.StatusInternalServerError)
+				return
+			}
 			http.Error(w,
 				"server misconfiguration: auth required but no token set",
 				http.StatusInternalServerError)
@@ -119,6 +161,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 // browser EventSource cannot set headers.
 func isSSEPath(path string) bool {
 	return strings.HasSuffix(path, "/watch") || path == "/api/v1/events"
+}
+
+func isRemoteSyncPath(path string) bool {
+	return strings.HasPrefix(path, "/api/v1/remote-sync/")
 }
 
 // setCORSOnAuthError adds CORS headers to 401 responses so

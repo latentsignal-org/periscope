@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 
 	"github.com/tidwall/gjson"
 )
@@ -34,29 +35,72 @@ type lineReader struct {
 	bytesRead int64 // total bytes consumed (from countingReader)
 }
 
+const maxPooledLineBufferSize = 256 << 10
+
+var lineReaderPool = sync.Pool{
+	New: func() any {
+		cr := new(countingReader)
+		return &lineReader{
+			r:  bufio.NewReaderSize(cr, initialScanBufSize),
+			cr: cr,
+		}
+	},
+}
+
 func newLineReader(r io.Reader, maxLen int) *lineReader {
-	cr := &countingReader{r: r}
-	return &lineReader{
-		r:      bufio.NewReaderSize(cr, initialScanBufSize),
-		cr:     cr,
-		maxLen: maxLen,
-		buf:    make([]byte, 0, initialScanBufSize),
+	lr := lineReaderPool.Get().(*lineReader)
+	lr.cr.r = r
+	lr.cr.n = 0
+	lr.r.Reset(lr.cr)
+	lr.maxLen = maxLen
+	lr.buf = lr.buf[:0]
+	lr.err = nil
+	lr.bytesRead = 0
+	return lr
+}
+
+func releaseLineReader(lr *lineReader) {
+	// Do not let an exceptional long line pin a multi-megabyte backing
+	// array. sync.Pool may discard the remaining workspace at any GC.
+	if cap(lr.buf) > maxPooledLineBufferSize {
+		lr.buf = nil
+	} else {
+		lr.buf = lr.buf[:0]
 	}
+	lr.r.Reset(nil)
+	lr.cr.r = nil
+	lr.cr.n = 0
+	lr.maxLen = 0
+	lr.err = nil
+	lr.bytesRead = 0
+	lineReaderPool.Put(lr)
 }
 
 // next returns the next line (without trailing newline) and true,
 // or ("", false) at EOF or read error. After the loop, call Err()
 // to distinguish EOF from I/O failure.
 func (lr *lineReader) next() (string, bool) {
+	line, ok := lr.nextBytes()
+	if !ok {
+		return "", false
+	}
+	return string(line), true
+}
+
+// nextBytes returns the next line as storage borrowed from the reader. The
+// bytes remain valid only until the next call. Callers that retain a line must
+// copy it; callers that only classify or discard it can avoid allocating a
+// string proportional to the source record.
+func (lr *lineReader) nextBytes() ([]byte, bool) {
 	for {
-		line, err := lr.readLine()
+		line, err := lr.readLineBytes()
 		if err != nil {
 			if err != io.EOF {
 				lr.err = err
 			}
-			return "", false
+			return nil, false
 		}
-		if line != "" {
+		if len(line) != 0 {
 			return line, true
 		}
 		// Empty line or skipped oversized line — continue.
@@ -79,7 +123,7 @@ func (lr *lineReader) updateBytesRead() {
 	}
 }
 
-func (lr *lineReader) readLine() (string, error) {
+func (lr *lineReader) readLineBytes() ([]byte, error) {
 	lr.buf = lr.buf[:0]
 	oversized := false
 
@@ -90,15 +134,26 @@ func (lr *lineReader) readLine() (string, error) {
 				lr.updateBytesRead()
 				break
 			}
-			return "", err
+			return nil, err
 		}
 
 		if oversized {
 			if !isPrefix {
 				lr.updateBytesRead()
-				return "", nil // done skipping
+				return nil, nil // done skipping
 			}
 			continue
+		}
+
+		// ReadLine's common case is a complete line backed by the
+		// bufio.Reader buffer. Convert it directly instead of allocating
+		// a second initialScanBufSize scratch buffer for every file.
+		if len(lr.buf) == 0 && !isPrefix {
+			lr.updateBytesRead()
+			if len(chunk) > lr.maxLen {
+				return nil, nil
+			}
+			return chunk, nil
 		}
 
 		lr.buf = append(lr.buf, chunk...)
@@ -108,7 +163,7 @@ func (lr *lineReader) readLine() (string, error) {
 			lr.buf = lr.buf[:0]
 			if !isPrefix {
 				lr.updateBytesRead()
-				return "", nil
+				return nil, nil
 			}
 			continue
 		}
@@ -119,7 +174,7 @@ func (lr *lineReader) readLine() (string, error) {
 		}
 	}
 
-	return string(lr.buf), nil
+	return lr.buf, nil
 }
 
 // readJSONLFrom opens a JSONL file, seeks to offset, and
@@ -144,6 +199,7 @@ func readJSONLFrom(
 	}
 
 	lr := newLineReader(f, maxLineSize)
+	defer releaseLineReader(lr)
 	for {
 		line, ok := lr.next()
 		if !ok {

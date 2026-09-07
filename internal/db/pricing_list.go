@@ -10,11 +10,17 @@ import (
 func (db *DB) ListModelPricing(
 	ctx context.Context,
 ) ([]ModelPricing, error) {
+	return db.listModelPricing(ctx)
+}
+
+func (db *DB) listModelPricing(
+	ctx context.Context,
+) ([]ModelPricing, error) {
 	rows, err := db.getReader().QueryContext(
 		ctx,
-		`SELECT model_pattern, input_per_mtok,
-			output_per_mtok, cache_creation_per_mtok,
-			cache_read_per_mtok, updated_at
+		`SELECT model_pattern, input_microdollars_per_mtok,
+			output_microdollars_per_mtok, cache_creation_microdollars_per_mtok,
+			cache_read_microdollars_per_mtok, updated_at
 		 FROM model_pricing
 		 ORDER BY model_pattern`,
 	)

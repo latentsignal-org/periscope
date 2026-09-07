@@ -6,34 +6,13 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/wesm/agentsview/internal/config"
-	"github.com/wesm/agentsview/internal/db"
-)
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-func TestValidateSort(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		sortParam string
-		wantSort  string
-	}{
-		{"recency accepted", "recency", "recency"},
-		{"relevance accepted", "relevance", "relevance"},
-		{"empty defaults to relevance", "", "relevance"},
-		{"invalid defaults to relevance", "injection", "relevance"},
-		{"SQL injection attempt defaults to relevance", "'; DROP TABLE sessions; --", "relevance"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := validateSort(tt.sortParam)
-			if got != tt.wantSort {
-				t.Errorf("validateSort(%q) = %q, want %q",
-					tt.sortParam, got, tt.wantSort)
-			}
-		})
-	}
-}
+	"go.kenn.io/agentsview/internal/config"
+	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/service"
+)
 
 func TestPrepareFTSQuery(t *testing.T) {
 	t.Parallel()
@@ -42,20 +21,22 @@ func TestPrepareFTSQuery(t *testing.T) {
 		raw  string
 		want string
 	}{
-		{name: "single word unchanged", raw: "login", want: "login"},
-		{name: "multi-word gets quoted", raw: "fix bug", want: `"fix bug"`},
-		{name: "already quoted unchanged", raw: `"fix bug"`, want: `"fix bug"`},
+		{name: "single word quoted", raw: "login", want: `"login"`},
+		{name: "multi-word AND of quoted terms", raw: "fix bug", want: `"fix" "bug"`},
+		{name: "three words AND", raw: "a b c", want: `"a" "b" "c"`},
+		{name: "single hyphen token quoted literal", raw: "error-401", want: `"error-401"`},
+		{name: "single colon token quoted literal", raw: "status:500", want: `"status:500"`},
+		{name: "embedded quote doubled", raw: `say"hi`, want: `"say""hi"`},
+		{name: "exact phrase via leading quote passthrough", raw: `"fix bug"`, want: `"fix bug"`},
 		{name: "empty string unchanged", raw: "", want: ""},
-		{name: "three words quoted", raw: "a b c", want: `"a b c"`},
+		{name: "whitespace only trimmed to empty", raw: "   ", want: ""},
+		{name: "leading and trailing space trimmed", raw: "  login  ", want: `"login"`},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := prepareFTSQuery(tt.raw)
-			if got != tt.want {
-				t.Errorf("prepareFTSQuery(%q) = %q, want %q", tt.raw, got, tt.want)
-			}
+			assert.Equal(t, tt.want, prepareFTSQuery(tt.raw))
 		})
 	}
 }
@@ -91,23 +72,20 @@ func TestHandleSearchSortParam(t *testing.T) {
 			t.Parallel()
 			spy := &searchSpy{}
 			srv := &Server{
-				cfg: config.Config{Host: "127.0.0.1"},
-				db:  spy,
+				cfg:      config.Config{Host: "127.0.0.1"},
+				db:       spy,
+				sessions: service.NewReadOnlyBackend(spy),
+				mux:      http.NewServeMux(),
 			}
+			srv.routes()
 			req := httptest.NewRequest(
 				http.MethodGet,
 				"/api/v1/search?"+tt.query, nil,
 			)
 			w := httptest.NewRecorder()
-			srv.handleSearch(w, req)
-			if w.Code != http.StatusOK {
-				t.Fatalf("status = %d, want 200: %s",
-					w.Code, w.Body.String())
-			}
-			if spy.filter.Sort != tt.wantSort {
-				t.Errorf("SearchFilter.Sort = %q, want %q",
-					spy.filter.Sort, tt.wantSort)
-			}
+			srv.mux.ServeHTTP(w, req)
+			require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+			assert.Equal(t, tt.wantSort, spy.filter.Sort)
 		})
 	}
 }

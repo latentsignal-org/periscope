@@ -3,7 +3,8 @@ tmp_dir = "tmp"
 
 [build]
 cmd = "./scripts/dev-backend-build.sh"
-bin = "./tmp/agentsview"
+bin = "./tmp/periscope"
+args_bin = ["serve"]
 delay = 500
 exclude_dir = ["frontend", "internal/web/dist", "tmp", "vendor", ".git", "dist", "desktop", "jetbrains-plugin", "data", "sessions", "html", ".superpowers"]
 include_ext = ["go", "tpl", "tmpl", "html", "sql"]

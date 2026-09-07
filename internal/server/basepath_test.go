@@ -3,8 +3,10 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBasePath_StripsPrefixForAPI(t *testing.T) {
@@ -19,11 +21,12 @@ func TestBasePath_StripsPrefixForAPI(t *testing.T) {
 	// 200 or 503 (timeout) both confirm the route was matched
 	// and prefix was stripped. 404 or 403 would indicate a
 	// base-path routing failure.
-	if w.Code == http.StatusNotFound ||
-		w.Code == http.StatusForbidden {
-		t.Fatalf("GET /app/api/v1/sessions = %d, want route match; body: %s",
-			w.Code, w.Body.String())
-	}
+	require.NotEqual(t, http.StatusNotFound, w.Code,
+		"GET /app/api/v1/sessions = %d, want route match; body: %s",
+		w.Code, w.Body.String())
+	require.NotEqual(t, http.StatusForbidden, w.Code,
+		"GET /app/api/v1/sessions = %d, want route match; body: %s",
+		w.Code, w.Body.String())
 }
 
 func TestBasePath_RedirectsBarePrefix(t *testing.T) {
@@ -33,13 +36,8 @@ func TestBasePath_RedirectsBarePrefix(t *testing.T) {
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusMovedPermanently {
-		t.Fatalf("GET /app = %d, want 301", w.Code)
-	}
-	loc := w.Header().Get("Location")
-	if loc != "/app/" {
-		t.Fatalf("Location = %q, want /app/", loc)
-	}
+	require.Equal(t, http.StatusMovedPermanently, w.Code)
+	require.Equal(t, "/app/", w.Header().Get("Location"))
 }
 
 func TestBasePath_InjectsBaseHrefIntoHTML(t *testing.T) {
@@ -49,13 +47,9 @@ func TestBasePath_InjectsBaseHrefIntoHTML(t *testing.T) {
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("GET /viewer/ = %d, want 200", w.Code)
-	}
-	body := w.Body.String()
-	if !strings.Contains(body, `<base href="/viewer/">`) {
-		t.Error("missing <base href> tag in response")
-	}
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `<base href="/viewer/">`,
+		"missing <base href> tag in response")
 }
 
 func TestBasePath_RewritesAssetPaths(t *testing.T) {
@@ -68,20 +62,16 @@ func TestBasePath_RewritesAssetPaths(t *testing.T) {
 	body := w.Body.String()
 
 	// Asset paths should be prefixed.
-	if strings.Contains(body, `src="/assets/`) {
-		t.Error("found unprefixed src=\"/assets/ in HTML")
-	}
-	if strings.Contains(body, `href="/assets/`) {
-		t.Error("found unprefixed href=\"/assets/ in HTML")
-	}
-	if strings.Contains(body, `href="/favicon`) {
-		t.Error("found unprefixed href=\"/favicon in HTML")
-	}
+	assert.NotContains(t, body, `src="/assets/`,
+		"found unprefixed src=\"/assets/ in HTML")
+	assert.NotContains(t, body, `href="/assets/`,
+		"found unprefixed href=\"/assets/ in HTML")
+	assert.NotContains(t, body, `href="/favicon`,
+		"found unprefixed href=\"/favicon in HTML")
 
 	// External URLs must NOT be prefixed.
-	if strings.Contains(body, `href="/viewer/https://`) {
-		t.Error("external URL was incorrectly prefixed")
-	}
+	assert.NotContains(t, body, `href="/viewer/https://`,
+		"external URL was incorrectly prefixed")
 }
 
 func TestBasePath_SPAFallbackServesIndex(t *testing.T) {
@@ -93,12 +83,9 @@ func TestBasePath_SPAFallbackServesIndex(t *testing.T) {
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("GET /app/some/route = %d, want 200", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), `<base href="/app/">`) {
-		t.Error("SPA fallback missing <base href> tag")
-	}
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `<base href="/app/">`,
+		"SPA fallback missing <base href> tag")
 }
 
 func TestBasePath_RejectsSiblingPath(t *testing.T) {
@@ -111,18 +98,12 @@ func TestBasePath_RejectsSiblingPath(t *testing.T) {
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusNotFound {
-		t.Fatalf(
-			"GET /appfoo/bar = %d, want 404", w.Code,
-		)
-	}
+	require.Equal(t, http.StatusNotFound, w.Code)
 }
 
 func TestBasePath_TrailingSlashNormalized(t *testing.T) {
 	s := testServer(t, 0, WithBasePath("/app/"))
 
 	// WithBasePath trims trailing slash.
-	if s.basePath != "/app" {
-		t.Fatalf("basePath = %q, want /app", s.basePath)
-	}
+	require.Equal(t, "/app", s.basePath)
 }

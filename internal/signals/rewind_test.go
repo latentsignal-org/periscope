@@ -82,8 +82,8 @@ func TestDetectRewindCandidate_LargeLowValueDelta(t *testing.T) {
 			Turn: 4, DeltaTokens: 15000, CumulativeTokens: 18000,
 			DominantCategory: "search_results",
 			Categories: map[string]int{
-				"search_results": 12000,
-				"tool_outputs":   2000,
+				"search_results":     12000,
+				"tool_outputs":       2000,
 				"assistant_messages": 1000,
 			},
 			HasSuccessfulEdit: false,

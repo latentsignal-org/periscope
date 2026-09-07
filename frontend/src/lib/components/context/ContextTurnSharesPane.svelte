@@ -39,24 +39,20 @@
     >
       <circle cx="72" cy="72" r="56" fill="var(--bg-inset)" />
       {#each segments as segment (segment.key)}
-        <path
-          d={segment.path}
-          fill={segment.color}
-          class="pie-slice"
-          tabindex={segment.isFree ? undefined : 0}
-          role={segment.isFree ? undefined : "button"}
-          aria-label={segment.turn
-            ? `${segment.label}. Jump to turn ${segment.turn}`
-            : segment.label}
-          onclick={() => onJumpToTurn(segment.turn)}
-          onkeydown={(event) => {
-            if (segment.isFree) return;
-            if (event.key === "Enter" || event.key === " ") {
+        {#if segment.isFree}
+          <path d={segment.path} fill={segment.color} class="pie-slice" />
+        {:else}
+          <a
+            href={`#turn-${segment.turn}`}
+            aria-label={`${segment.label}. Jump to turn ${segment.turn}`}
+            onclick={(event) => {
               event.preventDefault();
               onJumpToTurn(segment.turn);
-            }
-          }}
-        />
+            }}
+          >
+            <path d={segment.path} fill={segment.color} class="pie-slice" />
+          </a>
+        {/if}
       {/each}
       <circle cx="72" cy="72" r="28" fill="var(--bg-surface)" />
       <text x="72" y="68" text-anchor="middle" class="center-label">Used</text>
@@ -100,7 +96,7 @@
     border-radius: var(--radius-sm);
     padding: 12px;
     display: grid;
-    gap: 10px;
+    gap: var(--space-5);
     align-content: start;
     min-height: 100%;
   }
@@ -124,7 +120,7 @@
   .layout {
     display: grid;
     grid-template-columns: max-content minmax(140px, 1fr);
-    gap: 18px;
+    gap: var(--space-6);
     align-content: start;
     align-items: center;
   }
@@ -172,7 +168,7 @@
   .legend-row {
     display: flex;
     justify-content: space-between;
-    gap: 10px;
+    gap: var(--space-5);
     align-items: center;
     color: var(--text-muted);
     font-size: 11px;

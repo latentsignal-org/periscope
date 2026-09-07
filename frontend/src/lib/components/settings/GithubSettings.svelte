@@ -1,7 +1,9 @@
 <script lang="ts">
-  import SettingsSection from "./SettingsSection.svelte";
+  import { TextInput } from "@kenn-io/kit-ui";
+  import { m } from "../../i18n/index.js";
   import { settings } from "../../stores/settings.svelte.js";
-  import { setGithubConfig } from "../../api/client.js";
+  import { ConfigService } from "../../api/generated/index";
+  import { configureGeneratedClient } from "../../api/runtime.js";
 
   let tokenInput: string = $state("");
   let saving: boolean = $state(false);
@@ -14,32 +16,33 @@
     error = null;
     success = null;
     try {
-      await setGithubConfig(tokenInput.trim());
+      configureGeneratedClient();
+      await ConfigService.postApiV1ConfigGithub({
+        requestBody: { token: tokenInput.trim() },
+      });
       tokenInput = "";
-      success = "GitHub token saved.";
+      success = m.settings_github_token_saved();
       await settings.load();
     } catch (e) {
-      error = e instanceof Error ? e.message : "Failed to save token";
+      error = e instanceof Error ? e.message : m.settings_github_save_failed();
     } finally {
       saving = false;
     }
   }
 </script>
 
-<SettingsSection
-  title="GitHub Integration"
-  description="Token used for publishing sessions as GitHub Gists."
->
+<div class="github-settings">
   <div class="status-row">
-    <span class="status-label">Status</span>
+    <span class="status-label">{m.settings_github_status()}</span>
     <span class="status-value" class:configured={settings.githubConfigured}>
-      {settings.githubConfigured ? "Configured" : "Not configured"}
+      {settings.githubConfigured ? m.settings_github_configured() : m.settings_github_not_configured()}
     </span>
   </div>
 
   <div class="token-row">
-    <input
+    <TextInput
       class="setting-input"
+      size="md"
       type="password"
       placeholder="ghp_..."
       bind:value={tokenInput}
@@ -49,7 +52,7 @@
       disabled={saving || !tokenInput.trim()}
       onclick={handleSave}
     >
-      {saving ? "Saving..." : "Save token"}
+      {saving ? m.settings_github_saving() : m.settings_github_save_token()}
     </button>
   </div>
 
@@ -59,9 +62,15 @@
   {#if success}
     <p class="msg success">{success}</p>
   {/if}
-</SettingsSection>
+</div>
 
 <style>
+  .github-settings {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-5);
+  }
+
   .status-row {
     display: flex;
     align-items: center;
@@ -88,22 +97,9 @@
     gap: 8px;
   }
 
-  .setting-input {
+  :global(.setting-input.kit-text-input) {
     flex: 1;
-    height: 30px;
-    padding: 0 10px;
-    border-radius: var(--radius-sm);
-    font-size: 12px;
     font-family: var(--font-mono, monospace);
-    color: var(--text-primary);
-    background: var(--bg-inset);
-    border: 1px solid var(--border-muted);
-    transition: border-color 0.15s;
-  }
-
-  .setting-input:focus {
-    outline: none;
-    border-color: var(--accent-blue);
   }
 
   .save-btn {
@@ -112,7 +108,7 @@
     border-radius: var(--radius-sm);
     font-size: 12px;
     font-weight: 500;
-    color: white;
+    color: var(--accent-blue-foreground);
     background: var(--accent-blue);
     border: none;
     cursor: pointer;

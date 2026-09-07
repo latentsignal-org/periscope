@@ -1,12 +1,6 @@
 package server
 
-import (
-	"encoding/json"
-	"log"
-	"net/http"
-
-	"github.com/wesm/agentsview/internal/parser"
-)
+import "go.kenn.io/agentsview/internal/config"
 
 // settingsResponse is the JSON shape returned by GET /api/v1/settings.
 type settingsResponse struct {
@@ -15,8 +9,10 @@ type settingsResponse struct {
 	GithubConfigured bool                `json:"github_configured"`
 	Host             string              `json:"host"`
 	Port             int                 `json:"port"`
+	ChartPalette     config.ChartPalette `json:"chart_palette"`
 	AuthToken        string              `json:"auth_token,omitempty"`
 	RequireAuth      bool                `json:"require_auth"`
+	ReadOnly         bool                `json:"read_only"`
 }
 
 // terminalResponse mirrors config.TerminalConfig for JSON output.
@@ -26,113 +22,11 @@ type terminalResponse struct {
 	CustomArgs string `json:"custom_args,omitempty"`
 }
 
-func (s *Server) handleGetSettings(
-	w http.ResponseWriter, r *http.Request,
-) {
-	// Hold the read lock for the entire duration of building the
-	// response to prevent a data race with concurrent writes.
-	s.mu.RLock()
-	dirs := make(map[string][]string)
-	for _, def := range parser.Registry {
-		if !def.FileBased && def.EnvVar == "" {
-			continue
-		}
-		d := s.cfg.AgentDirs[def.Type]
-		if d == nil {
-			d = []string{}
-		}
-		dirs[string(def.Type)] = d
-	}
-
-	tc := s.cfg.Terminal
-	if tc.Mode == "" {
-		tc.Mode = "auto"
-	}
-
-	resp := settingsResponse{
-		AgentDirs: dirs,
-		Terminal: terminalResponse{
-			Mode:       tc.Mode,
-			CustomBin:  tc.CustomBin,
-			CustomArgs: tc.CustomArgs,
-		},
-		GithubConfigured: s.cfg.GithubToken != "",
-		Host:             s.cfg.Host,
-		Port:             s.cfg.Port,
-		RequireAuth:      s.cfg.RequireAuth,
-	}
-
-	// Only expose auth_token to localhost requests, never to remote clients.
-	if isLocalhostRequest(r) {
-		resp.AuthToken = s.cfg.AuthToken
-	}
-	s.mu.RUnlock()
-
-	writeJSON(w, http.StatusOK, resp)
-}
-
 // settingsUpdateRequest is the JSON body for PUT /api/v1/settings.
 // All fields are optional; only non-nil fields are applied.
 type settingsUpdateRequest struct {
-	Terminal    *terminalResponse `json:"terminal,omitempty"`
-	AuthToken   *string           `json:"auth_token,omitempty"`
-	RequireAuth *bool             `json:"require_auth,omitempty"`
-}
-
-func (s *Server) handleUpdateSettings(
-	w http.ResponseWriter, r *http.Request,
-) {
-	if s.db.ReadOnly() {
-		writeError(w, http.StatusNotImplemented,
-			"settings cannot be modified in read-only mode")
-		return
-	}
-
-	var req settingsUpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
-		return
-	}
-
-	patch := make(map[string]any)
-
-	// Terminal config is deliberately excluded from the generic
-	// settings endpoint. It must be updated through the dedicated
-	// POST /api/v1/config/terminal endpoint which validates
-	// custom_bin and custom_args to prevent command injection.
-	if req.Terminal != nil {
-		writeError(w, http.StatusBadRequest,
-			"terminal config must be updated via POST /api/v1/config/terminal")
-		return
-	}
-
-	if req.AuthToken != nil {
-		patch["auth_token"] = *req.AuthToken
-	}
-
-	if req.RequireAuth != nil {
-		patch["require_auth"] = *req.RequireAuth
-	}
-
-	if len(patch) == 0 {
-		// Nothing to update; return current settings.
-		s.handleGetSettings(w, r)
-		return
-	}
-
-	s.mu.Lock()
-	err := s.cfg.SaveSettings(patch)
-	// Auto-generate auth token when require_auth is enabled.
-	if err == nil && s.cfg.RequireAuth {
-		err = s.cfg.EnsureAuthToken()
-	}
-	s.mu.Unlock()
-	if err != nil {
-		log.Printf("save settings: %v", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-
-	// Return the full updated settings.
-	s.handleGetSettings(w, r)
+	Terminal     *terminalResponse `json:"terminal,omitempty"`
+	AuthToken    *string           `json:"auth_token,omitempty"`
+	RequireAuth  *bool             `json:"require_auth,omitempty"`
+	ChartPalette *string           `json:"chart_palette,omitempty"`
 }

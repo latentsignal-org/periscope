@@ -21,25 +21,16 @@ import (
 )
 
 const (
-	githubAPIURL     = "https://api.github.com/repos/wesm/agentsview/releases/latest"
-	cacheFileName    = "update_check.json"
-	cacheDuration    = 1 * time.Hour
-	devCacheDuration = 15 * time.Minute
+	// githubLatestReleaseURL is the HTML endpoint that 302-redirects to
+	// /releases/tag/<tag>. Unlike api.github.com it is not rate-limited
+	// at 60 req/hr per IP for unauthenticated callers.
+	githubLatestReleaseURL    = "https://github.com/diazMelgarejo/periscope/releases/latest"
+	githubReleaseDownloadBase = "https://github.com/diazMelgarejo/periscope/releases/download"
+	updateUserAgent           = "periscope-update"
+	cacheFileName             = "update_check.json"
+	cacheDuration             = 1 * time.Hour
+	devCacheDuration          = 15 * time.Minute
 )
-
-// Release represents a GitHub release.
-type Release struct {
-	TagName string  `json:"tag_name"`
-	Body    string  `json:"body"`
-	Assets  []Asset `json:"assets"`
-}
-
-// Asset represents a release asset.
-type Asset struct {
-	Name               string `json:"name"`
-	Size               int64  `json:"size"`
-	BrowserDownloadURL string `json:"browser_download_url"`
-}
 
 // UpdateInfo contains information about an available update.
 type UpdateInfo struct {
@@ -59,22 +50,6 @@ type UpdateInfo struct {
 // and lacks the download URL/checksum needed for an install.
 func (u *UpdateInfo) NeedsRefetch() bool {
 	return u.cacheOnly
-}
-
-// findAssets locates the platform binary and checksums file.
-func findAssets(
-	assets []Asset, assetName string,
-) (asset *Asset, checksumsAsset *Asset) {
-	for i := range assets {
-		a := &assets[i]
-		if a.Name == assetName {
-			asset = a
-		}
-		if a.Name == "SHA256SUMS" || a.Name == "checksums.txt" {
-			checksumsAsset = a
-		}
-	}
-	return asset, checksumsAsset
 }
 
 type cachedCheck struct {
@@ -100,14 +75,14 @@ func CheckForUpdate(
 		}
 	}
 
-	release, err := fetchLatestRelease()
+	tag, err := resolveLatestTag(githubLatestReleaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("check for updates: %w", err)
 	}
 
-	saveCache(release.TagName, cacheDir)
+	saveCache(tag, cacheDir)
 
-	latestVersion := strings.TrimPrefix(release.TagName, "v")
+	latestVersion := strings.TrimPrefix(tag, "v")
 
 	if !isDevBuild && !isNewer(latestVersion, cleanVersion) {
 		return nil, nil
@@ -118,33 +93,35 @@ func CheckForUpdate(
 		ext = ".zip"
 	}
 	assetName := fmt.Sprintf(
-		"agentsview_%s_%s_%s%s",
+		"periscope_%s_%s_%s%s",
 		latestVersion, runtime.GOOS, runtime.GOARCH, ext,
 	)
-	asset, checksumsAsset := findAssets(release.Assets, assetName)
-	if asset == nil {
+	downloadURL := fmt.Sprintf(
+		"%s/%s/%s", githubReleaseDownloadBase, tag, assetName,
+	)
+	checksumsURL := fmt.Sprintf(
+		"%s/%s/SHA256SUMS", githubReleaseDownloadBase, tag,
+	)
+
+	// HEAD the asset to confirm it exists for this platform. The previous
+	// API-based code returned "no release asset for OS/ARCH" up front; now
+	// that we construct the URL ourselves, we have to verify it resolves.
+	size, err := fetchContentLength(downloadURL)
+	if err != nil {
 		return nil, fmt.Errorf(
-			"no release asset for %s/%s",
-			runtime.GOOS, runtime.GOARCH,
+			"no release asset for %s/%s: %w",
+			runtime.GOOS, runtime.GOARCH, err,
 		)
 	}
 
-	var checksum string
-	if checksumsAsset != nil {
-		checksum, _ = fetchChecksumFromFile(
-			checksumsAsset.BrowserDownloadURL, assetName,
-		)
-	}
-	if checksum == "" {
-		checksum = extractChecksum(release.Body, assetName)
-	}
+	checksum, _ := fetchChecksumFromFile(checksumsURL, assetName)
 
 	return &UpdateInfo{
 		CurrentVersion: currentVersion,
-		LatestVersion:  release.TagName,
-		DownloadURL:    asset.BrowserDownloadURL,
-		AssetName:      asset.Name,
-		Size:           asset.Size,
+		LatestVersion:  tag,
+		DownloadURL:    downloadURL,
+		AssetName:      assetName,
+		Size:           size,
 		Checksum:       checksum,
 		IsDevBuild:     isDevBuild,
 	}, nil
@@ -163,7 +140,7 @@ func PerformUpdate(
 	}
 
 	fmt.Printf("Downloading %s...\n", info.AssetName)
-	tempDir, err := os.MkdirTemp("", "agentsview-update-*")
+	tempDir, err := os.MkdirTemp("", "periscope-update-*")
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
@@ -216,9 +193,9 @@ func installFromArchive(
 		return fmt.Errorf("resolve symlinks: %w", err)
 	}
 	binDir := filepath.Dir(currentExe)
-	binaryName := "agentsview"
+	binaryName := "periscope"
 	if runtime.GOOS == "windows" {
-		binaryName = "agentsview.exe"
+		binaryName = "periscope.exe"
 	}
 	dstPath := filepath.Join(binDir, binaryName)
 
@@ -254,7 +231,7 @@ func installFromArchiveTo(
 		)
 	}
 
-	extractDir, err := os.MkdirTemp("", "agentsview-extract-*")
+	extractDir, err := os.MkdirTemp("", "periscope-extract-*")
 	if err != nil {
 		return fmt.Errorf("create extract dir: %w", err)
 	}
@@ -270,9 +247,9 @@ func installFromArchiveTo(
 		}
 	}
 
-	binaryName := "agentsview"
+	binaryName := "periscope"
 	if runtime.GOOS == "windows" {
-		binaryName = "agentsview.exe"
+		binaryName = "periscope.exe"
 	}
 	srcPath := filepath.Join(extractDir, binaryName)
 	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
@@ -285,66 +262,154 @@ func installFromArchiveTo(
 }
 
 // installBinaryTo replaces the binary at dstPath with the one
-// at srcPath using a rename-then-copy pattern that works on
-// all platforms including Windows.
+// at srcPath. The new binary is staged in a sibling tmp file
+// with the executable mode bit set, then renamed into place.
+//
+// On Unix os.Rename atomically replaces dstPath in a single
+// syscall, so concurrent readers always see one of the two
+// binaries — never a missing or partial file. On Windows the
+// existing binary must be moved aside first because os.Rename
+// cannot replace a running executable; this leaves dstPath
+// briefly missing between the two renames.
 func installBinaryTo(srcPath, dstPath string) error {
 	backupPath := dstPath + ".old"
+	tmpPath := dstPath + ".new"
 
-	// Remove stale backup from a previous update.
+	// Clean up leftovers from a prior failed update so they
+	// don't interfere with the renames below.
 	os.Remove(backupPath)
+	os.Remove(tmpPath)
 
-	if _, err := os.Stat(dstPath); err == nil {
-		if err := os.Rename(dstPath, backupPath); err != nil {
-			return fmt.Errorf("backup: %w", err)
+	installed := false
+	defer func() {
+		if !installed {
+			os.Remove(tmpPath)
 		}
+	}()
+
+	// Stage the new binary at tmpPath with executable mode set
+	// BEFORE touching the live binary at dstPath.
+	if err := copyFile(srcPath, tmpPath); err != nil {
+		return fmt.Errorf("install: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		return fmt.Errorf("chmod: %w", err)
 	}
 
-	if err := copyFile(srcPath, dstPath); err != nil {
-		if restoreErr := os.Rename(backupPath, dstPath); restoreErr != nil {
-			return fmt.Errorf(
-				"install: %w (rollback also failed: %v)",
-				err, restoreErr,
-			)
+	movedAside := false
+	if runtime.GOOS == "windows" {
+		aside, err := movePreviousAside(dstPath, backupPath)
+		if err != nil {
+			return err
+		}
+		movedAside = aside
+	}
+
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		if movedAside {
+			if rbErr := os.Rename(backupPath, dstPath); rbErr != nil {
+				return fmt.Errorf(
+					"install: %w (rollback also failed: %v)",
+					err, rbErr,
+				)
+			}
 		}
 		return fmt.Errorf("install: %w", err)
 	}
 
-	if err := os.Chmod(dstPath, 0o755); err != nil {
-		return fmt.Errorf("chmod: %w", err)
-	}
-
+	installed = true
 	os.Remove(backupPath)
 	return nil
 }
 
-func fetchLatestRelease() (*Release, error) {
-	req, err := http.NewRequest("GET", githubAPIURL, nil)
-	if err != nil {
-		return nil, err
+// movePreviousAside renames an existing dstPath to backupPath.
+// Used on Windows where os.Rename cannot replace a running
+// executable. Returns true if dstPath was moved.
+func movePreviousAside(dstPath, backupPath string) (bool, error) {
+	if _, err := os.Stat(dstPath); err != nil {
+		return false, nil
 	}
-	req.Header.Set(
-		"Accept", "application/vnd.github.v3+json",
-	)
-	req.Header.Set("User-Agent", "agentsview-update")
+	if err := os.Rename(dstPath, backupPath); err != nil {
+		return false, fmt.Errorf("backup: %w", err)
+	}
+	return true, nil
+}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+// resolveLatestTag follows the /releases/latest 302 redirect to
+// /releases/tag/<tag> and returns the tag. Using the HTML endpoint
+// avoids api.github.com's 60-req/hr unauthenticated rate limit.
+func resolveLatestTag(url string) (string, error) {
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", updateUserAgent)
+
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 300 || resp.StatusCode >= 400 {
+		return "", fmt.Errorf(
+			"expected redirect from %s, got %s", url, resp.Status,
+		)
+	}
+
+	loc, err := resp.Location()
+	if err != nil {
+		return "", fmt.Errorf("read Location header: %w", err)
+	}
+
+	const marker = "/releases/tag/"
+	idx := strings.Index(loc.Path, marker)
+	if idx < 0 {
+		return "", fmt.Errorf(
+			"unexpected redirect target %q", loc.String(),
+		)
+	}
+	tag := loc.Path[idx+len(marker):]
+	if tag == "" {
+		return "", fmt.Errorf(
+			"empty tag in redirect target %q", loc.String(),
+		)
+	}
+	return tag, nil
+}
+
+// fetchContentLength does a HEAD request and returns the Content-Length
+// of the eventual asset (following redirects to the S3 backend).
+// Returns 0 if the size can't be determined; callers degrade gracefully.
+func fetchContentLength(url string) (int64, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequest("HEAD", url, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("User-Agent", updateUserAgent)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf(
-			"GitHub API returned %s", resp.Status,
+		return 0, fmt.Errorf(
+			"HEAD %s returned %s", url, resp.Status,
 		)
 	}
-
-	var release Release
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return nil, err
+	if resp.ContentLength < 0 {
+		return 0, nil
 	}
-	return &release, nil
+	return resp.ContentLength, nil
 }
 
 func downloadFile(
@@ -722,7 +787,9 @@ func IsDevBuildVersion(v string) bool {
 	return gitDescribePattern.MatchString(v)
 }
 
-func isNewer(v1, v2 string) bool {
+// IsNewer reports whether v1 is a semver release newer than v2. Dev builds
+// and non-semver strings are not considered newer.
+func IsNewer(v1, v2 string) bool {
 	base1 := extractBaseSemver(v1)
 	base2 := extractBaseSemver(v2)
 	if base1 == "" || base2 == "" {
@@ -731,6 +798,10 @@ func isNewer(v1, v2 string) bool {
 	sv1 := normalizeSemver(v1)
 	sv2 := normalizeSemver(v2)
 	return semver.Compare(sv1, sv2) > 0
+}
+
+func isNewer(v1, v2 string) bool {
+	return IsNewer(v1, v2)
 }
 
 var prereleaseNumericPattern = regexp.MustCompile(

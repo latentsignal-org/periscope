@@ -4,7 +4,10 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/wesm/agentsview/internal/db"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.kenn.io/agentsview/internal/db"
 )
 
 func TestHandleSearchSession(t *testing.T) {
@@ -109,13 +112,9 @@ func TestHandleSearchSession(t *testing.T) {
 			if resp.Ordinals == nil {
 				resp.Ordinals = []int{}
 			}
-			if len(resp.Ordinals) != len(tt.wantOrdinals) {
-				t.Fatalf("ordinals = %v, want %v", resp.Ordinals, tt.wantOrdinals)
-			}
+			require.Len(t, resp.Ordinals, len(tt.wantOrdinals), "ordinals = %v", resp.Ordinals)
 			for i, ord := range resp.Ordinals {
-				if ord != tt.wantOrdinals[i] {
-					t.Errorf("ordinal[%d] = %d, want %d", i, ord, tt.wantOrdinals[i])
-				}
+				assert.Equal(t, tt.wantOrdinals[i], ord, "ordinal[%d]", i)
 			}
 		})
 	}

@@ -3,18 +3,49 @@
   import { router } from "../../stores/router.svelte.js";
   import { formatTokenCount } from "../../utils/format.js";
   import { formatAgentName, truncate } from "../../utils/format.js";
-
-  function fmtCost(v: number): string {
-    return `$${v.toFixed(2)}`;
-  }
+  import { m } from "../../i18n/index.js";
+  import { formatMoney } from "../../money.js";
+  import {
+    ALL_TOKEN_TYPES,
+    sumSelectedTokens,
+  } from "../../stores/usageTokenTypes.js";
 
   function handleRowClick(sessionId: string) {
     router.navigateToSession(sessionId);
   }
+
+  const isTokenMode = $derived(usage.mode === "token");
+  const sessions = $derived(usage.topSessions ?? []);
+
+  function selectedTokenLabel(): string {
+    if (usage.selectedTokenTypes.length === ALL_TOKEN_TYPES.length) {
+      return m.usage_mode_tokens();
+    }
+    if (usage.selectedTokenTypes.length !== 1) {
+      return m.usage_selected_tokens();
+    }
+    switch (usage.selectedTokenTypes[0]) {
+      case "input":
+        return m.usage_summary_input_tokens();
+      case "cache_write":
+        return m.usage_cache_writes();
+      case "cache_read":
+        return m.usage_cache_reads();
+      case "output":
+        return m.analytics_metric_output_tokens();
+    }
+    return m.usage_selected_tokens();
+  }
 </script>
 
 <div class="top-sessions-container">
-  <h3 class="chart-title">Top Sessions by Cost</h3>
+  <h3 class="chart-title">
+    {isTokenMode
+      ? m.usage_top_sessions_by_selected_tokens({
+          tokenTypes: selectedTokenLabel(),
+        })
+      : m.usage_top_sessions_by_cost()}
+  </h3>
 
   {#if usage.errors.topSessions}
     <div class="error">
@@ -23,12 +54,12 @@
         class="retry-btn"
         onclick={() => usage.fetchTopSessions()}
       >
-        Retry
+        {m.shared_retry()}
       </button>
     </div>
-  {:else if usage.topSessions && usage.topSessions.length > 0}
+  {:else if sessions.length > 0}
     <div class="session-list">
-      {#each usage.topSessions as row, i (row.sessionId)}
+      {#each sessions as row, i (row.sessionId)}
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
@@ -48,16 +79,22 @@
             </span>
           </div>
           <span class="session-tokens">
-            {formatTokenCount(row.totalTokens)}
+            {formatTokenCount(
+              isTokenMode
+                ? sumSelectedTokens(row, usage.selectedTokenTypes)
+                : row.totalTokens,
+            )}
           </span>
-          <span class="session-cost">
-            {fmtCost(row.cost)}
-          </span>
+          {#if !isTokenMode}
+            <span class="session-cost">
+              {formatMoney(row.cost)}
+            </span>
+          {/if}
         </div>
       {/each}
     </div>
   {:else}
-    <div class="empty">No sessions in range</div>
+    <div class="empty">{m.shared_no_sessions_in_range()}</div>
   {/if}
 </div>
 

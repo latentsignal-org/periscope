@@ -6,15 +6,16 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func createTempFile(t *testing.T, content []byte) string {
 	t.Helper()
 	cleanName := strings.ReplaceAll(t.Name(), "/", "_")
 	path := filepath.Join(t.TempDir(), cleanName+".txt")
-	if err := os.WriteFile(path, content, 0o644); err != nil {
-		t.Fatalf("create temp file: %v", err)
-	}
+	require.NoError(t, os.WriteFile(path, content, 0o644))
 	return path
 }
 
@@ -39,12 +40,8 @@ func TestComputeHash(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := ComputeHash(strings.NewReader(tt.input))
-			if err != nil {
-				t.Fatalf("ComputeHash: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("ComputeHash() = %q, want %q", got, tt.want)
-			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -84,16 +81,13 @@ func TestComputeFileHash(t *testing.T) {
 			path := tt.setup(t)
 
 			got, err := ComputeFileHash(path)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("ComputeFileHash() error = %v, wantErr %v", err, tt.wantErr)
-			}
 			if tt.wantErr {
+				require.Error(t, err)
 				requirePathError(t, err)
 				return
 			}
-			if got != tt.want {
-				t.Errorf("ComputeFileHash() = %q, want %q", got, tt.want)
-			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -102,21 +96,15 @@ func TestComputeHash_ReaderError(t *testing.T) {
 	errInjected := errors.New("injected error")
 	reader := &failingReader{err: errInjected}
 	_, err := ComputeHash(reader)
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !errors.Is(err, errInjected) {
-		t.Errorf("expected error wrapping 'injected error', got %v", err)
-	}
+	require.Error(t, err)
+	require.ErrorIs(t, err, errInjected)
 }
 
 func TestComputeFileHash_ReadError(t *testing.T) {
 	// Use a directory to simulate a read error after open
 	dir := t.TempDir()
 	_, err := ComputeFileHash(dir)
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
+	require.Error(t, err)
 	// On most systems, reading a directory fails.
 	requirePathError(t, err)
 }

@@ -1,10 +1,11 @@
 package sync
 
 import (
+	"slices"
 	"time"
 
-	"github.com/wesm/agentsview/internal/db"
-	"github.com/wesm/agentsview/internal/signals"
+	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/signals"
 )
 
 // computeSignalsFromMessages produces a SessionSignalUpdate from
@@ -18,6 +19,10 @@ func computeSignalsFromMessages(
 	sess db.Session, msgs []db.Message,
 ) db.SessionSignalUpdate {
 	toolRows := extractToolCallRows(msgs)
+	heuristics := signals.AnalyzeHeuristics(signals.HeuristicInput{
+		Messages: extractHeuristicMessages(msgs),
+		ToolRows: toolRows,
+	})
 	ctxTokens := extractContextTokens(msgs)
 	boundaries := extractCompactBoundaryOrdinals(msgs)
 	model := extractMostCommonModel(msgs)
@@ -90,6 +95,7 @@ func computeSignalsFromMessages(
 		CompactionCount:        compactionCount,
 		MidTaskCompactionCount: midTaskCount,
 		PressureMax:            ctxPressure.PressureMax,
+		Heuristics:             heuristics,
 	})
 
 	var pendingSince *string
@@ -120,7 +126,35 @@ func computeSignalsFromMessages(
 		HealthGrade:            healthGrade,
 		HasToolCalls:           len(toolRows) > 0,
 		HasContextData:         hasContextData,
+		QualitySignals: db.QualitySignals{
+			Version:           db.CurrentQualitySignalVersion,
+			ShortPromptCount:  heuristics.ShortPromptCount,
+			UnstructuredStart: heuristics.UnstructuredStart,
+			MissingSuccessCriteriaCount: heuristics.
+				MissingSuccessCriteriaCount,
+			MissingVerificationCount: heuristics.
+				MissingVerificationCount,
+			DuplicatePromptCount: heuristics.DuplicatePromptCount,
+			NoCodeContextCount:   heuristics.NoCodeContextCount,
+			RunawayToolLoopCount: heuristics.RunawayToolLoopCount,
+		},
 	}
+}
+
+func extractHeuristicMessages(
+	msgs []db.Message,
+) []signals.HeuristicMessage {
+	rows := make([]signals.HeuristicMessage, 0, len(msgs))
+	for _, m := range msgs {
+		rows = append(rows, signals.HeuristicMessage{
+			Role:      m.Role,
+			Content:   m.Content,
+			IsSystem:  m.IsSystem,
+			Ordinal:   m.Ordinal,
+			Timestamp: m.Timestamp,
+		})
+	}
+	return rows
 }
 
 // extractToolCallRows builds signal inputs from in-memory tool
@@ -130,7 +164,7 @@ func computeSignalsFromMessages(
 func extractToolCallRows(
 	msgs []db.Message,
 ) []signals.ToolCallRow {
-	var rows []signals.ToolCallRow
+	rows := make([]signals.ToolCallRow, 0)
 	for _, m := range msgs {
 		for callIdx, tc := range m.ToolCalls {
 			status := ""
@@ -217,9 +251,12 @@ func extractMostCommonModel(msgs []db.Message) string {
 func extractLastMessageRole(
 	msgs []db.Message,
 ) (role, content string) {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if !msgs[i].IsSystem {
-			return msgs[i].Role, msgs[i].Content
+	if msgs == nil {
+		return "", ""
+	}
+	for _, v := range slices.Backward(msgs) {
+		if !v.IsSystem {
+			return v.Role, v.Content
 		}
 	}
 	return "", ""

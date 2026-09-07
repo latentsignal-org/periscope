@@ -2,15 +2,20 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/wesm/agentsview/internal/db"
-	"github.com/wesm/agentsview/internal/dbtest"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.kenn.io/agentsview/internal/db"
 )
 
 // testSession returns a *db.Session with sensible defaults.
@@ -23,7 +28,7 @@ func testSession(
 		Project:      "proj",
 		Agent:        "claude",
 		MessageCount: 0,
-		StartedAt:    dbtest.Ptr("2025-01-15T10:00:00Z"),
+		StartedAt:    new("2025-01-15T10:00:00Z"),
 	}
 	for _, o := range opts {
 		o(s)
@@ -40,16 +45,9 @@ func stubServer(
 	return httptest.NewServer(
 		http.HandlerFunc(
 			func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != expectedMethod {
-					t.Errorf("expected method %q, got %q", expectedMethod, r.Method)
-				}
-				if r.Header.Get("User-Agent") != "agentsview" {
-					t.Errorf("expected User-Agent %q, got %q", "agentsview", r.Header.Get("User-Agent"))
-				}
-				expectedAuth := "token " + expectedToken
-				if auth := r.Header.Get("Authorization"); auth != expectedAuth {
-					t.Errorf("expected Authorization header %q, got %q", expectedAuth, auth)
-				}
+				assert.Equal(t, expectedMethod, r.Method)
+				assert.Equal(t, "periscope", r.Header.Get("User-Agent"))
+				assert.Equal(t, "token "+expectedToken, r.Header.Get("Authorization"))
 				w.WriteHeader(status)
 				if body != "" {
 					w.Write([]byte(body))
@@ -62,27 +60,22 @@ func stubServer(
 // assertErrorContains checks that err is non-nil and contains want.
 func assertErrorContains(t *testing.T, err error, want string) {
 	t.Helper()
-	if err == nil {
-		t.Fatalf("expected error containing %q, got nil", want)
-	}
-	if !strings.Contains(err.Error(), want) {
-		t.Errorf("expected error containing %q, got: %v", want, err)
-	}
+	require.Error(t, err, "expected error containing %q", want)
+	assert.Contains(t, err.Error(), want)
 }
 
 // assertContextCancelled checks that err is non-nil and
 // wraps context.Canceled.
 func assertContextCancelled(t *testing.T, err error) {
 	t.Helper()
-	if err == nil {
-		t.Fatal("expected error for cancelled context")
-	}
+	require.Error(t, err, "expected error for cancelled context")
 	if !errors.Is(err, context.Canceled) &&
 		!strings.Contains(
 			err.Error(), "context canceled",
 		) {
-		t.Errorf(
-			"expected context.Canceled, got: %v", err,
+		assert.Fail(t,
+			"expected context.Canceled",
+			"got: %v", err,
 		)
 	}
 }
@@ -129,12 +122,7 @@ func TestFormatTimestamp(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := formatTimestamp(tt.in)
-			if got != tt.want {
-				t.Errorf(
-					"formatTimestamp(%q) = %q, want %q",
-					tt.in, got, tt.want,
-				)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -148,20 +136,20 @@ func TestFormatDateShort(t *testing.T) {
 		want string
 	}{
 		{"Nil", nil, "unknown"},
-		{"Empty", dbtest.Ptr(""), "unknown"},
+		{"Empty", new(""), "unknown"},
 		{
 			"Valid",
-			dbtest.Ptr("2025-01-15T10:30:00Z"),
+			new("2025-01-15T10:30:00Z"),
 			"20250115",
 		},
 		{
 			"Nano",
-			dbtest.Ptr("2025-06-01T08:15:30.999Z"),
+			new("2025-06-01T08:15:30.999Z"),
 			"20250601",
 		},
 		{
 			"Unparseable",
-			dbtest.Ptr("garbage"),
+			new("garbage"),
 			"unknown",
 		},
 	}
@@ -169,12 +157,7 @@ func TestFormatDateShort(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := formatDateShort(tt.in)
-			if got != tt.want {
-				t.Errorf(
-					"formatDateShort(%v) = %q, want %q",
-					tt.in, got, tt.want,
-				)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -196,12 +179,7 @@ func TestParseTimestamp(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			_, ok := parseTimestamp(tt.in)
-			if ok != tt.valid {
-				t.Errorf(
-					"parseTimestamp(%q) ok=%v, want %v",
-					tt.in, ok, tt.valid,
-				)
-			}
+			assert.Equal(t, tt.valid, ok)
 		})
 	}
 }
@@ -260,8 +238,20 @@ func TestFormatContentForExport_Escaping(t *testing.T) {
 			nil,
 		},
 		{
+			"SkillBlock",
+			"[Skill: planner]\nuse the plan\n[/Skill]",
+			[]string{"[Skill: planner]"},
+			[]string{`class="tool-block"`},
+		},
+		{
 			"BashToolBlock",
 			"[Bash ls -la]\noutput",
+			[]string{`class="tool-block"`},
+			nil,
+		},
+		{
+			"TaskCreateToolBlock",
+			"[TaskCreate: worker]\nrun task",
 			[]string{`class="tool-block"`},
 			nil,
 		},
@@ -346,12 +336,7 @@ func TestIsThinkingOnly(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := isThinkingOnly(tt.in)
-			if got != tt.want {
-				t.Errorf(
-					"isThinkingOnly(%q) = %v, want %v",
-					tt.in, got, tt.want,
-				)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -361,7 +346,7 @@ func TestGenerateExportHTML_Structure(t *testing.T) {
 	session := testSession(func(s *db.Session) {
 		s.Project = "my-project"
 		s.MessageCount = 2
-		s.FirstMessage = dbtest.Ptr("Hello")
+		s.FirstMessage = new("Hello")
 	})
 	msgs := []db.Message{
 		{
@@ -408,10 +393,8 @@ func TestGenerateExportHTML_ThinkingOnlyClass(t *testing.T) {
 	}
 
 	html := generateExportHTML(session, msgs)
-	if !strings.Contains(html, "thinking-only") {
-		t.Error("expected thinking-only class for" +
-			" thinking-only message")
-	}
+	assert.Contains(t, html, "thinking-only",
+		"expected thinking-only class for thinking-only message")
 }
 
 func TestGenerateExportHTML_EscapesHostileInput(t *testing.T) {
@@ -432,13 +415,11 @@ func TestGenerateExportHTML_EscapesHostileInput(t *testing.T) {
 	out := generateExportHTML(session, msgs)
 
 	// Template auto-escapes the <img> tag in project name
-	if strings.Contains(out, "<img src=x") {
-		t.Error("project name XSS: raw <img> tag not escaped")
-	}
+	assert.NotContains(t, out, "<img src=x",
+		"project name XSS: raw <img> tag not escaped")
 	// Content is escaped by formatContentForExport
-	if strings.Contains(out, "<script>alert") {
-		t.Error("message content XSS not escaped")
-	}
+	assert.NotContains(t, out, "<script>alert",
+		"message content XSS not escaped")
 }
 
 func TestGenerateExportHTML_CodexAgent(t *testing.T) {
@@ -448,9 +429,8 @@ func TestGenerateExportHTML_CodexAgent(t *testing.T) {
 	})
 
 	html := generateExportHTML(session, nil)
-	if !strings.Contains(html, "Codex") {
-		t.Error("expected Codex display name for codex agent")
-	}
+	assert.Contains(t, html, "Codex",
+		"expected Codex display name for codex agent")
 }
 
 func TestGenerateExportHTML_NilStartedAt(t *testing.T) {
@@ -460,8 +440,330 @@ func TestGenerateExportHTML_NilStartedAt(t *testing.T) {
 	})
 
 	html := generateExportHTML(session, nil)
-	if !strings.Contains(html, "<!DOCTYPE html>") {
-		t.Error("expected valid HTML even with nil StartedAt")
+	assert.Contains(t, html, "<!DOCTYPE html>",
+		"expected valid HTML even with nil StartedAt")
+}
+
+func TestGenerateExportHTML_TranscriptModeControls(t *testing.T) {
+	t.Parallel()
+	session := testSession()
+	msgs := []db.Message{
+		{
+			SessionID: "test-id", Ordinal: 0,
+			Role: "user", Content: "Please inspect",
+			Timestamp: "2025-01-15T10:00:00Z",
+		},
+		{
+			SessionID: "test-id", Ordinal: 1,
+			Role: "assistant", Content: "I'll check that",
+			Timestamp: "2025-01-15T10:00:01Z",
+		},
+		{
+			SessionID: "test-id", Ordinal: 2,
+			Role: "assistant", Content: "[Bash]\nls",
+			Timestamp:  "2025-01-15T10:00:02Z",
+			HasToolUse: true,
+		},
+		{
+			SessionID: "test-id", Ordinal: 3,
+			Role: "assistant", Content: "The answer",
+			Timestamp: "2025-01-15T10:00:03Z",
+		},
+	}
+
+	html := generateExportHTML(session, msgs)
+
+	assertContainsAll(t, html, []string{
+		`id="transcript-normal" name="transcript-mode" class="toggle-input" checked`,
+		`id="transcript-focused" name="transcript-mode" class="toggle-input"`,
+		`<label for="transcript-normal" class="toggle-label">Normal</label>`,
+		`<label for="transcript-focused" class="toggle-label">Focused</label>`,
+		`#transcript-focused:checked ~ main .message.focused-hidden`,
+		`class="message assistant focused-hidden" data-ordinal="1"`,
+		`class="message assistant focused-hidden" data-ordinal="2"`,
+		`class="message assistant" data-ordinal="3"`,
+	})
+	assert.GreaterOrEqual(t,
+		strings.Index(html,
+			`#transcript-focused:checked ~ main .message.focused-hidden`,
+		),
+		strings.Index(html,
+			`#thinking-toggle:checked ~ main .message.thinking-only`,
+		),
+		"focused hide rule must follow thinking display rule",
+	)
+	assertContainsNone(t, html, []string{
+		`class="message user focused-hidden" data-ordinal="0"`,
+		`class="message assistant focused-hidden" data-ordinal="3"`,
+	})
+}
+
+func TestGenerateExportHTML_OmitsGoalContextRows(t *testing.T) {
+	t.Parallel()
+	session := testSession(func(s *db.Session) {
+		s.MessageCount = 4
+	})
+	currentGoal := "<codex_internal_context foo=\"bar\" source=\"goal\">\n" +
+		"Continue working toward the active thread goal.\n" +
+		"</codex_internal_context>"
+	legacyGoal := "<goal_context>\n" +
+		"Continue working toward the active thread goal.\n" +
+		"</goal_context>"
+	msgs := []db.Message{
+		{
+			SessionID: "test-id", Ordinal: 0,
+			Role: "user", Content: "Actual user message",
+			Timestamp: "2025-01-15T10:00:00Z",
+		},
+		{
+			SessionID: "test-id", Ordinal: 1,
+			Role: "user", Content: "\n\t" + currentGoal,
+			Timestamp: "2025-01-15T10:00:01Z",
+		},
+		{
+			SessionID: "test-id", Ordinal: 2,
+			Role: "user", Content: "  " + legacyGoal,
+			Timestamp: "2025-01-15T10:00:02Z",
+		},
+		{
+			SessionID: "test-id", Ordinal: 3,
+			Role: "assistant", Content: "Assistant reply",
+			Timestamp: "2025-01-15T10:00:03Z",
+		},
+	}
+
+	html := generateExportHTML(session, msgs)
+
+	assertContainsAll(t, html, []string{
+		"2 messages",
+		`class="message user" data-ordinal="0"`,
+		`class="message assistant" data-ordinal="3"`,
+		"Actual user message",
+		"Assistant reply",
+	})
+	assertContainsNone(t, html, []string{
+		`data-ordinal="1"`,
+		`data-ordinal="2"`,
+		"<codex_internal_context",
+		"<goal_context>",
+		"Continue working toward the active thread goal.",
+	})
+}
+
+func TestGenerateExportHTML_PreservesNonGoalSystemPrefixedRows(t *testing.T) {
+	t.Parallel()
+	session := testSession(func(s *db.Session) {
+		s.MessageCount = 3
+	})
+	msgs := []db.Message{
+		{
+			SessionID: "test-id", Ordinal: 0,
+			Role: "user", Content: "This session is being continued from a previous conversation.",
+			Timestamp: "2025-01-15T10:00:00Z",
+		},
+		{
+			SessionID: "test-id", Ordinal: 1,
+			Role: "user", Content: "<task-notification>done</task-notification>",
+			Timestamp: "2025-01-15T10:00:01Z",
+		},
+		{
+			SessionID: "test-id", Ordinal: 2,
+			Role: "user", Content: "Stop hook feedback: blocked",
+			Timestamp: "2025-01-15T10:00:02Z",
+		},
+	}
+
+	html := generateExportHTML(session, msgs)
+
+	assertContainsAll(t, html, []string{
+		"3 messages",
+		"This session is being continued from a previous conversation.",
+		"&lt;task-notification&gt;done&lt;/task-notification&gt;",
+		"Stop hook feedback: blocked",
+	})
+}
+
+func TestFocusedExportOrdinals(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		msgs []db.Message
+		want []int
+	}{
+		{
+			name: "keeps final assistant before next user",
+			msgs: []db.Message{
+				exportUserMsg(0),
+				exportAssistantMsg(1, "working"),
+				exportToolMsg(2, "[Read]\nfile"),
+				exportAssistantMsg(3, "final"),
+				exportUserMsg(4),
+			},
+			want: []int{0, 3, 4},
+		},
+		{
+			name: "drops terminal tool-only stretch",
+			msgs: []db.Message{
+				exportUserMsg(0),
+				exportToolMsg(1, "[Bash]\nmake test"),
+			},
+			want: []int{0},
+		},
+		{
+			name: "drops consecutive tool blocks in one message",
+			msgs: []db.Message{
+				exportUserMsg(0),
+				exportToolMsg(1, "[Read]\nold\n[Write]\nnew"),
+			},
+			want: []int{0},
+		},
+		{
+			name: "keeps terminal final assistant",
+			msgs: []db.Message{
+				exportUserMsg(0),
+				exportToolMsg(1, "[Bash]\nmake test"),
+				exportAssistantMsg(2, "done"),
+			},
+			want: []int{0, 2},
+		},
+		{
+			name: "keeps only last assistant in consecutive assistant run",
+			msgs: []db.Message{
+				exportUserMsg(0),
+				exportAssistantMsg(1, "first"),
+				exportAssistantMsg(2, "second"),
+				exportUserMsg(3),
+			},
+			want: []int{0, 2, 3},
+		},
+		{
+			name: "ignores thinking-only tail after final assistant",
+			msgs: []db.Message{
+				exportUserMsg(0),
+				exportAssistantMsg(1, "answer"),
+				exportAssistantMsg(2, "[Thinking]\nfollow-up notes"),
+			},
+			want: []int{0, 1},
+		},
+		{
+			name: "ignores system messages",
+			msgs: []db.Message{
+				exportUserMsg(0),
+				exportAssistantMsg(1, "answer"),
+				{
+					SessionID: "test-id",
+					Ordinal:   2,
+					Role:      "assistant",
+					Content:   "system progress",
+					IsSystem:  true,
+				},
+				{
+					SessionID: "test-id",
+					Ordinal:   3,
+					Role:      "user",
+					Content:   "system user event",
+					IsSystem:  true,
+				},
+				exportUserMsg(4),
+			},
+			want: []int{0, 1, 4},
+		},
+		{
+			name: "ignores system-prefixed goal contexts",
+			msgs: []db.Message{
+				exportUserMsg(0),
+				exportAssistantMsg(1, "draft"),
+				{
+					SessionID: "test-id",
+					Ordinal:   2,
+					Role:      "user",
+					Content:   `<codex_internal_context foo="bar" source="goal">state`,
+				},
+				{
+					SessionID: "test-id",
+					Ordinal:   3,
+					Role:      "user",
+					Content:   "\n\t<goal_context>state</goal_context>",
+				},
+				exportAssistantMsg(4, "final"),
+			},
+			want: []int{0, 4},
+		},
+		{
+			name: "keeps non-goal system-prefixed user rows",
+			msgs: []db.Message{
+				exportUserMsg(0),
+				{
+					SessionID: "test-id",
+					Ordinal:   1,
+					Role:      "user",
+					Content:   "Stop hook feedback: blocked",
+				},
+				exportAssistantMsg(2, "answer"),
+			},
+			want: []int{0, 1, 2},
+		},
+		{
+			name: "keeps answer before compact boundary",
+			msgs: []db.Message{
+				exportUserMsg(0),
+				exportAssistantMsg(1, "answer"),
+				{
+					SessionID:         "test-id",
+					Ordinal:           2,
+					Role:              "assistant",
+					Content:           "[compact summary]",
+					IsSystem:          true,
+					IsCompactBoundary: true,
+				},
+				exportUserMsg(3),
+			},
+			want: []int{0, 1, 2, 3},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			visible := focusedExportOrdinals(tt.msgs)
+			got := make([]int, 0, len(tt.msgs))
+			for _, msg := range tt.msgs {
+				if visible[msg.Ordinal] {
+					got = append(got, msg.Ordinal)
+				}
+			}
+			assert.True(t, slices.Equal(got, tt.want),
+				"visible ordinals = %v, want %v", got, tt.want)
+		})
+	}
+}
+
+func exportUserMsg(ordinal int) db.Message {
+	return db.Message{
+		SessionID: "test-id",
+		Ordinal:   ordinal,
+		Role:      "user",
+		Content:   "user",
+	}
+}
+
+func exportAssistantMsg(ordinal int, content string) db.Message {
+	return db.Message{
+		SessionID: "test-id",
+		Ordinal:   ordinal,
+		Role:      "assistant",
+		Content:   content,
+	}
+}
+
+func exportToolMsg(ordinal int, content string) db.Message {
+	return db.Message{
+		SessionID:   "test-id",
+		Ordinal:     ordinal,
+		Role:        "assistant",
+		Content:     content,
+		HasToolUse:  true,
+		HasThinking: strings.Contains(content, "[Thinking]"),
 	}
 }
 
@@ -530,6 +832,61 @@ func TestGenerateExportMarkdown_SerializesCodeSkillAndCDATAFallback(t *testing.T
 	})
 }
 
+func TestGenerateExportMarkdown_RendersCursorApplyPatch(t *testing.T) {
+	t.Parallel()
+	session := testSession()
+	msgs := []db.Message{{
+		SessionID:  "test-id",
+		Ordinal:    0,
+		Role:       "assistant",
+		Content:    "[Patch: src/app.ts]\n@@ -1,1 +1,1 @@\n-old\n+new",
+		HasToolUse: true,
+		ToolCalls: []db.ToolCall{{
+			ToolName:  "ApplyPatch",
+			Category:  "Edit",
+			ToolUseID: "toolu_patch",
+			InputJSON: `{"path":"src/app.ts","patch":"@@ -1,1 +1,1 @@\n-old\n+new"}`,
+		}},
+	}}
+
+	out := generateExportMarkdown(session, msgs, exportMarkdownOptions{})
+	assertContainsAll(t, out, []string{
+		`<tool_call id="toolu_patch" name="ApplyPatch" category="Edit">`,
+		`<tool_body><![CDATA[` + "\n@@ -1,1 +1,1 @@\n-old\n+new\n" + `]]></tool_body>`,
+	})
+	assertContainsNone(t, out, []string{
+		`[Patch: src/app.ts]`,
+		`patch: @@ -1,1 +1,1 @@`,
+	})
+}
+
+func TestGenerateExportMarkdown_RendersCursorApplyPatchFromInputJSON(t *testing.T) {
+	t.Parallel()
+	session := testSession()
+	msgs := []db.Message{{
+		SessionID:  "test-id",
+		Ordinal:    0,
+		Role:       "assistant",
+		Content:    "[Patch: src/app.ts]",
+		HasToolUse: true,
+		ToolCalls: []db.ToolCall{{
+			ToolName:  "ApplyPatch",
+			Category:  "Edit",
+			ToolUseID: "toolu_patch",
+			InputJSON: `{"path":"src/app.ts","patch":"@@ -1,1 +1,1 @@\n-old\n+new"}`,
+		}},
+	}}
+
+	out := generateExportMarkdown(session, msgs, exportMarkdownOptions{})
+	assertContainsAll(t, out, []string{
+		`<tool_call id="toolu_patch" name="ApplyPatch" category="Edit">`,
+		`<tool_body><![CDATA[` + "\n@@ -1,1 +1,1 @@\n-old\n+new\n" + `]]></tool_body>`,
+	})
+	assertContainsNone(t, out, []string{
+		`[Patch: src/app.ts]`,
+	})
+}
+
 func TestGenerateExportMarkdown_OmitsEmptyOptionalAttributes(t *testing.T) {
 	t.Parallel()
 	session := testSession(func(s *db.Session) {
@@ -555,7 +912,7 @@ func TestGenerateExportMarkdown_OmitsEmptyOptionalAttributes(t *testing.T) {
 				ID:              "child-1",
 				Project:         "proj",
 				Agent:           "claude",
-				ParentSessionID: dbtest.Ptr("test-id"),
+				ParentSessionID: new("test-id"),
 				StartedAt:       &childStarted,
 			},
 		}},
@@ -632,7 +989,7 @@ func TestGenerateExportMarkdown_SanitizesHeadingAndAvoidsDuplicateAnchors(t *tes
 			ID:               "child-a",
 			Project:          "proj",
 			Agent:            "claude",
-			ParentSessionID:  dbtest.Ptr("test-id"),
+			ParentSessionID:  new("test-id"),
 			RelationshipType: "subagent",
 		},
 		Messages: []db.Message{{
@@ -659,9 +1016,8 @@ func TestGenerateExportMarkdown_SanitizesHeadingAndAvoidsDuplicateAnchors(t *tes
 		AnchoredChildren: map[string]*exportSessionTree{"child-a": child},
 	}, exportMarkdownOptions{Depth: "all"})
 	assertContainsNone(t, out, []string{"# Session: proj\n<script>alert(1)</script>"})
-	if strings.Count(out, `<subagent_session id="child-a"`) != 1 {
-		t.Fatalf("expected child session once, got:\n%s", out)
-	}
+	assert.Equal(t, 1, strings.Count(out, `<subagent_session id="child-a"`),
+		"expected child session once, got:\n%s", out)
 }
 
 func TestGenerateExportMarkdown_DoesNotParseToolMarkersInsideCodeBlocks(t *testing.T) {
@@ -800,12 +1156,7 @@ func TestSanitizeFilename(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := sanitizeFilename(tt.in)
-			if got != tt.want {
-				t.Errorf(
-					"sanitizeFilename(%q) = %q, want %q",
-					tt.in, got, tt.want,
-				)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -826,12 +1177,7 @@ func TestTruncateStr(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := truncateStr(tt.in, tt.max)
-			if got != tt.want {
-				t.Errorf(
-					"truncateStr(%q, %d) = %q, want %q",
-					tt.in, tt.max, got, tt.want,
-				)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -855,12 +1201,10 @@ func TestExportTemplateValid(t *testing.T) {
 		},
 	}
 	var b strings.Builder
-	if err := exportTmpl.Execute(&b, data); err != nil {
-		t.Fatalf("template execution failed: %v", err)
-	}
-	if !strings.Contains(b.String(), "<!DOCTYPE html>") {
-		t.Error("expected valid HTML doctype")
-	}
+	require.NoError(t, exportTmpl.Execute(&b, data),
+		"template execution failed")
+	assert.Contains(t, b.String(), "<!DOCTYPE html>",
+		"expected valid HTML doctype")
 }
 
 func TestExportTemplateAccentColors(t *testing.T) {
@@ -880,9 +1224,8 @@ func TestExportTemplateAccentColors(t *testing.T) {
 		"--accent-indigo",
 	}
 	for _, v := range required {
-		if !strings.Contains(exportTemplateStr, v) {
-			t.Errorf("export template missing CSS variable %s", v)
-		}
+		assert.Contains(t, exportTemplateStr, v,
+			"export template missing CSS variable %s", v)
 	}
 }
 
@@ -948,7 +1291,7 @@ func TestCreateGist(t *testing.T) {
 			}
 
 			got, err := createGistWithURL(
-				ctx, ts.URL, "tok", "f.html", "desc", "content",
+				ctx, ts.URL, "tok", "f.html", "desc", "content", true,
 			)
 
 			if tt.cancelCtx {
@@ -960,19 +1303,134 @@ func TestCreateGist(t *testing.T) {
 				assertErrorContains(t, err, tt.wantErr)
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.wantID, got.ID)
+			assert.Equal(t, tt.wantURL, got.HTMLURL)
+			assert.Equal(t, tt.wantLogin, got.Owner.Login)
+		})
+	}
+}
+
+func TestCreateGistVisibility(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		public bool
+	}{
+		{name: "Public", public: true},
+		{name: "Secret", public: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var payload struct {
+				Public bool `json:"public"`
+			}
+			ts := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					assert.NoError(t,
+						json.NewDecoder(r.Body).Decode(&payload))
+					w.WriteHeader(http.StatusCreated)
+					w.Write([]byte(`{"id":"abc123",` +
+						`"html_url":"https://gist.github.com/abc123",` +
+						`"owner":{"login":"testuser"}}`))
+				},
+			))
+			defer ts.Close()
+
+			_, err := createGistWithURL(
+				context.Background(), ts.URL,
+				"tok", "f.html", "desc", "content", tt.public,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, tt.public, payload.Public)
+		})
+	}
+}
+
+func TestResolveGitHubToken(t *testing.T) {
+	originalGhAuthTokenOutput := ghAuthTokenOutput
+	t.Cleanup(func() { ghAuthTokenOutput = originalGhAuthTokenOutput })
+
+	localCtx := context.WithValue(context.Background(), ctxKeyHumaRequestInfo,
+		requestInfo{RemoteAddr: "127.0.0.1:1234"})
+	remoteCtx := context.WithValue(context.Background(), ctxKeyHumaRequestInfo,
+		requestInfo{RemoteAddr: "127.0.0.1:1234", Forwarded: true})
+	tests := []struct {
+		name       string
+		ctx        context.Context
+		configured string
+		env        string
+		ghOutput   string
+		ghErr      error
+		want       string
+	}{
+		{
+			name:       "ConfiguredTokenWins",
+			ctx:        localCtx,
+			configured: " saved-token ",
+			env:        "env-token",
+			ghOutput:   "gh-token\n",
+			want:       "saved-token",
+		},
+		{
+			name:     "EnvFallback",
+			ctx:      localCtx,
+			env:      " env-token ",
+			ghOutput: "gh-token\n",
+			want:     "env-token",
+		},
+		{
+			name:     "GitHubCLIFallback",
+			ctx:      localCtx,
+			ghOutput: "gh-token\n",
+			want:     "gh-token",
+		},
+		{
+			name:  "MissingSources",
+			ctx:   localCtx,
+			ghErr: errors.New("gh missing"),
+			want:  "",
+		},
+		{
+			name:       "ConfiguredTokenAllowedForRemoteContext",
+			ctx:        remoteCtx,
+			configured: " saved-token ",
+			env:        "env-token",
+			ghOutput:   "gh-token\n",
+			want:       "saved-token",
+		},
+		{
+			name:     "EnvFallbackDeniedForRemoteContext",
+			ctx:      remoteCtx,
+			env:      " env-token ",
+			ghOutput: "gh-token\n",
+			want:     "",
+		},
+		{
+			name:     "GitHubCLIFallbackDeniedForRemoteContext",
+			ctx:      remoteCtx,
+			ghOutput: "gh-token\n",
+			want:     "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AGENTSVIEW_GITHUB_TOKEN", tt.env)
+			ghAuthTokenOutput = func(context.Context) ([]byte, error) {
+				if tt.ghErr != nil {
+					return nil, tt.ghErr
+				}
+				return []byte(tt.ghOutput), nil
 			}
 
-			if got.ID != tt.wantID {
-				t.Errorf("expected ID %q, got %q", tt.wantID, got.ID)
-			}
-			if got.HTMLURL != tt.wantURL {
-				t.Errorf("expected HTMLURL %q, got %q", tt.wantURL, got.HTMLURL)
-			}
-			if got.Owner.Login != tt.wantLogin {
-				t.Errorf("expected Owner.Login %q, got %q", tt.wantLogin, got.Owner.Login)
-			}
+			got := resolveGitHubToken(tt.ctx, tt.configured)
+
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -1046,13 +1504,16 @@ func TestValidateGithubToken(t *testing.T) {
 				assertErrorContains(t, err, tt.wantErr)
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			require.NoError(t, err)
 
-			if login != tt.wantLogin {
-				t.Errorf("expected login %q, got %q", tt.wantLogin, login)
-			}
+			assert.Equal(t, tt.wantLogin, login)
 		})
 	}
+}
+
+func TestGithubHTTPClientUsesIsolatedTransport(t *testing.T) {
+	client := githubHTTPClient(10 * time.Second)
+	require.NotNil(t, client.Transport)
+	assert.NotSame(t, http.DefaultTransport, client.Transport,
+		"github API clients must not share the package default transport")
 }

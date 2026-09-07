@@ -24,12 +24,12 @@ type dagEntryIflow struct {
 	timestamp  time.Time
 }
 
-// ParseIflowSession parses an iFlow JSONL session file.
+// parseSession parses an iFlow JSONL session file.
 // Returns a single ParseResult. Unlike Claude, iFlow's
 // uuid/parentUuid DAG represents streaming incremental updates
 // (sliding-window snapshots), not conversation forks, so fork
 // splitting is intentionally not applied.
-func ParseIflowSession(
+func parseIflowSession(
 	path, project, machine string,
 ) ([]ParseResult, error) {
 	info, err := os.Stat(path)
@@ -54,7 +54,7 @@ func ParseIflowSession(
 
 	// First pass: collect all valid lines with metadata.
 	var (
-		entries         []dagEntryIflow
+		entries         = make([]dagEntryIflow, 0)
 		hasAnyUUID      bool
 		allHaveUUID     bool
 		parentSessionID string
@@ -67,6 +67,7 @@ func ParseIflowSession(
 	allHaveUUID = true
 
 	lr := newLineReader(f, maxLineSize)
+	defer releaseLineReader(lr)
 	for {
 		line, ok := lr.next()
 		if !ok {
@@ -226,7 +227,10 @@ func deduplicateIflowEntries(
 		if e.entryType != "assistant" || e.parentUuid == "" {
 			continue
 		}
-		runs := groups[e.parentUuid]
+		runs, ok := groups[e.parentUuid]
+		if !ok {
+			runs = []assistantRun{}
+		}
 		canExtend := false
 		if len(runs) > 0 {
 			last := &runs[len(runs)-1]
@@ -288,6 +292,10 @@ func deduplicateIflowEntries(
 func mergeIflowBurst(
 	entries []dagEntryIflow, indices []int,
 ) string {
+	if len(indices) == 0 {
+		return ""
+	}
+
 	var blocks []string
 	seenToolUse := map[string]bool{}
 
@@ -353,7 +361,7 @@ func extractMessagesIflow(entries []dagEntryIflow) (
 		}
 
 		content := gjson.Get(e.line, "message.content")
-		text, hasThinking, hasToolUse, tcs, trs :=
+		text, _, hasThinking, hasToolUse, tcs, trs :=
 			ExtractTextContent(content)
 
 		// Convert command/skill invocation XML into readable
@@ -412,6 +420,7 @@ func ExtractIflowProjectHints(
 	defer f.Close()
 
 	lr := newLineReader(f, maxLineSize)
+	defer releaseLineReader(lr)
 
 	for {
 		line, ok := lr.next()

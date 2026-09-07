@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"time"
 
-	"github.com/wesm/agentsview/internal/db"
-	"github.com/wesm/agentsview/internal/parser"
+	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/parser"
 )
 
 // ImportStats reports the outcome of an import operation.
@@ -103,6 +104,7 @@ func ImportClaudeAI(
 	store db.Store,
 	r io.Reader,
 	cb *ImportCallbacks,
+	machine ...string,
 ) (stats ImportStats, retErr error) {
 	fts := newLazyFTS(store, cb.indexing)
 	defer func() {
@@ -111,13 +113,29 @@ func ImportClaudeAI(
 		}
 	}()
 
-	err := parser.ParseClaudeAIExport(r, func(
+	provider, ok := parser.NewProvider(
+		parser.AgentClaudeAI, parser.ProviderConfig{},
+	)
+	if !ok {
+		return stats, fmt.Errorf("claude.ai provider unavailable")
+	}
+	exporter, ok := provider.(parser.ClaudeAIExportParser)
+	if !ok {
+		return stats, fmt.Errorf(
+			"claude.ai provider does not support exports",
+		)
+	}
+
+	err := exporter.ParseClaudeAIExport(r, func(
 		result parser.ParseResult,
 	) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
+		result.Session.Machine = resolvedImportMachine(
+			result.Session.Machine, machine,
+		)
 		status, err := upsertConversation(
 			ctx, store, result, fts,
 		)
@@ -164,58 +182,6 @@ func upsertConversation(
 ) (importStatus, error) {
 	s := result.Session
 
-	existing, err := store.GetSession(ctx, s.ID)
-	if err != nil {
-		return importNew, fmt.Errorf("checking session: %w", err)
-	}
-	isNew := existing == nil
-
-	// Preserve user-renamed display_name on re-import.
-	displayName := strPtr(s.DisplayName)
-	if !isNew && existing.DisplayName != nil {
-		importName := strPtr(s.DisplayName)
-		nameChanged := importName == nil ||
-			*existing.DisplayName != *importName
-		if nameChanged {
-			displayName = existing.DisplayName
-		}
-	}
-
-	sess := db.Session{
-		ID:               s.ID,
-		Project:          s.Project,
-		Machine:          s.Machine,
-		Agent:            string(s.Agent),
-		FirstMessage:     strPtr(s.FirstMessage),
-		DisplayName:      displayName,
-		StartedAt:        timeStr(s.StartedAt),
-		EndedAt:          timeStr(s.EndedAt),
-		MessageCount:     s.MessageCount,
-		UserMessageCount: s.UserMessageCount,
-	}
-
-	if err := store.UpsertSession(sess); err != nil {
-		if errors.Is(err, db.ErrSessionExcluded) {
-			return importSkipped, nil
-		}
-		return importNew, fmt.Errorf("upserting session: %w", err)
-	}
-
-	// Skip expensive message replacement when the conversation
-	// has not changed since the last import. Compare both
-	// message count and ended_at (source updated_at) to detect
-	// content/metadata changes even when count is unchanged.
-	if !isNew && existing.MessageCount == s.MessageCount {
-		newEnd := timeStr(s.EndedAt)
-		if ptrEqual(existing.EndedAt, newEnd) {
-			return importSkipped, nil
-		}
-	}
-
-	// Suspend FTS before first message-changing operation to
-	// avoid per-row trigger overhead during bulk work.
-	fts.suspend()
-
 	msgs := make([]db.Message, len(result.Messages))
 	for i, m := range result.Messages {
 		msgs[i] = db.Message{
@@ -227,6 +193,63 @@ func upsertConversation(
 			ContentLength: m.ContentLength,
 		}
 	}
+
+	existing, err := store.GetSession(ctx, s.ID)
+	if err != nil {
+		return importNew, fmt.Errorf("checking session: %w", err)
+	}
+	isNew := existing == nil
+
+	sess := db.Session{
+		ID:               s.ID,
+		Project:          s.Project,
+		Machine:          s.Machine,
+		FirstMessage:     strPtr(s.FirstMessage),
+		SessionName:      db.ParsedSessionName(s),
+		StartedAt:        timeStr(s.StartedAt),
+		EndedAt:          timeStr(s.EndedAt),
+		MessageCount:     s.MessageCount,
+		UserMessageCount: s.UserMessageCount,
+	}
+	db.ApplyParsedSessionIdentity(&sess, s)
+
+	if err := store.UpsertSession(sess); err != nil {
+		if errors.Is(err, db.ErrSessionExcluded) {
+			return importSkipped, nil
+		}
+		return importNew, fmt.Errorf("upserting session: %w", err)
+	}
+
+	// Bump local_modified_at so incremental PG push picks up session_name
+	// changes even when the skip path below returns importSkipped (message
+	// count unchanged) and ReplaceSessionMessages is never called.
+	if localDB, ok := store.(*db.DB); ok {
+		if err := localDB.BumpLocalModifiedAt(s.ID); err != nil {
+			log.Printf("import: bumping local_modified_at for %s: %v", s.ID, err)
+		}
+	}
+
+	// Skip expensive message replacement when the conversation
+	// has not changed since the last import. Compare both
+	// message count and ended_at (source updated_at) to detect
+	// content/metadata changes even when count is unchanged.
+	if !isNew && existing != nil && existing.MessageCount == s.MessageCount {
+		newEnd := timeStr(s.EndedAt)
+		if ptrEqual(existing.EndedAt, newEnd) {
+			existingMsgs, err := store.GetAllMessages(ctx, s.ID)
+			if err != nil {
+				return importNew,
+					fmt.Errorf("loading existing messages: %w", err)
+			}
+			if sameMessages(existingMsgs, msgs) {
+				return importSkipped, nil
+			}
+		}
+	}
+
+	// Suspend FTS before first message-changing operation to
+	// avoid per-row trigger overhead during bulk work.
+	fts.suspend()
 
 	if err := store.ReplaceSessionMessages(s.ID, msgs); err != nil {
 		return importNew, fmt.Errorf("replacing messages: %w", err)
@@ -267,6 +290,7 @@ func ImportChatGPT(
 	dir string,
 	assetsDir string,
 	cb *ImportCallbacks,
+	machine ...string,
 ) (stats ImportStats, retErr error) {
 	fts := newLazyFTS(store, cb.indexing)
 	defer func() {
@@ -281,13 +305,27 @@ func ImportChatGPT(
 		assetsDir: assetsDir,
 	}
 
-	err := parser.ParseChatGPTExport(dir, resolver,
+	provider, ok := parser.NewProvider(
+		parser.AgentChatGPT, parser.ProviderConfig{},
+	)
+	if !ok {
+		return stats, fmt.Errorf("chatgpt provider unavailable")
+	}
+	exporter, ok := provider.(parser.ChatGPTExportParser)
+	if !ok {
+		return stats, fmt.Errorf(
+			"chatgpt provider does not support exports",
+		)
+	}
+
+	err := exporter.ParseChatGPTExport(dir, resolver,
 		func(result parser.ParseResult) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 
 			s := result.Session
+			s.Machine = resolvedImportMachine(s.Machine, machine)
 
 			existing, err := store.GetSession(ctx, s.ID)
 			if err != nil {
@@ -299,6 +337,17 @@ func ImportChatGPT(
 				return nil
 			}
 			if existing != nil {
+				// Refresh session_name without touching any other fields —
+				// a partial UpsertSession would overwrite first_message,
+				// timestamps, and counts with zero values.
+				if localDB, ok := store.(*db.DB); ok {
+					if err := localDB.RefreshSessionName(s.ID, db.ParsedSessionName(s)); err != nil {
+						stats.Errors++
+						log.Printf("import: refreshing session_name for %s: %v", s.ID, err)
+						cb.progress(stats)
+						return nil
+					}
+				}
 				stats.Skipped++
 				cb.progress(stats)
 				return nil
@@ -308,14 +357,14 @@ func ImportChatGPT(
 				ID:               s.ID,
 				Project:          s.Project,
 				Machine:          s.Machine,
-				Agent:            string(s.Agent),
 				FirstMessage:     strPtr(s.FirstMessage),
-				DisplayName:      strPtr(s.DisplayName),
+				SessionName:      db.ParsedSessionName(s),
 				StartedAt:        timeStr(s.StartedAt),
 				EndedAt:          timeStr(s.EndedAt),
 				MessageCount:     s.MessageCount,
 				UserMessageCount: s.UserMessageCount,
 			}
+			db.ApplyParsedSessionIdentity(&sess, s)
 
 			if err := store.UpsertSession(sess); err != nil {
 				if errors.Is(err, db.ErrSessionExcluded) {
@@ -376,6 +425,13 @@ func ImportChatGPT(
 	return
 }
 
+func resolvedImportMachine(current string, override []string) string {
+	if len(override) > 0 && strings.TrimSpace(override[0]) != "" {
+		return override[0]
+	}
+	return current
+}
+
 func ptrEqual(a, b *string) bool {
 	if a == nil && b == nil {
 		return true
@@ -384,6 +440,22 @@ func ptrEqual(a, b *string) bool {
 		return false
 	}
 	return *a == *b
+}
+
+func sameMessages(existing, incoming []db.Message) bool {
+	if len(existing) != len(incoming) {
+		return false
+	}
+	for i := range existing {
+		if existing[i].Ordinal != incoming[i].Ordinal ||
+			existing[i].Role != incoming[i].Role ||
+			existing[i].Content != incoming[i].Content ||
+			existing[i].Timestamp != incoming[i].Timestamp ||
+			existing[i].ContentLength != incoming[i].ContentLength {
+			return false
+		}
+	}
+	return true
 }
 
 func strPtr(s string) *string {
@@ -409,12 +481,17 @@ func convertToolCalls(
 	}
 	calls := make([]db.ToolCall, len(parsed))
 	for i, tc := range parsed {
+		filePath := tc.FilePath
+		if filePath == "" {
+			filePath = parser.ResolveFilePathFromJSON(tc.InputJSON)
+		}
 		calls[i] = db.ToolCall{
 			SessionID: sessionID,
 			ToolName:  tc.ToolName,
 			Category:  tc.Category,
 			ToolUseID: tc.ToolUseID,
 			InputJSON: tc.InputJSON,
+			FilePath:  filePath,
 			SkillName: tc.SkillName,
 		}
 		// Map execution output from ResultEvents to

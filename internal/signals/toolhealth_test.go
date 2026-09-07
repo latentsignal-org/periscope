@@ -1,12 +1,14 @@
 package signals
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 func TestComputeToolHealth_NoCalls(t *testing.T) {
 	got := ComputeToolHealth(nil)
-	if got != (ToolHealthSignals{}) {
-		t.Errorf("empty input = %+v, want zero", got)
-	}
+	assert.Equal(t, ToolHealthSignals{}, got)
 }
 
 func TestIsFailure_BashContent(t *testing.T) {
@@ -106,12 +108,7 @@ func TestIsFailure_BashContent(t *testing.T) {
 				Category:      "Bash",
 				ResultContent: tt.content,
 			}
-			if got := IsFailure(row); got != tt.want {
-				t.Errorf(
-					"IsFailure(Bash %q) = %v, want %v",
-					tt.name, got, tt.want,
-				)
-			}
+			assert.Equal(t, tt.want, IsFailure(row))
 		})
 	}
 }
@@ -154,12 +151,7 @@ func TestIsFailure_EditWrite(t *testing.T) {
 				Category:      tt.category,
 				ResultContent: tt.content,
 			}
-			if got := IsFailure(row); got != tt.want {
-				t.Errorf(
-					"IsFailure(%s) = %v, want %v",
-					tt.name, got, tt.want,
-				)
-			}
+			assert.Equal(t, tt.want, IsFailure(row))
 		})
 	}
 }
@@ -169,9 +161,7 @@ func TestIsFailure_SearchNotFailure(t *testing.T) {
 		Category:      "Search",
 		ResultContent: "",
 	}
-	if IsFailure(row) {
-		t.Error("empty search result should not be failure")
-	}
+	assert.False(t, IsFailure(row), "empty search result should not be failure")
 }
 
 func TestIsFailure_EventStatus(t *testing.T) {
@@ -225,12 +215,7 @@ func TestIsFailure_EventStatus(t *testing.T) {
 				EventStatus:   tt.status,
 				ResultContent: tt.content,
 			}
-			if got := IsFailure(row); got != tt.wantFailure {
-				t.Errorf(
-					"IsFailure(status=%q) = %v, want %v",
-					tt.status, got, tt.wantFailure,
-				)
-			}
+			assert.Equal(t, tt.wantFailure, IsFailure(row))
 		})
 	}
 }
@@ -245,18 +230,8 @@ func TestConsecutiveFailureMax(t *testing.T) {
 		{Category: "Bash", ResultContent: "command not found"},
 	}
 	got := ComputeToolHealth(calls)
-	if got.ConsecutiveFailureMax != 3 {
-		t.Errorf(
-			"ConsecutiveFailureMax = %d, want 3",
-			got.ConsecutiveFailureMax,
-		)
-	}
-	if got.FailureSignalCount != 4 {
-		t.Errorf(
-			"FailureSignalCount = %d, want 4",
-			got.FailureSignalCount,
-		)
-	}
+	assert.Equal(t, 3, got.ConsecutiveFailureMax)
+	assert.Equal(t, 4, got.FailureSignalCount)
 }
 
 func TestRetryCount(t *testing.T) {
@@ -329,13 +304,7 @@ func TestRetryCount(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := countRetries(tt.calls)
-			if got != tt.want {
-				t.Errorf(
-					"countRetries = %d, want %d",
-					got, tt.want,
-				)
-			}
+			assert.Equal(t, tt.want, countRetries(tt.calls))
 		})
 	}
 }
@@ -513,13 +482,7 @@ func TestEditChurn(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := countEditChurn(tt.calls)
-			if got != tt.want {
-				t.Errorf(
-					"countEditChurn = %d, want %d",
-					got, tt.want,
-				)
-			}
+			assert.Equal(t, tt.want, countEditChurn(tt.calls))
 		})
 	}
 }
@@ -548,13 +511,7 @@ func TestExtractFilePath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractFilePath(tt.input)
-			if got != tt.want {
-				t.Errorf(
-					"extractFilePath = %q, want %q",
-					got, tt.want,
-				)
-			}
+			assert.Equal(t, tt.want, extractFilePath(tt.input))
 		})
 	}
 }
@@ -609,25 +566,8 @@ func TestComputeToolHealth_Combined(t *testing.T) {
 
 	got := ComputeToolHealth(calls)
 
-	if got.FailureSignalCount != 3 {
-		t.Errorf(
-			"FailureSignalCount = %d, want 3",
-			got.FailureSignalCount,
-		)
-	}
-	if got.RetryCount != 2 {
-		t.Errorf("RetryCount = %d, want 2", got.RetryCount)
-	}
-	if got.EditChurnCount != 1 {
-		t.Errorf(
-			"EditChurnCount = %d, want 1",
-			got.EditChurnCount,
-		)
-	}
-	if got.ConsecutiveFailureMax != 3 {
-		t.Errorf(
-			"ConsecutiveFailureMax = %d, want 3",
-			got.ConsecutiveFailureMax,
-		)
-	}
+	assert.Equal(t, 3, got.FailureSignalCount)
+	assert.Equal(t, 2, got.RetryCount)
+	assert.Equal(t, 1, got.EditChurnCount)
+	assert.Equal(t, 3, got.ConsecutiveFailureMax)
 }

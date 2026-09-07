@@ -1,3 +1,8 @@
+---
+title: Periscope V1 UI Spec
+description: Design exploration for the Periscope V1 user interface
+---
+
 # Periscope V1 UI Spec
 
 ## Document Status

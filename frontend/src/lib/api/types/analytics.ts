@@ -1,6 +1,7 @@
 /** Analytics types — match Go structs in internal/db/analytics.go */
 
 export type Granularity = "day" | "week" | "month";
+export type TrendsGranularity = "day" | "week" | "month";
 export type HeatmapMetric =
   | "messages"
   | "sessions"
@@ -9,6 +10,7 @@ export type TopSessionsMetric =
   | "messages"
   | "duration"
   | "output_tokens";
+export type AutomatedScope = "human" | "all" | "automated";
 
 export interface AgentSummary {
   sessions: number;
@@ -20,6 +22,7 @@ export interface AnalyticsSummary {
   total_messages: number;
   total_output_tokens?: number;
   token_reporting_sessions?: number;
+  models?: string[];
   active_projects: number;
   active_days: number;
   avg_messages: number;
@@ -133,9 +136,17 @@ export interface TopSession {
   id: string;
   project: string;
   first_message: string | null;
+  display_name?: string | null;
   message_count: number;
   output_tokens: number;
   duration_min: number;
+  active_duration_min: number;
+  /** ISO timestamps used by the StatusDot component to compute
+   * the active/stale/unclean tier — the column needs the same
+   * recency inputs as the sidebar list. */
+  started_at?: string | null;
+  ended_at?: string | null;
+  termination_status?: string | null;
 }
 
 export interface TopSessionsResponse {
@@ -155,6 +166,14 @@ export interface ToolAgentBreakdown {
   categories: ToolCategoryCount[];
 }
 
+export interface ToolUsageAnalysis {
+  tool_name: string;
+  category: string;
+  call_count: number;
+  session_count: number;
+  pct: number;
+}
+
 export interface ToolTrendEntry {
   date: string;
   by_category: Record<string, number>;
@@ -164,7 +183,40 @@ export interface ToolsAnalyticsResponse {
   total_calls: number;
   by_category: ToolCategoryCount[];
   by_agent: ToolAgentBreakdown[];
+  by_tool: ToolUsageAnalysis[];
   trend: ToolTrendEntry[];
+}
+
+export interface SkillAgentBreakdown {
+  agent: string;
+  count: number;
+}
+
+export interface SkillProjectBreakdown {
+  project: string;
+  count: number;
+}
+
+export interface SkillUsage {
+  skill_name: string;
+  call_count: number;
+  session_count: number;
+  agent_breakdown: SkillAgentBreakdown[];
+  project_breakdown: SkillProjectBreakdown[];
+  last_used_at: string;
+  pct: number;
+}
+
+export interface SkillTrendEntry {
+  date: string;
+  by_skill: Record<string, number>;
+}
+
+export interface SkillsAnalyticsResponse {
+  total_skill_calls: number;
+  distinct_skills: number;
+  by_skill: SkillUsage[];
+  trend: SkillTrendEntry[];
 }
 
 export interface SignalsToolHealth {
@@ -184,6 +236,23 @@ export interface SignalsContextHealth {
   sessions_with_context_data: number;
   avg_context_pressure: number | null;
   high_pressure_sessions: number;
+}
+
+export interface QualitySignalTotals {
+  short_prompt_count: number;
+  unstructured_start: number;
+  missing_success_criteria_count: number;
+  missing_verification_count: number;
+  duplicate_prompt_count: number;
+  no_code_context_count: number;
+  runaway_tool_loop_count: number;
+  frustration_marker_count: number;
+}
+
+export interface SignalsQualityHealth {
+  computed_sessions: number;
+  totals: QualitySignalTotals;
+  sessions_with_signal: QualitySignalTotals;
 }
 
 export interface SignalsTrendBucket {
@@ -214,6 +283,39 @@ export interface SignalsProjectRow {
   avg_failure_signals: number;
 }
 
+export interface SignalCalibration {
+  signal: string;
+  affected_sessions: number;
+  baseline_sessions: number;
+  affected_incomplete_rate: number;
+  baseline_incomplete_rate: number;
+  incomplete_lift: number | null;
+  avg_score_delta: number | null;
+}
+
+export interface SignalSessionExample {
+  session_id: string;
+  project: string;
+  agent: string;
+  date: string;
+  is_automated: boolean;
+  outcome: string;
+  health_score: number | null;
+  health_grade: string | null;
+  signal_total: number;
+  reason_code: string;
+  excerpt: string;
+  message_ordinal?: number | null;
+  failure_signals: number;
+  retries: number;
+  edit_churn: number;
+}
+
+export interface SignalSessionsResponse {
+  signal: string;
+  sessions: SignalSessionExample[];
+}
+
 export interface SignalsAnalyticsResponse {
   scored_sessions: number;
   unscored_sessions: number;
@@ -223,7 +325,35 @@ export interface SignalsAnalyticsResponse {
   outcome_confidence_distribution: Record<string, number>;
   tool_health: SignalsToolHealth;
   context_health: SignalsContextHealth;
+  quality_health: SignalsQualityHealth;
   trend: SignalsTrendBucket[];
   by_agent: SignalsAgentRow[];
   by_project: SignalsProjectRow[];
+  calibration: Record<string, SignalCalibration>;
+}
+
+export interface TrendsBucket {
+  date: string;
+  message_count: number;
+}
+
+export interface TrendsPoint {
+  date: string;
+  count: number;
+}
+
+export interface TrendsSeries {
+  term: string;
+  variants: string[];
+  total: number;
+  points: TrendsPoint[];
+}
+
+export interface TrendsTermsResponse {
+  granularity: TrendsGranularity;
+  from: string;
+  to: string;
+  message_count: number;
+  buckets: TrendsBucket[];
+  series: TrendsSeries[];
 }

@@ -1,12 +1,17 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
+  import { EmptyState } from "@kenn-io/kit-ui";
+  // kit-ui-check-ignore: MessageList uses the local TanStack wrapper for pinned-message scroll reconciliation and per-session measurement cache resets; kit-ui VirtualList does not expose those controls yet.
   import type { Virtualizer } from "@tanstack/virtual-core";
   import { messages } from "../../stores/messages.svelte.js";
   import { ui } from "../../stores/ui.svelte.js";
   import { sessions } from "../../stores/sessions.svelte.js";
+  import { readProgress } from "../../stores/read-progress.svelte.js";
+  import { MessageSquareIcon } from "../../icons.js";
   import { createVirtualizer } from "../../virtual/createVirtualizer.svelte.js";
   import MessageContent from "./MessageContent.svelte";
   import CompactBoundaryDivider from "./CompactBoundaryDivider.svelte";
+  import SystemBoundaryCard from "../system/SystemBoundaryCard.svelte";
   import ToolCallGroup from "./ToolCallGroup.svelte";
   import type { Message } from "../../api/types.js";
   import {
@@ -18,13 +23,30 @@
     hasVisibleSegments,
   } from "../../utils/content-parser.js";
   import { isSystemMessage } from "../../utils/messages.js";
+  import { resolveMessageLayout } from "../../utils/message-layout.js";
   import { inSessionSearch } from "../../stores/inSessionSearch.svelte.js";
   import { sessionActivity } from "../../stores/sessionActivity.svelte.js";
   import SessionFindBar from "./SessionFindBar.svelte";
+  import {
+    getAlignedOffsetScrollAlign,
+    getLatestDisplayIndex,
+    type ScrollAlign,
+  } from "./message-scroll.js";
+  import { m } from "../../i18n/index.js";
 
   let containerRef: HTMLDivElement | undefined = $state(undefined);
-  let scrollRaf: number | null = $state(null);
+  let scrollRaf: number | null = null;
   let lastScrollRequest = 0;
+  let activeFollowScrollRequest: number | null = null;
+  let followingScrollRaf: number | null = null;
+  let followSettleTimer:
+    | ReturnType<typeof setTimeout>
+    | null = null;
+  let visibleProgressSignature: string | null = $state(null);
+  let visibleProgressRaf: number | null = null;
+  let unreadTraversalKey: string | null = null;
+  let unreadBoundarySeen = false;
+  let unreadLatestSeen = false;
 
   let baseMessages: Message[] = $derived.by(() =>
     messages.messages.filter((m) => !isSystemMessage(m)),
@@ -77,6 +99,14 @@
       },
     ).filter(isItemVisible);
   });
+
+  let displayedOrdinals = $derived.by(() =>
+    displayItemsAsc.flatMap((item) => item.ordinals),
+  );
+
+  let displayedOrdinalsSignature = $derived(
+    displayedOrdinals.join(","),
+  );
 
   function itemAt(index: number) {
     if (ui.sortNewestFirst) {
@@ -155,16 +185,217 @@
     sessionActivity.firstVisibleTimestamp = null;
   }
 
+  function recordVisibleProgress() {
+    const v = virtualizer.instance;
+    const sessionId = messages.sessionId;
+    const currentToken = messages.activeSessionToken;
+    const marker = sessionId
+      ? readProgress.get(sessionId)
+      : null;
+    if (
+      !v ||
+      !sessionId ||
+      !currentToken ||
+      !marker ||
+      marker.token === currentToken
+    ) {
+      return;
+    }
+
+    if (baseMessages.length === 0) {
+      readProgress.markRead(
+        sessionId,
+        currentToken,
+        latestRawLoadedOrdinal,
+      );
+      return;
+    }
+
+    const latestDisplayedOrdinal = displayedOrdinals.at(-1);
+    if (latestDisplayedOrdinal === undefined) {
+      readProgress.markRead(
+        sessionId,
+        currentToken,
+        latestLoadedOrdinal,
+      );
+      return;
+    }
+
+    const top = v.scrollOffset ?? containerRef?.scrollTop ?? 0;
+    const height = containerRef?.clientHeight || v.scrollRect?.height || 0;
+    const bottom = top + height;
+    let maxVisibleOrdinal: number | null = null;
+    const visibleOrdinals = new Set<number>();
+
+    for (const row of v.getVirtualItems()) {
+      if (row.end <= top || row.start >= bottom) continue;
+      const item = itemAt(row.index);
+      if (!item) continue;
+      if (item.kind === "message") {
+        visibleOrdinals.add(item.message.ordinal);
+        maxVisibleOrdinal = maxVisibleOrdinal === null
+          ? item.message.ordinal
+          : Math.max(maxVisibleOrdinal, item.message.ordinal);
+        continue;
+      }
+
+      for (const ordinal of visibleToolGroupOrdinals(row.index)) {
+        visibleOrdinals.add(ordinal);
+        maxVisibleOrdinal = maxVisibleOrdinal === null
+          ? ordinal
+          : Math.max(maxVisibleOrdinal, ordinal);
+      }
+    }
+
+    if (maxVisibleOrdinal === null || latestLoadedOrdinal === null) return;
+
+    const rawUnreadBoundary = unreadBoundaryOrdinal(
+      latestLoadedOrdinal,
+    );
+    const unreadBoundary = displayedOrdinals.find((ordinal) =>
+      ordinal >= rawUnreadBoundary
+    ) ?? latestDisplayedOrdinal;
+    const traversalKey =
+      `${sessionId}|${currentToken}|${unreadBoundary}|${latestDisplayedOrdinal}`;
+    if (unreadTraversalKey !== traversalKey) {
+      unreadTraversalKey = traversalKey;
+      unreadBoundarySeen = false;
+      unreadLatestSeen = false;
+    }
+    if (visibleOrdinals.has(unreadBoundary)) {
+      unreadBoundarySeen = true;
+    }
+    if (visibleOrdinals.has(latestDisplayedOrdinal)) {
+      unreadLatestSeen = true;
+    }
+
+    if (ui.sortNewestFirst) {
+      if (unreadBoundarySeen && unreadLatestSeen) {
+        readProgress.markRead(
+          sessionId,
+          currentToken,
+          latestLoadedOrdinal,
+        );
+      }
+      return;
+    }
+
+    if (
+      unreadBoundarySeen &&
+      maxVisibleOrdinal >= latestDisplayedOrdinal
+    ) {
+      readProgress.markRead(
+        sessionId,
+        currentToken,
+        latestLoadedOrdinal,
+      );
+      return;
+    }
+  }
+
+  function visibleToolGroupOrdinals(
+    rowIndex: number,
+  ): number[] {
+    if (!containerRef) return [];
+    const row = containerRef.querySelector<HTMLElement>(
+      `.virtual-row[data-index="${rowIndex}"]`,
+    );
+    if (!row) return [];
+    const rootRect = containerRef.getBoundingClientRect();
+    const ordinals: number[] = [];
+    for (const node of row.querySelectorAll<HTMLElement>("[data-message-ordinal]")) {
+      const ordinal = Number(node.dataset.messageOrdinal);
+      if (!Number.isInteger(ordinal) || ordinal < 0) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.bottom <= rootRect.top || rect.top >= rootRect.bottom) continue;
+      ordinals.push(ordinal);
+    }
+    return ordinals;
+  }
+
   // Recompute visible timestamp when minimap opens or
   // message content changes (e.g. SSE reload).
   $effect(() => {
-    if (ui.activityMinimapOpen) {
+    if (ui.vitalsOpen) {
       // Track message array so the effect re-runs after
       // content changes while the minimap is open.
       void messages.messages.length;
       publishVisibleTimestamp();
     }
   });
+
+  let latestLoadedOrdinal = $derived(
+    baseMessages[baseMessages.length - 1]?.ordinal ?? null,
+  );
+
+  let latestRawLoadedOrdinal = $derived(
+    messages.messages[messages.messages.length - 1]?.ordinal ?? null,
+  );
+
+  function unreadBoundaryOrdinal(
+    latestOrdinal: number,
+  ): number {
+    const explicit = messages.activeSessionUnreadOrdinal;
+    const earliestOrdinal = baseMessages[0]?.ordinal ?? latestOrdinal;
+    const boundary = explicit ?? earliestOrdinal;
+    return baseMessages.find((message) =>
+      message.ordinal >= boundary
+    )?.ordinal ?? latestOrdinal;
+  }
+
+  $effect(() => {
+    const sessionId = messages.sessionId;
+    const currentToken = messages.activeSessionToken;
+    const loading = messages.loading;
+    const latestOrdinal =
+      latestLoadedOrdinal ?? latestRawLoadedOrdinal;
+    if (!sessionId || !currentToken || loading) return;
+    readProgress.baseline(sessionId, currentToken, latestOrdinal);
+  });
+
+  $effect(() => {
+    const sessionId = messages.sessionId;
+    const currentToken = messages.activeSessionToken;
+    const loading = messages.loading;
+    const count = messages.messageCount;
+    const latest = latestDisplaySignature();
+    const displayed = displayedOrdinalsSignature;
+    const unreadOrdinal = messages.activeSessionUnreadOrdinal;
+    if (!sessionId || !currentToken || loading || !containerRef) return;
+    const signature =
+      `${sessionId}|${currentToken}|${count}|${latest}|${unreadOrdinal}|${displayed}`;
+    if (
+      visibleProgressSignature === null ||
+      !visibleProgressSignature.startsWith(`${sessionId}|`)
+    ) {
+      visibleProgressSignature = signature;
+      scheduleVisibleProgress(sessionId, currentToken);
+      return;
+    }
+    if (visibleProgressSignature === signature) return;
+    visibleProgressSignature = signature;
+    scheduleVisibleProgress(sessionId, currentToken);
+  });
+
+  function scheduleVisibleProgress(
+    sessionId: string,
+    currentToken: string,
+  ) {
+    if (visibleProgressRaf !== null) {
+      cancelAnimationFrame(visibleProgressRaf);
+    }
+    visibleProgressRaf = requestAnimationFrame(() => {
+      visibleProgressRaf = null;
+      if (
+        messages.sessionId !== sessionId ||
+        messages.loading ||
+        messages.activeSessionToken !== currentToken
+      ) {
+        return;
+      }
+      recordVisibleProgress();
+    });
+  }
 
   function handleScroll() {
     if (!containerRef) return;
@@ -190,24 +421,108 @@
         }
       }
 
-      if (ui.activityMinimapOpen) {
+      if (ui.vitalsOpen) {
         publishVisibleTimestamp();
       }
+
+      recordVisibleProgress();
+
     });
   }
 
+  function handleManualScrollIntent() {
+    if (ui.followLatest) {
+      cancelFollowLatestWork();
+      ui.setFollowLatest(false);
+    }
+  }
+
+  function manualScrollIntent(node: HTMLElement) {
+    const handleKeydown = (event: KeyboardEvent) => {
+      if (
+        [
+          "ArrowDown",
+          "ArrowUp",
+          "End",
+          "Home",
+          "PageDown",
+          "PageUp",
+          " ",
+        ].includes(event.key)
+      ) {
+        handleManualScrollIntent();
+      }
+    };
+    node.addEventListener("wheel", handleManualScrollIntent, {
+      passive: true,
+    });
+    node.addEventListener("pointerdown", handleManualScrollIntent);
+    node.addEventListener("touchmove", handleManualScrollIntent, {
+      passive: true,
+    });
+    node.addEventListener("keydown", handleKeydown);
+    return {
+      destroy() {
+        node.removeEventListener(
+          "wheel",
+          handleManualScrollIntent,
+        );
+        node.removeEventListener(
+          "pointerdown",
+          handleManualScrollIntent,
+        );
+        node.removeEventListener(
+          "touchmove",
+          handleManualScrollIntent,
+        );
+        node.removeEventListener("keydown", handleKeydown);
+      },
+    };
+  }
+
   onDestroy(() => {
+    if (visibleProgressRaf !== null) {
+      cancelAnimationFrame(visibleProgressRaf);
+      visibleProgressRaf = null;
+    }
     if (scrollRaf !== null) {
       cancelAnimationFrame(scrollRaf);
       scrollRaf = null;
     }
+    if (followingScrollRaf !== null) {
+      cancelAnimationFrame(followingScrollRaf);
+      followingScrollRaf = null;
+    }
+    if (followSettleTimer !== null) {
+      clearTimeout(followSettleTimer);
+      followSettleTimer = null;
+    }
   });
+
+  function cancelFollowLatestWork() {
+    if (
+      activeFollowScrollRequest !== null &&
+      activeFollowScrollRequest === lastScrollRequest
+    ) {
+      lastScrollRequest += 1;
+    }
+    activeFollowScrollRequest = null;
+    if (followingScrollRaf !== null) {
+      cancelAnimationFrame(followingScrollRaf);
+      followingScrollRaf = null;
+    }
+    if (followSettleTimer !== null) {
+      clearTimeout(followSettleTimer);
+      followSettleTimer = null;
+    }
+  }
 
   function scrollToDisplayIndex(
     index: number,
     waitFrames: number = 0,
     scrollRetries: number = 0,
     reqId: number = lastScrollRequest,
+    align: ScrollAlign = "start",
   ) {
     if (reqId !== lastScrollRequest) return;
 
@@ -224,6 +539,7 @@
       requestAnimationFrame(() => {
         scrollToDisplayIndex(
           index, waitFrames + 1, 0, reqId,
+          align,
         );
       });
       return;
@@ -236,13 +552,28 @@
     );
     if (isRendered) {
       const offsetAndAlign =
-        v.getOffsetForIndex(index, "start");
+        v.getOffsetForIndex(index, align);
       if (offsetAndAlign) {
         const [offset] = offsetAndAlign;
         v.scrollToOffset(
           Math.round(offset),
-          { align: "start" },
+          { align: getAlignedOffsetScrollAlign(align) },
         );
+        return;
+      }
+      v.scrollToIndex(index, { align });
+      if (scrollRetries < 15) {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            scrollToDisplayIndex(
+              index,
+              waitFrames,
+              scrollRetries + 1,
+              reqId,
+              align,
+            );
+          });
+        });
       }
       return;
     }
@@ -258,12 +589,16 @@
     // finds the item rendered (for an exact offset scroll) or
     // repeats with a more accurate estimate. Limit to 15 scroll
     // retries (~480 ms) to avoid looping forever.
-    v.scrollToIndex(index, { align: "start" });
+    v.scrollToIndex(index, { align });
     if (scrollRetries < 15) {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           scrollToDisplayIndex(
-            index, waitFrames, scrollRetries + 1, reqId,
+            index,
+            waitFrames,
+            scrollRetries + 1,
+            reqId,
+            align,
           );
         });
       });
@@ -276,6 +611,7 @@
 
   async function scrollToOrdinalInternal(ordinal: number) {
     const reqId = ++lastScrollRequest;
+    activeFollowScrollRequest = null;
 
     const idxAsc = displayItemsAsc.findIndex((item) =>
       item.ordinals.includes(ordinal),
@@ -313,6 +649,111 @@
     void scrollToOrdinalInternal(ordinal);
   }
 
+  function scrollToLatestInternal() {
+    const reqId = ++lastScrollRequest;
+    activeFollowScrollRequest = reqId;
+    const idx = getLatestDisplayIndex(
+      displayItemsAsc.length,
+      ui.sortNewestFirst,
+    );
+    if (idx < 0) return;
+    scrollToDisplayIndex(
+      idx,
+      0,
+      0,
+      reqId,
+      ui.sortNewestFirst ? "start" : "end",
+    );
+    startFollowLatestSettle(reqId);
+  }
+
+  function forceLatestEdge() {
+    if (!containerRef) return;
+    containerRef.scrollTop = ui.sortNewestFirst
+      ? 0
+      : containerRef.scrollHeight;
+  }
+
+  function startFollowLatestSettle(reqId: number) {
+    if (followSettleTimer !== null) {
+      clearTimeout(followSettleTimer);
+      followSettleTimer = null;
+    }
+
+    const tick = () => {
+      followSettleTimer = null;
+      if (
+        reqId !== lastScrollRequest ||
+        !ui.followLatest ||
+        !containerRef
+      ) {
+        return;
+      }
+
+      forceLatestEdge();
+      followSettleTimer = setTimeout(tick, 100);
+    };
+
+    tick();
+  }
+
+  function queueFollowLatestScroll() {
+    if (!ui.followLatest) return;
+    if (followingScrollRaf !== null) {
+      cancelAnimationFrame(followingScrollRaf);
+    }
+    followingScrollRaf = requestAnimationFrame(() => {
+      followingScrollRaf = null;
+      if (!ui.followLatest) return;
+      scrollToLatestInternal();
+    });
+  }
+
+  function latestDisplaySignature(): string {
+    const item = displayItemsAsc[displayItemsAsc.length - 1];
+    if (!item) return "";
+    if (item.kind === "tool-group") {
+      return item.messages
+        .map((m) => `${m.ordinal}:${m.content_length}:${m.timestamp}`)
+        .join("|");
+    }
+    const m = item.message;
+    return `${m.ordinal}:${m.content_length}:${m.timestamp}`;
+  }
+
+  function itemOrdinals(item: DisplayItem): number[] {
+    if (item.kind === "message") return [item.message.ordinal];
+    const source = ui.sortNewestFirst
+      ? [...item.messages].reverse()
+      : item.messages;
+    return source.map((message) => message.ordinal);
+  }
+
+  $effect(() => {
+    const follow = ui.followLatest;
+    if (!follow) {
+      cancelFollowLatestWork();
+    }
+  });
+
+  $effect(() => {
+    const follow = ui.followLatest;
+    const request = ui.followLatestRequest;
+    const count = displayItemsAsc.length;
+    const latest = latestDisplaySignature();
+    const newestFirst = ui.sortNewestFirst;
+    const sessionId = messages.sessionId;
+    if (!follow || count === 0 || !sessionId) return;
+    void request;
+    void latest;
+    void newestFirst;
+    queueFollowLatestScroll();
+  });
+
+  export function scrollToLatest() {
+    scrollToLatestInternal();
+  }
+
   export function getDisplayItems(): DisplayItem[] {
     return displayItemsAsc;
   }
@@ -326,30 +767,87 @@
       ? inSessionSearch.query
       : "",
   );
+
+  let effectiveLayout = $derived(
+    resolveMessageLayout(ui.messageLayout, highlightQuery !== ""),
+  );
+
+  let readProgressDivider = $derived.by(() => {
+    const sessionId = messages.sessionId;
+    const currentToken = messages.activeSessionToken;
+    const marker = sessionId
+      ? readProgress.get(sessionId)
+      : null;
+    const latestOrdinal = latestLoadedOrdinal;
+    if (
+      !sessionId ||
+      !currentToken ||
+      !marker ||
+      marker.token === currentToken ||
+      latestOrdinal === null
+    ) {
+      return null;
+    }
+
+    const unreadBoundary = unreadBoundaryOrdinal(latestOrdinal);
+
+    const items = ui.sortNewestFirst
+      ? [...displayItemsAsc].reverse()
+      : displayItemsAsc;
+
+    if (ui.sortNewestFirst) {
+      if (messages.activeSessionUnreadOrdinal === null) {
+        return null;
+      }
+      const dividerBoundary = marker.ordinal !== null &&
+          unreadBoundary === marker.ordinal + 1
+        ? marker.ordinal
+        : unreadBoundary;
+      for (const item of items) {
+        for (const ordinal of itemOrdinals(item)) {
+          if (ordinal <= dividerBoundary) {
+            return {
+              ordinal,
+              label: m.read_progress_earlier_messages(),
+            };
+          }
+        }
+      }
+      return null;
+    }
+
+    for (const item of items) {
+      for (const ordinal of itemOrdinals(item)) {
+        if (ordinal >= unreadBoundary) {
+          return {
+            ordinal,
+            label: m.read_progress_new_messages(),
+          };
+        }
+      }
+    }
+    return null;
+  });
 </script>
 
 {#if !sessions.activeSessionId}
-  <div class="empty-state">
-    <div class="empty-icon">
-      <svg width="36" height="36" viewBox="0 0 16 16" fill="var(--text-muted)">
-        <path d="M14 1a1 1 0 011 1v8a1 1 0 01-1 1h-2.5a2 2 0 00-1.6.8L8 14.333 6.1 11.8a2 2 0 00-1.6-.8H2a1 1 0 01-1-1V2a1 1 0 011-1h12z"/>
-      </svg>
-    </div>
-    <p class="empty-text">Select a session to view messages</p>
-  </div>
+  <EmptyState title={m.message_list_empty()}>
+    {#snippet icon()}
+      <MessageSquareIcon size="36" strokeWidth="1.5" aria-hidden="true" />
+    {/snippet}
+  </EmptyState>
 {:else if messages.loading && messages.messages.length === 0}
-  <div class="empty-state">
-    <p class="empty-text">Loading messages...</p>
-  </div>
+  <EmptyState title={m.message_list_loading()} />
 {:else}
   <SessionFindBar />
   <div
-    class="message-list-scroll layout-{ui.messageLayout}"
+    class="message-list-scroll layout-{effectiveLayout}"
     bind:this={containerRef}
     data-session-id={sessions.activeSessionId}
     data-messages-session-id={messages.sessionId}
     data-loaded={!messages.loading}
     onscroll={handleScroll}
+    use:manualScrollIntent
   >
     <div
       style="height: {virtualizer.instance?.getTotalSize() ?? 0}px; width: 100%; position: relative;"
@@ -372,15 +870,30 @@
               ui.selectOrdinal(item.ordinals[0]!);
             }}
           >
+            {#if item.kind !== "tool-group" && readProgressDivider !== null && item.ordinals.includes(readProgressDivider.ordinal)}
+              <div class="read-progress-divider" role="separator" aria-label={m.read_progress_boundary()}>
+                {readProgressDivider.label}
+              </div>
+            {/if}
             {#if item.kind === "tool-group"}
               <ToolCallGroup
                 messages={item.messages}
                 timestamp={item.timestamp}
                 highlightQuery={highlightQuery}
                 isCurrentHighlight={item.ordinals.includes(inSessionSearch.currentOrdinal ?? -1)}
+                sortNewestFirst={ui.sortNewestFirst}
+                divider={readProgressDivider !== null && item.ordinals.includes(readProgressDivider.ordinal)
+                  ? readProgressDivider
+                  : undefined}
               />
             {:else if item.message.is_compact_boundary}
               <CompactBoundaryDivider message={item.message} />
+            {:else if item.message.is_system && item.message.source_subtype && item.message.source_subtype !== 'compact_boundary'}
+              <SystemBoundaryCard
+                subtype={item.message.source_subtype}
+                content={item.message.content}
+                timestamp={item.message.timestamp}
+              />
             {:else}
               <MessageContent
                 message={item.message}
@@ -415,23 +928,26 @@
     border-radius: var(--radius-md, 6px);
   }
 
-  .empty-state {
-    flex: 1;
+  .read-progress-divider {
     display: flex;
-    flex-direction: column;
     align-items: center;
-    justify-content: center;
-    color: var(--text-muted);
-    gap: 12px;
+    gap: 8px;
+    margin-bottom: 8px;
+    color: var(--accent-blue);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
   }
 
-  .empty-icon {
-    opacity: 0.25;
-  }
-
-  .empty-text {
-    font-size: 14px;
-    font-weight: 500;
+  .read-progress-divider::before,
+  .read-progress-divider::after {
+    content: "";
+    height: 1px;
+    flex: 1;
+    background: color-mix(
+      in srgb, var(--accent-blue) 35%, transparent
+    );
   }
 
   /* ── Compact layout ── */
@@ -515,5 +1031,63 @@
   .layout-stream :global(.text-content) {
     font-size: 14px;
     line-height: 1.75;
+  }
+
+  /* ── Skim layout ── */
+  .layout-skim {
+    padding: 0;
+  }
+
+  .layout-skim .virtual-row {
+    padding: 0;
+  }
+
+  .layout-skim :global(.message-header) {
+    display: none;
+  }
+
+  .layout-skim :global(.tool-block) {
+    border-left: none;
+    border-radius: 0;
+  }
+
+  .layout-skim :global(.tool-chevron) {
+    display: none;
+  }
+
+  /* Keep the one-line summary, but make the header non-interactive so a
+     click cannot silently toggle hidden collapse state (which would
+     surprise the user on switching back to a full layout). Row selection
+     still works via the virtual-row wrapper behind the header. */
+  .layout-skim :global(.tool-header) {
+    padding: 1px 12px;
+    pointer-events: none;
+  }
+
+  .layout-skim :global(.tool-meta),
+  .layout-skim :global(.tool-content),
+  .layout-skim :global(.diff-view),
+  .layout-skim :global(.output-header),
+  .layout-skim :global(.history-header),
+  .layout-skim :global(.result-history),
+  .layout-skim :global(.show-more-btn) {
+    display: none;
+  }
+
+  .layout-skim :global(.tool-group-header),
+  .layout-skim :global(.pg-header) {
+    display: none;
+  }
+
+  .layout-skim :global(.tool-group),
+  .layout-skim :global(.parallel-group) {
+    border: none;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+  }
+
+  .layout-skim :global(.subagent-inline) {
+    display: none;
   }
 </style>

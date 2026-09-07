@@ -1,3 +1,16 @@
+import { formatTokenCount } from "@kenn-io/kit-ui/utils/format";
+import { formatDateTime, m } from "../i18n/index.js";
+export { formatMoney as formatCost } from "../money.js";
+
+// These four helpers are byte-identical to kit-ui's implementations; the
+// locale-aware / app-specific formatters below stay local. Note kit-ui keeps
+// `truncate` in its time module, not format.
+export {
+  formatNumber,
+  formatTokenCount,
+} from "@kenn-io/kit-ui/utils/format";
+export { truncate } from "@kenn-io/kit-ui/utils/time";
+
 const MINUTE = 60;
 const HOUR = 3600;
 const DAY = 86400;
@@ -12,12 +25,24 @@ export function formatRelativeTime(
   const date = new Date(isoString);
   const diffSec = Math.floor((Date.now() - date.getTime()) / 1000);
 
-  if (diffSec < MINUTE) return "just now";
-  if (diffSec < HOUR) return `${Math.floor(diffSec / MINUTE)}m ago`;
-  if (diffSec < DAY) return `${Math.floor(diffSec / HOUR)}h ago`;
-  if (diffSec < WEEK) return `${Math.floor(diffSec / DAY)}d ago`;
+  if (diffSec < MINUTE) return m.shared_relative_just_now();
+  if (diffSec < HOUR) {
+    return m.shared_relative_minutes_ago({
+      count: Math.floor(diffSec / MINUTE),
+    });
+  }
+  if (diffSec < DAY) {
+    return m.shared_relative_hours_ago({
+      count: Math.floor(diffSec / HOUR),
+    });
+  }
+  if (diffSec < WEEK) {
+    return m.shared_relative_days_ago({
+      count: Math.floor(diffSec / DAY),
+    });
+  }
 
-  return date.toLocaleDateString(undefined, {
+  return formatDateTime(date, {
     month: "short",
     day: "numeric",
   });
@@ -29,18 +54,12 @@ export function formatTimestamp(
 ): string {
   if (!isoString) return "—";
   const d = new Date(isoString);
-  return d.toLocaleString(undefined, {
+  return formatDateTime(d, {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
   });
-}
-
-/** Truncates a string with ellipsis */
-export function truncate(s: string, maxLen: number): string {
-  if (s.length <= maxLen) return s;
-  return s.slice(0, maxLen - 1) + "\u2026";
 }
 
 /** Formats an agent name for display */
@@ -50,22 +69,6 @@ export function formatAgentName(
   if (!agent) return "Unknown";
   // Capitalize first letter
   return agent.charAt(0).toUpperCase() + agent.slice(1);
-}
-
-/** Formats a number with commas */
-export function formatNumber(n: number): string {
-  return n.toLocaleString();
-}
-
-/** Formats a token count as a compact string (e.g. 1.2k, 3.5M) */
-export function formatTokenCount(n: number): string {
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) {
-    const k = Math.floor(n / 100) / 10;
-    return k % 1 === 0 ? `${Math.floor(k)}k` : `${k}k`;
-  }
-  const m = Math.floor(n / 100_000) / 10;
-  return m % 1 === 0 ? `${Math.floor(m)}M` : `${m}M`;
 }
 
 export function formatTokenUsage(

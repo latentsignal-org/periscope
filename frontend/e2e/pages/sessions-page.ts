@@ -1,5 +1,7 @@
 import { expect, type Locator, type Page } from "@playwright/test";
 
+const SESSION_READY_TIMEOUT_MS = process.env.CI === "true" ? 15_000 : 5_000;
+
 /**
  * Page object for the sessions view.
  * Encapsulates selectors and common navigation actions
@@ -14,6 +16,7 @@ export class SessionsPage {
   readonly sortButton: Locator;
   readonly projectTypeahead: Locator;
   readonly sessionListHeader: Locator;
+  readonly sessionCount: Locator;
 
   readonly analyticsPage: Locator;
   readonly analyticsToolbar: Locator;
@@ -25,8 +28,9 @@ export class SessionsPage {
     this.messageRows = page.locator(".virtual-row");
     this.scroller = page.locator(".message-list-scroll");
     this.sortButton = page.getByLabel("Toggle sort order");
-    this.projectTypeahead = page.locator(".typeahead");
+    this.projectTypeahead = page.locator(".kit-typeahead");
     this.sessionListHeader = page.locator(".session-list-header");
+    this.sessionCount = this.sessionListHeader.locator(".session-count");
     this.analyticsPage = page.locator(".analytics-page");
     this.analyticsToolbar = page.locator(".analytics-toolbar");
     this.exportBtn = page.locator(".export-btn");
@@ -35,7 +39,7 @@ export class SessionsPage {
   async goto() {
     await this.page.goto("/");
     await expect(this.sessionItems.first()).toBeVisible({
-      timeout: 5_000,
+      timeout: SESSION_READY_TIMEOUT_MS,
     });
   }
 
@@ -64,8 +68,8 @@ export class SessionsPage {
   }
 
   async filterByProject(project: string) {
-    const trigger = this.projectTypeahead.locator(".typeahead-trigger");
-    const input = this.projectTypeahead.locator(".typeahead-input");
+    const trigger = this.projectTypeahead.locator(".kit-typeahead__trigger");
+    const input = this.projectTypeahead.locator(".kit-typeahead__input");
     // The typeahead may close immediately if a reactive update
     // steals focus right after opening. Retry until stable.
     await expect(async () => {
@@ -78,17 +82,20 @@ export class SessionsPage {
     await input.click();
     await input.fill(project);
     const escaped = project.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // kit-ui renders the option label as match-highlight segments inside
+    // a label span, so the option's text carries template whitespace
+    // around the name — anchor with \s* instead of exact spacing.
     await this.projectTypeahead
-      .locator(".typeahead-option", {
-        hasText: new RegExp(`^${escaped} \\(`),
+      .locator(".kit-typeahead__option", {
+        hasText: new RegExp(`^\\s*${escaped}\\s*\\(`),
       })
       .click();
   }
 
   async clearProjectFilter() {
-    await this.projectTypeahead.locator(".typeahead-trigger").click();
+    await this.projectTypeahead.locator(".kit-typeahead__trigger").click();
     await this.projectTypeahead
-      .locator(".typeahead-option", { hasText: "All Projects" })
+      .locator(".kit-typeahead__option", { hasText: "All Projects" })
       .click();
   }
 

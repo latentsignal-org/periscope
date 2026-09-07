@@ -1,15 +1,33 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
 import {
   findActiveBucketIndex,
   sessionActivity,
 } from "./sessionActivity.svelte.js";
-import * as api from "../api/client.js";
+import { SessionsService } from "../api/generated/index";
 import type { SessionActivityBucket } from "../api/types/session-activity.js";
 import type { SessionActivityResponse } from "../api/types/session-activity.js";
 
-vi.mock("../api/client.js", () => ({
-  getSessionActivity: vi.fn(),
+const apiRuntimeMocks = vi.hoisted(() => ({
+  callGenerated: vi.fn(
+    (request: () => Promise<unknown>, _signal?: AbortSignal) => request(),
+  ),
 }));
+
+vi.mock("../api/runtime.js", () => ({
+  configureGeneratedClient: vi.fn(),
+  callGenerated: apiRuntimeMocks.callGenerated,
+  isAbortError: vi.fn(() => false),
+}));
+
+vi.mock("../api/generated/index", () => ({
+  SessionsService: {
+    getApiV1SessionsIdActivity: vi.fn(),
+  },
+}));
+
+const sessionsService = SessionsService as unknown as {
+  getApiV1SessionsIdActivity: ReturnType<typeof vi.fn>;
+};
 
 function bucket(
   start: string,
@@ -57,12 +75,54 @@ describe("SessionActivityStore", () => {
   beforeEach(() => {
     sessionActivity.clear();
     vi.resetAllMocks();
+    apiRuntimeMocks.callGenerated.mockImplementation(
+      (request: () => Promise<unknown>, _signal?: AbortSignal) => request(),
+    );
+  });
+
+  it("aborts session activity when another session replaces it", async () => {
+    const signals: AbortSignal[] = [];
+    apiRuntimeMocks.callGenerated.mockImplementation((request, signal) => {
+      signals.push(signal as AbortSignal);
+      return request();
+    });
+    sessionsService.getApiV1SessionsIdActivity
+      .mockImplementationOnce(() => new Promise(() => {}))
+      .mockResolvedValueOnce(makeResponse(2));
+
+    void sessionActivity.load("s1");
+    await Promise.resolve();
+    await sessionActivity.load("s2");
+
+    expect(signals[0]?.aborted).toBe(true);
+  });
+
+  it("aborts session activity without clearing cached buckets", async () => {
+    const signals: AbortSignal[] = [];
+    apiRuntimeMocks.callGenerated.mockImplementation((request, signal) => {
+      signals.push(signal as AbortSignal);
+      return request();
+    });
+    sessionsService.getApiV1SessionsIdActivity.mockResolvedValueOnce(
+      makeResponse(2),
+    );
+    await sessionActivity.load("s1");
+    sessionsService.getApiV1SessionsIdActivity.mockImplementationOnce(
+      () => new Promise(() => {}),
+    );
+
+    void sessionActivity.reload("s1");
+    await Promise.resolve();
+    sessionActivity.cancelInFlight();
+
+    expect(signals.at(-1)?.aborted).toBe(true);
+    expect(sessionActivity.buckets).toHaveLength(2);
   });
 
   it("ignores stale response after session switch", async () => {
     const { promise: s1Hang, resolve: resolveS1 } =
       createDeferred<SessionActivityResponse>();
-    vi.mocked(api.getSessionActivity).mockReturnValueOnce(
+    sessionsService.getApiV1SessionsIdActivity.mockReturnValueOnce(
       s1Hang,
     );
 
@@ -70,7 +130,7 @@ describe("SessionActivityStore", () => {
     const p1 = sessionActivity.load("s1");
 
     // Switch to session 2 before s1 resolves.
-    vi.mocked(api.getSessionActivity).mockResolvedValueOnce(
+    sessionsService.getApiV1SessionsIdActivity.mockResolvedValueOnce(
       makeResponse(3),
     );
     const p2 = sessionActivity.load("s2");
@@ -87,7 +147,7 @@ describe("SessionActivityStore", () => {
   });
 
   it("does not retry after a failed fetch", async () => {
-    vi.mocked(api.getSessionActivity).mockRejectedValueOnce(
+    sessionsService.getApiV1SessionsIdActivity.mockRejectedValueOnce(
       new Error("network error"),
     );
     await sessionActivity.load("s1");
@@ -99,7 +159,7 @@ describe("SessionActivityStore", () => {
     // A second load for the same session should not re-fetch
     // because the session is already marked as loaded (even
     // though it failed). The user must use reload() to retry.
-    vi.mocked(api.getSessionActivity).mockResolvedValueOnce(
+    sessionsService.getApiV1SessionsIdActivity.mockResolvedValueOnce(
       makeResponse(2),
     );
     await sessionActivity.load("s1");
@@ -107,14 +167,14 @@ describe("SessionActivityStore", () => {
     // Still shows the error, did not auto-retry.
     expect(sessionActivity.error).toBe("network error");
     expect(
-      vi.mocked(api.getSessionActivity),
+      sessionsService.getApiV1SessionsIdActivity,
     ).toHaveBeenCalledTimes(1);
   });
 
   it("invalidate discards in-flight load and forces refetch", async () => {
     const { promise: s1Hang, resolve: resolveS1 } =
       createDeferred<SessionActivityResponse>();
-    vi.mocked(api.getSessionActivity).mockReturnValueOnce(
+    sessionsService.getApiV1SessionsIdActivity.mockReturnValueOnce(
       s1Hang,
     );
 
@@ -132,14 +192,14 @@ describe("SessionActivityStore", () => {
     expect(sessionActivity.loaded).toBe(false);
 
     // Reopen triggers load — should refetch, not short-circuit.
-    vi.mocked(api.getSessionActivity).mockResolvedValueOnce(
+    sessionsService.getApiV1SessionsIdActivity.mockResolvedValueOnce(
       makeResponse(5),
     );
     await sessionActivity.load("s1");
 
     expect(sessionActivity.buckets.length).toBe(5);
     expect(
-      vi.mocked(api.getSessionActivity),
+      sessionsService.getApiV1SessionsIdActivity,
     ).toHaveBeenCalledTimes(2);
   });
 
@@ -148,7 +208,7 @@ describe("SessionActivityStore", () => {
     expect(sessionActivity.loading).toBe(false);
 
     // Successful load sets loaded=true.
-    vi.mocked(api.getSessionActivity).mockResolvedValueOnce(
+    sessionsService.getApiV1SessionsIdActivity.mockResolvedValueOnce(
       makeResponse(2),
     );
     await sessionActivity.load("s1");
@@ -162,7 +222,7 @@ describe("SessionActivityStore", () => {
   });
 
   it("sets loaded on fetch error", async () => {
-    vi.mocked(api.getSessionActivity).mockRejectedValueOnce(
+    sessionsService.getApiV1SessionsIdActivity.mockRejectedValueOnce(
       new Error("network error"),
     );
     await sessionActivity.load("s1");
@@ -176,7 +236,7 @@ describe("SessionActivityStore", () => {
     // The component-level publishVisibleTimestamp() path that
     // sets this value is covered by the E2E test "active
     // indicator moves after reopen without scroll."
-    vi.mocked(api.getSessionActivity).mockResolvedValueOnce(
+    sessionsService.getApiV1SessionsIdActivity.mockResolvedValueOnce(
       makeResponse(2),
     );
     await sessionActivity.load("s1");
@@ -193,7 +253,7 @@ describe("SessionActivityStore", () => {
   });
 
   it("clears firstVisibleTimestamp on new load", async () => {
-    vi.mocked(api.getSessionActivity).mockResolvedValue(
+    sessionsService.getApiV1SessionsIdActivity.mockResolvedValue(
       makeResponse(2),
     );
     await sessionActivity.load("s1");

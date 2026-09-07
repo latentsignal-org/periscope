@@ -1,9 +1,10 @@
 <script lang="ts">
-  import SettingsSection from "./SettingsSection.svelte";
+  import { m } from "../../i18n/index.js";
   import { settings } from "../../stores/settings.svelte.js";
 
   const AGENT_LABELS: Record<string, string> = {
     claude: "Claude Code",
+    cowork: "Claude Cowork",
     codex: "Codex",
     copilot: "Copilot",
     gemini: "Gemini",
@@ -14,38 +15,44 @@
     iflow: "iFlow",
     "vscode-copilot": "VSCode Copilot",
     pi: "Pi",
+    "visualstudio-copilot": "Visual Studio Copilot",
+    qwen: "Qwen Code",
     openclaw: "OpenClaw",
+    qclaw: "QClaw",
+    zed: "Zed",
     kimi: "Kimi",
+    "kimi-work": "Kimi Work",
+    workbuddy: "WorkBuddy",
+    qoder: "Qoder",
+    piebald: "Piebald",
+    antigravity: "Antigravity",
+    "antigravity-cli": "Antigravity CLI",
+    shelley: "Shelley",
   };
 </script>
 
-<SettingsSection
-  title="Agent Directories"
-  description="Directories scanned for session data. Configured via environment variables or config file."
->
-  <div class="dir-list">
-    {#each Object.entries(settings.agentDirs) as [agent, dirs]}
-      <div class="dir-row">
-        <span class="dir-agent">{AGENT_LABELS[agent] ?? agent}</span>
-        <div class="dir-paths">
-          {#if dirs.length === 0}
-            <span class="dir-none">Not configured</span>
-          {:else}
-            {#each dirs as dir}
-              <code class="dir-path">{dir}</code>
-            {/each}
-          {/if}
-        </div>
+<div class="dir-list">
+  {#each Object.entries(settings.agentDirs) as [agent, dirs]}
+    <div class="dir-row">
+      <span class="dir-agent">{AGENT_LABELS[agent] ?? agent}</span>
+      <div class="dir-paths">
+        {#if dirs.length === 0}
+          <span class="dir-none">{m.settings_agent_dir_not_configured()}</span>
+        {:else}
+          {#each dirs as dir}
+            <code class="dir-path">{dir}</code>
+          {/each}
+        {/if}
       </div>
-    {/each}
-  </div>
-</SettingsSection>
+    </div>
+  {/each}
+</div>
 
 <style>
   .dir-list {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: var(--space-5);
   }
 
   .dir-row {

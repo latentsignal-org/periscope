@@ -4,6 +4,8 @@ import (
 	"errors"
 	"io/fs"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -14,13 +16,9 @@ const (
 // requirePathError asserts that err is non-nil and wraps *fs.PathError.
 func requirePathError(t *testing.T, err error) {
 	t.Helper()
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
+	require.Error(t, err)
 	var pathErr *fs.PathError
-	if !errors.As(err, &pathErr) {
-		t.Fatalf("expected *fs.PathError, got %T: %v", err, err)
-	}
+	require.True(t, errors.As(err, &pathErr), "expected *fs.PathError, got %T: %v", err, err)
 }
 
 // failingReader is an io.Reader that always returns an error.

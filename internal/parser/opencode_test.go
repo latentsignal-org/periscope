@@ -3,16 +3,1300 @@ package parser
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// parseOpenCodeAll parses every session in an OpenCode SQLite database using
+// the same per-session primitives the provider uses (ListOpenCodeSessionMeta +
+// parseOpenCodeDBSession), reproducing the deleted ParseOpenCodeDB
+// whole-database free function for the retained parse tests.
+func parseOpenCodeAll(dbPath, machine string) ([]ParseResult, error) {
+	metas, err := ListOpenCodeSessionMeta(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	var out []ParseResult
+	for _, m := range metas {
+		sess, msgs, err := parseOpenCodeDBSession(dbPath, m.SessionID, machine)
+		if err != nil {
+			return nil, err
+		}
+		if sess == nil {
+			continue
+		}
+		out = append(out, ParseResult{Session: *sess, Messages: msgs})
+	}
+	return out, nil
+}
 
 // openCodeSchema matches the real OpenCode database schema.
 // Role and part type live inside the JSON data columns.
 const openCodeSchema = `
+CREATE TABLE project (
+	id TEXT PRIMARY KEY,
+	worktree TEXT NOT NULL,
+	time_created INTEGER NOT NULL DEFAULT 0,
+	time_updated INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE session (
+	id TEXT PRIMARY KEY,
+	project_id TEXT NOT NULL,
+	parent_id TEXT,
+	title TEXT,
+	directory TEXT NOT NULL DEFAULT '',
+	time_created INTEGER NOT NULL,
+	time_updated INTEGER NOT NULL,
+	FOREIGN KEY (project_id) REFERENCES project(id)
+);
+
+CREATE TABLE message (
+	id TEXT PRIMARY KEY,
+	session_id TEXT NOT NULL,
+	time_created INTEGER NOT NULL,
+	time_updated INTEGER NOT NULL,
+	data TEXT NOT NULL,
+	FOREIGN KEY (session_id) REFERENCES session(id)
+);
+
+CREATE TABLE part (
+	id TEXT PRIMARY KEY,
+	message_id TEXT NOT NULL,
+	session_id TEXT NOT NULL,
+	time_created INTEGER NOT NULL,
+	time_updated INTEGER NOT NULL,
+	data TEXT NOT NULL,
+	FOREIGN KEY (message_id) REFERENCES message(id)
+);
+`
+
+func assertEq[T comparable](t *testing.T, name string, got, want T) {
+	t.Helper()
+	assert.Equal(t, want, got, name)
+}
+
+type OpenCodeSeeder struct {
+	db *sql.DB
+	t  *testing.T
+}
+
+func (s *OpenCodeSeeder) AddProject(id, worktree string) {
+	s.t.Helper()
+	_, err := s.db.Exec(`INSERT INTO project (id, worktree) VALUES (?, ?)`, id, worktree)
+	require.NoError(s.t, err, "add project")
+}
+
+func (s *OpenCodeSeeder) AddSession(id, projectID, parentID, title string, timeCreated, timeUpdated int64) {
+	s.t.Helper()
+
+	var pID, tStr any
+	if parentID != "" {
+		pID = parentID
+	}
+	if title != "" {
+		tStr = title
+	}
+
+	// Omit directory so the same helper works on legacy schemas that
+	// lack the column; modern fixtures default directory to ''.
+	_, err := s.db.Exec(
+		`INSERT INTO session
+			(id, project_id, parent_id, title, time_created, time_updated)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		id, projectID, pID, tStr, timeCreated, timeUpdated,
+	)
+	require.NoError(s.t, err, "add session")
+}
+
+func (s *OpenCodeSeeder) AddSessionDirectory(
+	id, projectID, parentID, title, directory string,
+	timeCreated, timeUpdated int64,
+) {
+	s.t.Helper()
+
+	var pID, tStr any
+	if parentID != "" {
+		pID = parentID
+	}
+	if title != "" {
+		tStr = title
+	}
+
+	_, err := s.db.Exec(
+		`INSERT INTO session
+			(id, project_id, parent_id, title, directory,
+			 time_created, time_updated)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, projectID, pID, tStr, directory, timeCreated, timeUpdated,
+	)
+	require.NoError(s.t, err, "add session with directory")
+}
+
+func (s *OpenCodeSeeder) AddMessage(id, sessionID string, timeCreated, timeUpdated int64, data string) {
+	s.t.Helper()
+	_, err := s.db.Exec(`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)`,
+		id, sessionID, timeCreated, timeUpdated, data)
+	require.NoError(s.t, err, "add message")
+}
+
+func (s *OpenCodeSeeder) AddPart(id, messageID, sessionID string, timeCreated, timeUpdated int64, data string) {
+	s.t.Helper()
+	_, err := s.db.Exec(`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, messageID, sessionID, timeCreated, timeUpdated, data)
+	require.NoError(s.t, err, "add part")
+}
+
+func newTestDB(t *testing.T) (string, *OpenCodeSeeder, *sql.DB) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "opencode.db")
+	copyOpenCodeSchemaTemplate(t, dbPath)
+	db, err := sql.Open("sqlite3", dbPath)
+	require.NoError(t, err, "open test db")
+
+	seeder := &OpenCodeSeeder{db: db, t: t}
+	return dbPath, seeder, db
+}
+
+var (
+	openCodeSchemaTemplateOnce  sync.Once
+	openCodeSchemaTemplateBytes []byte
+	openCodeSchemaTemplateErr   error
+)
+
+func copyOpenCodeSchemaTemplate(t *testing.T, dbPath string) {
+	t.Helper()
+	openCodeSchemaTemplateOnce.Do(func() {
+		openCodeSchemaTemplateBytes, openCodeSchemaTemplateErr =
+			buildOpenCodeSchemaTemplate()
+	})
+	require.NoError(t, openCodeSchemaTemplateErr)
+	require.NoError(t, os.MkdirAll(filepath.Dir(dbPath), 0o755),
+		"mkdir opencode test db dir")
+	require.NoError(t, os.WriteFile(dbPath, openCodeSchemaTemplateBytes, 0o644),
+		"copy opencode schema template")
+}
+
+func buildOpenCodeSchemaTemplate() ([]byte, error) {
+	dir, err := os.MkdirTemp("", "agentsview-opencode-schema-*")
+	if err != nil {
+		return nil, fmt.Errorf("create opencode schema template dir: %w", err)
+	}
+	defer os.RemoveAll(dir)
+
+	dbPath := filepath.Join(dir, "opencode.db")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open opencode schema template: %w", err)
+	}
+	if _, err = db.Exec(openCodeSchema); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("create opencode schema template: %w", err)
+	}
+	if err = db.Close(); err != nil {
+		return nil, fmt.Errorf("close opencode schema template: %w", err)
+	}
+	raw, err := os.ReadFile(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("read opencode schema template: %w", err)
+	}
+	return raw, nil
+}
+
+// seedHybridSQLiteDB creates an OpenCode-shaped SQLite DB at
+// dbPath containing a single session row with the given ID. Used
+// by tests that exercise OpenCode-format source lookup in hybrid and
+// pure-SQLite roots, where a real DB file (not just a marker) is
+// required.
+func seedHybridSQLiteDB(t *testing.T, dbPath, sessionID string) {
+	t.Helper()
+	copyOpenCodeSchemaTemplate(t, dbPath)
+	db, err := sql.Open("sqlite3", dbPath)
+	require.NoError(t, err, "open hybrid db")
+	t.Cleanup(func() { db.Close() })
+	_, err = db.Exec(
+		`INSERT INTO project (id, worktree)
+		 VALUES (?, ?)`,
+		"prj_seed", "/tmp/seed",
+	)
+	require.NoError(t, err, "seed project")
+	_, err = db.Exec(
+		`INSERT INTO session
+			(id, project_id, time_created, time_updated)
+		 VALUES (?, ?, ?, ?)`,
+		sessionID, "prj_seed", int64(1), int64(2),
+	)
+	require.NoError(t, err, "seed session")
+}
+
+func seedStandardSession(t *testing.T, seeder *OpenCodeSeeder) {
+	t.Helper()
+	seeder.AddProject("prj_1", "/home/user/code/myapp")
+	seeder.AddSession("ses_abc", "prj_1", "", "Test Session", 1700000000000, 1700000060000)
+
+	seeder.AddMessage("msg_1", "ses_abc", 1700000000000, 1700000000000, `{"role":"user"}`)
+	seeder.AddPart("prt_1", "msg_1", "ses_abc", 1700000000000, 1700000000000, `{"type":"text","text":"Hello, help me with Go"}`)
+
+	seeder.AddMessage("msg_2", "ses_abc", 1700000010000, 1700000010000, `{"role":"assistant"}`)
+	seeder.AddPart("prt_2", "msg_2", "ses_abc", 1700000010000, 1700000010000, `{"type":"text","text":"Sure, I can help with Go."}`)
+}
+
+func writeOpenCodeStorageFile(
+	t *testing.T, path string, data any,
+) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755),
+		"mkdir %s", filepath.Dir(path))
+	raw, err := json.Marshal(data)
+	require.NoError(t, err, "marshal %s", path)
+	require.NoError(t, os.WriteFile(path, raw, 0o644), "write %s", path)
+}
+
+func TestParseOpenCodeDB_StandardSession(t *testing.T) {
+	dbPath, seeder, db := newTestDB(t)
+	defer db.Close()
+	seedStandardSession(t, seeder)
+
+	sessions, err := parseOpenCodeAll(dbPath, "testmachine")
+	require.NoError(t, err, "ParseOpenCodeDB")
+
+	assertEq(t, "sessions len", len(sessions), 1)
+
+	s := sessions[0]
+	assertEq(t, "ID", s.Session.ID, "opencode:ses_abc")
+	assertEq(t, "Agent", s.Session.Agent, AgentOpenCode)
+	assertEq(t, "Machine", s.Session.Machine, "testmachine")
+	assertEq(t, "Project", s.Session.Project, "myapp")
+	assertEq(t, "Cwd", s.Session.Cwd, "/home/user/code/myapp")
+	assertEq(t, "MessageCount", s.Session.MessageCount, 2)
+	assertEq(t, "FirstMessage", s.Session.FirstMessage, "Test Session")
+
+	wantPath := dbPath + "#ses_abc"
+	assertEq(t, "File.Path", s.Session.File.Path, wantPath)
+
+	wantMtime := int64(1700000060000) * 1_000_000
+	assertEq(t, "File.Mtime", s.Session.File.Mtime, wantMtime)
+
+	assertEq(t, "Messages len", len(s.Messages), 2)
+	assertEq(t, "msg[0].Role", s.Messages[0].Role, RoleUser)
+	assertEq(t, "msg[1].Role", s.Messages[1].Role, RoleAssistant)
+	assertEq(t, "msg[1].Content", s.Messages[1].Content, "Sure, I can help with Go.")
+}
+
+func TestOpenOpenCodeDBDoesNotForceWALMode(t *testing.T) {
+	dbPath, _, writer := newTestDB(t)
+	require.NoError(t, writer.Close())
+
+	reader, err := openOpenCodeDB(dbPath)
+	require.NoError(t, err)
+	defer reader.Close()
+	_, err = reader.Exec("CREATE TABLE must_stay_read_only (id INTEGER)")
+	require.Error(t, err, "OpenCode source databases must stay read-only")
+
+	var journalMode string
+	require.NoError(t, reader.QueryRow("PRAGMA journal_mode").Scan(&journalMode))
+	assert.Equal(t, "delete", journalMode)
+	assert.NoFileExists(t, dbPath+"-wal")
+	assert.NoFileExists(t, dbPath+"-shm")
+}
+
+func TestParseOpenCodeFile_StorageSession(t *testing.T) {
+	root := t.TempDir()
+	sessionPath := filepath.Join(
+		root, "storage", "session", "global", "ses_storage.json",
+	)
+	writeOpenCodeStorageFile(t, sessionPath, map[string]any{
+		"id":        "ses_storage",
+		"directory": "/home/user/code/myapp",
+		"title":     "Storage Session",
+		"time": map[string]any{
+			"created": 1700000000000,
+			"updated": 1700000060000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "message", "ses_storage", "msg_1.json",
+	), map[string]any{
+		"id":        "msg_1",
+		"sessionID": "ses_storage",
+		"role":      "user",
+		"time": map[string]any{
+			"created": 1700000000000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "message", "ses_storage", "msg_2.json",
+	), map[string]any{
+		"id":        "msg_2",
+		"sessionID": "ses_storage",
+		"role":      "assistant",
+		"modelID":   "gpt-5.2-codex",
+		"tokens": map[string]any{
+			"input":  11,
+			"output": 7,
+			"cache": map[string]any{
+				"read":  3,
+				"write": 2,
+			},
+		},
+		"time": map[string]any{
+			"created": 1700000010000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "part", "msg_1", "prt_1.json",
+	), map[string]any{
+		"id":        "prt_1",
+		"sessionID": "ses_storage",
+		"messageID": "msg_1",
+		"type":      "text",
+		"text":      "Hello from storage",
+		"time": map[string]any{
+			"created": 1700000000000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "part", "msg_2", "prt_2.json",
+	), map[string]any{
+		"id":        "prt_2",
+		"sessionID": "ses_storage",
+		"messageID": "msg_2",
+		"type":      "tool",
+		"tool":      "read",
+		"callID":    "call_storage",
+		"state": map[string]any{
+			"input": map[string]any{
+				"file_path": "main.go",
+			},
+		},
+		"time": map[string]any{
+			"created": 1700000010000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "part", "msg_2", "prt_3.json",
+	), map[string]any{
+		"id":        "prt_3",
+		"sessionID": "ses_storage",
+		"messageID": "msg_2",
+		"type":      "text",
+		"text":      "Here is the file.",
+		"time": map[string]any{
+			"created": 1700000011000,
+		},
+	})
+
+	sess, msgs, err := parseOpenCodeStorageFile(
+		sessionPath, "testmachine",
+	)
+	require.NoError(t, err, "parseOpenCodeStorageFile")
+	require.NotNil(t, sess, "expected non-nil session")
+
+	assertEq(t, "ID", sess.ID, "opencode:ses_storage")
+	assertEq(t, "Agent", sess.Agent, AgentOpenCode)
+	assertEq(t, "Project", sess.Project, "myapp")
+	assertEq(t, "Cwd", sess.Cwd, "/home/user/code/myapp")
+	assertEq(t, "Machine", sess.Machine, "testmachine")
+	assertEq(t, "MessageCount", sess.MessageCount, 2)
+	assertEq(t, "FirstMessage", sess.FirstMessage, "Storage Session")
+	assertEq(t, "File.Path", sess.File.Path, sessionPath)
+	assertEq(t, "File.Mtime", sess.File.Mtime > 0, true)
+
+	assertEq(t, "messages len", len(msgs), 2)
+	assertEq(t, "msg[0].Role", msgs[0].Role, RoleUser)
+	assertEq(t, "msg[0].Content", msgs[0].Content, "Hello from storage")
+	assertEq(t, "msg[1].Role", msgs[1].Role, RoleAssistant)
+	assertEq(t, "msg[1].Model", msgs[1].Model, "gpt-5.2-codex")
+	assertEq(t, "msg[1].HasToolUse", msgs[1].HasToolUse, true)
+	assertEq(t, "msg[1].Content", msgs[1].Content, "Here is the file.")
+	assertEq(t, "msg[1].HasOutputTokens", msgs[1].HasOutputTokens, true)
+	assertEq(t, "msg[1].OutputTokens", msgs[1].OutputTokens, 7)
+
+	assertToolCalls(t, msgs[1].ToolCalls, []ParsedToolCall{{
+		ToolName:  "read",
+		Category:  "Read",
+		ToolUseID: "call_storage",
+		InputJSON: `{"file_path":"main.go"}`,
+	}})
+}
+
+func TestParseOpenCodeFile_StorageSessionInvalidChildFails(
+	t *testing.T,
+) {
+	root := t.TempDir()
+	sessionPath := filepath.Join(
+		root, "storage", "session", "global", "ses_storage.json",
+	)
+	writeOpenCodeStorageFile(t, sessionPath, map[string]any{
+		"id":        "ses_storage",
+		"directory": "/home/user/code/myapp",
+		"title":     "Storage Session",
+		"time": map[string]any{
+			"created": 1700000000000,
+			"updated": 1700000060000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "message", "ses_storage", "msg_1.json",
+	), map[string]any{
+		"id":        "msg_1",
+		"sessionID": "ses_storage",
+		"role":      "user",
+		"time": map[string]any{
+			"created": 1700000000000,
+		},
+	})
+	require.NoError(t, os.MkdirAll(filepath.Join(
+		root, "storage", "message", "ses_storage",
+	), 0o755), "mkdir invalid message dir")
+	require.NoError(t, os.WriteFile(filepath.Join(
+		root, "storage", "message", "ses_storage", "msg_bad.json",
+	), []byte(`{"id":"msg_bad"`), 0o644), "write invalid message")
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "part", "msg_1", "prt_1.json",
+	), map[string]any{
+		"id":        "prt_1",
+		"sessionID": "ses_storage",
+		"messageID": "msg_1",
+		"type":      "text",
+		"text":      "Hello from storage",
+		"time": map[string]any{
+			"created": 1700000000000,
+		},
+	})
+	require.NoError(t, os.MkdirAll(filepath.Join(
+		root, "storage", "part", "msg_1",
+	), 0o755), "mkdir invalid part dir")
+	require.NoError(t, os.WriteFile(filepath.Join(
+		root, "storage", "part", "msg_1", "prt_bad.json",
+	), []byte(`{"id":"prt_bad"`), 0o644), "write invalid part")
+
+	sess, msgs, err := parseOpenCodeStorageFile(
+		sessionPath, "testmachine",
+	)
+	require.Error(t, err, "expected parseOpenCodeStorageFile error")
+	assert.Nil(t, sess, "session, want nil")
+	assert.Nil(t, msgs, "msgs, want nil")
+}
+
+func TestParseOpenCodeFile_MissingPartDirAllowed(t *testing.T) {
+	root := t.TempDir()
+	sessionPath := filepath.Join(
+		root, "storage", "session", "global", "ses_storage.json",
+	)
+	writeOpenCodeStorageFile(t, sessionPath, map[string]any{
+		"id":        "ses_storage",
+		"directory": "/home/user/code/myapp",
+		"title":     "Storage Session",
+		"time": map[string]any{
+			"created": 1700000000000,
+			"updated": 1700000060000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "message", "ses_storage", "msg_1.json",
+	), map[string]any{
+		"id":        "msg_1",
+		"sessionID": "ses_storage",
+		"role":      "assistant",
+		"modelID":   "gpt-5.2-codex",
+		"time": map[string]any{
+			"created": 1700000000000,
+		},
+	})
+
+	sess, msgs, err := parseOpenCodeStorageFile(
+		sessionPath, "testmachine",
+	)
+	require.NoError(t, err, "parseOpenCodeStorageFile")
+	assert.Nil(t, sess, "session, want nil")
+	assert.Nil(t, msgs, "msgs, want nil")
+}
+
+func TestParseOpenCodeFile_StorageMessageMissingIDFails(t *testing.T) {
+	root := t.TempDir()
+	sessionPath := filepath.Join(
+		root, "storage", "session", "global", "ses_storage.json",
+	)
+	writeOpenCodeStorageFile(t, sessionPath, map[string]any{
+		"id":        "ses_storage",
+		"directory": "/home/user/code/myapp",
+		"title":     "Storage Session",
+		"time": map[string]any{
+			"created": 1700000000000,
+			"updated": 1700000060000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "message", "ses_storage", "msg_1.json",
+	), map[string]any{
+		"sessionID": "ses_storage",
+		"role":      "assistant",
+		"time": map[string]any{
+			"created": 1700000000000,
+		},
+	})
+
+	sess, msgs, err := parseOpenCodeStorageFile(
+		sessionPath, "testmachine",
+	)
+	require.Error(t, err, "expected parseOpenCodeStorageFile error")
+	assert.Nil(t, sess, "session, want nil")
+	assert.Nil(t, msgs, "msgs, want nil")
+}
+
+func TestParseOpenCodeFile_StoragePartMissingIDFails(t *testing.T) {
+	root := t.TempDir()
+	sessionPath := filepath.Join(
+		root, "storage", "session", "global", "ses_storage.json",
+	)
+	writeOpenCodeStorageFile(t, sessionPath, map[string]any{
+		"id":        "ses_storage",
+		"directory": "/home/user/code/myapp",
+		"title":     "Storage Session",
+		"time": map[string]any{
+			"created": 1700000000000,
+			"updated": 1700000060000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "message", "ses_storage", "msg_1.json",
+	), map[string]any{
+		"id":        "msg_1",
+		"sessionID": "ses_storage",
+		"role":      "assistant",
+		"time": map[string]any{
+			"created": 1700000000000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "part", "msg_1", "part_1.json",
+	), map[string]any{
+		"messageID": "msg_1",
+		"type":      "text",
+		"text":      "hello",
+		"time": map[string]any{
+			"created": 1700000000000,
+		},
+	})
+
+	sess, msgs, err := parseOpenCodeStorageFile(
+		sessionPath, "testmachine",
+	)
+	require.Error(t, err, "expected parseOpenCodeStorageFile error")
+	assert.Nil(t, sess, "session, want nil")
+	assert.Nil(t, msgs, "msgs, want nil")
+}
+
+func TestParseOpenCodeFile_StoragePartOrderingUsesStartTime(
+	t *testing.T,
+) {
+	root := t.TempDir()
+	sessionPath := filepath.Join(
+		root, "storage", "session", "global", "ses_storage.json",
+	)
+	writeOpenCodeStorageFile(t, sessionPath, map[string]any{
+		"id":        "ses_storage",
+		"directory": "/home/user/code/myapp",
+		"title":     "Storage Session",
+		"time": map[string]any{
+			"created": 1700000000000,
+			"updated": 1700000060000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "message", "ses_storage", "msg_1.json",
+	), map[string]any{
+		"id":        "msg_1",
+		"sessionID": "ses_storage",
+		"role":      "assistant",
+		"time": map[string]any{
+			"created": 1700000000000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "part", "msg_1", "part_1.json",
+	), map[string]any{
+		"id":        "part_1",
+		"sessionID": "ses_storage",
+		"messageID": "msg_1",
+		"type":      "text",
+		"text":      "second",
+		"time": map[string]any{
+			"start": 1700000002000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "part", "msg_1", "part_2.json",
+	), map[string]any{
+		"id":        "part_2",
+		"sessionID": "ses_storage",
+		"messageID": "msg_1",
+		"type":      "text",
+		"text":      "first",
+		"time": map[string]any{
+			"start": 1700000001000,
+		},
+	})
+
+	_, msgs, err := parseOpenCodeStorageFile(sessionPath, "testmachine")
+	require.NoError(t, err, "parseOpenCodeStorageFile")
+	require.Len(t, msgs, 1, "messages len")
+	assertEq(t, "msg[0].Content", msgs[0].Content, "first\nsecond")
+}
+
+func TestParseOpenCodeFile_StoragePartOrderingPrefersStartOverCreated(
+	t *testing.T,
+) {
+	root := t.TempDir()
+	sessionPath := filepath.Join(
+		root, "storage", "session", "global", "ses_storage.json",
+	)
+	writeOpenCodeStorageFile(t, sessionPath, map[string]any{
+		"id":        "ses_storage",
+		"directory": "/home/user/code/myapp",
+		"title":     "Storage Session",
+		"time": map[string]any{
+			"created": 1700000000000,
+			"updated": 1700000060000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "message", "ses_storage", "msg_1.json",
+	), map[string]any{
+		"id":        "msg_1",
+		"sessionID": "ses_storage",
+		"role":      "assistant",
+		"time": map[string]any{
+			"created": 1700000000000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "part", "msg_1", "part_1.json",
+	), map[string]any{
+		"id":        "part_1",
+		"sessionID": "ses_storage",
+		"messageID": "msg_1",
+		"type":      "text",
+		"text":      "second",
+		"time": map[string]any{
+			"start":   1700000002000,
+			"created": 1700000001000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "part", "msg_1", "part_2.json",
+	), map[string]any{
+		"id":        "part_2",
+		"sessionID": "ses_storage",
+		"messageID": "msg_1",
+		"type":      "text",
+		"text":      "first",
+		"time": map[string]any{
+			"start":   1700000001000,
+			"created": 1700000002000,
+		},
+	})
+
+	_, msgs, err := parseOpenCodeStorageFile(sessionPath, "testmachine")
+	require.NoError(t, err, "parseOpenCodeStorageFile")
+	require.Len(t, msgs, 1, "messages len")
+	assertEq(t, "msg[0].Content", msgs[0].Content, "first\nsecond")
+}
+
+func TestParseOpenCodeFile_StorageStepFinishTokens(t *testing.T) {
+	root := t.TempDir()
+	sessionPath := filepath.Join(
+		root, "storage", "session", "global", "ses_storage.json",
+	)
+	writeOpenCodeStorageFile(t, sessionPath, map[string]any{
+		"id":        "ses_storage",
+		"directory": "/home/user/code/myapp",
+		"title":     "Storage Session",
+		"time": map[string]any{
+			"created": 1700000000000,
+			"updated": 1700000060000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "message", "ses_storage", "msg_1.json",
+	), map[string]any{
+		"id":        "msg_1",
+		"sessionID": "ses_storage",
+		"role":      "assistant",
+		"modelID":   "gpt-5.2-codex",
+		"time": map[string]any{
+			"created": 1700000000000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "part", "msg_1", "prt_1.json",
+	), map[string]any{
+		"id":        "prt_1",
+		"sessionID": "ses_storage",
+		"messageID": "msg_1",
+		"type":      "text",
+		"text":      "reply from storage",
+		"time": map[string]any{
+			"created": 1700000000000,
+		},
+	})
+	writeOpenCodeStorageFile(t, filepath.Join(
+		root, "storage", "part", "msg_1", "prt_2.json",
+	), map[string]any{
+		"id":        "prt_2",
+		"sessionID": "ses_storage",
+		"messageID": "msg_1",
+		"type":      "step-finish",
+		"tokens": map[string]any{
+			"input":  11,
+			"output": 7,
+			"cache": map[string]any{
+				"read":  3,
+				"write": 2,
+			},
+		},
+		"time": map[string]any{
+			"created": 1700000001000,
+		},
+	})
+
+	sess, msgs, err := parseOpenCodeStorageFile(sessionPath, "testmachine")
+	require.NoError(t, err, "parseOpenCodeStorageFile")
+	require.NotNil(t, sess, "want one parsed session")
+	require.Len(t, msgs, 1, "messages")
+
+	assertEq(t, "msg[0].Model", msgs[0].Model, "gpt-5.2-codex")
+	assertEq(t, "msg[0].HasOutputTokens", msgs[0].HasOutputTokens, true)
+	assertEq(t, "msg[0].OutputTokens", msgs[0].OutputTokens, 7)
+	assertEq(t, "msg[0].HasContextTokens", msgs[0].HasContextTokens, true)
+	assertEq(t, "msg[0].ContextTokens", msgs[0].ContextTokens, 16)
+	assertEq(
+		t, "session HasTotalOutputTokens",
+		sess.HasTotalOutputTokens, true,
+	)
+	assertEq(t, "session TotalOutputTokens", sess.TotalOutputTokens, 7)
+	assertEq(
+		t, "session HasPeakContextTokens",
+		sess.HasPeakContextTokens, true,
+	)
+	assertEq(t, "session PeakContextTokens", sess.PeakContextTokens, 16)
+}
+
+func TestParseOpenCodeDB_TitleFallback(t *testing.T) {
+	dbPath, seeder, db := newTestDB(t)
+	defer db.Close()
+
+	seeder.AddProject("prj_1", "/tmp/proj")
+
+	// Empty title: should use first user message.
+	seeder.AddSession("ses_empty", "prj_1", "", "",
+		1700000000000, 1700000010000)
+	seeder.AddMessage("msg_1", "ses_empty",
+		1700000000000, 1700000000000, `{"role":"user"}`)
+	seeder.AddPart("prt_1", "msg_1", "ses_empty",
+		1700000000000, 1700000000000,
+		`{"type":"text","text":"Help me debug this crash"}`)
+
+	// Placeholder title: should also use first user message.
+	seeder.AddSession("ses_default", "prj_1", "",
+		"New session - 2026-03-22T10:00:00.000Z",
+		1700000020000, 1700000030000)
+	seeder.AddMessage("msg_2", "ses_default",
+		1700000020000, 1700000020000, `{"role":"user"}`)
+	seeder.AddPart("prt_2", "msg_2", "ses_default",
+		1700000020000, 1700000020000,
+		`{"type":"text","text":"Refactor the auth module"}`)
+
+	sessions, err := parseOpenCodeAll(dbPath, "m")
+	require.NoError(t, err, "ParseOpenCodeDB")
+	assertEq(t, "sessions len", len(sessions), 2)
+
+	for _, s := range sessions {
+		switch s.Session.ID {
+		case "opencode:ses_empty":
+			assertEq(t, "empty title fallback",
+				s.Session.FirstMessage,
+				"Help me debug this crash")
+		case "opencode:ses_default":
+			assertEq(t, "placeholder title fallback",
+				s.Session.FirstMessage,
+				"Refactor the auth module")
+		}
+	}
+}
+
+func TestParseOpenCodeDB_ToolParts(t *testing.T) {
+	dbPath, seeder, db := newTestDB(t)
+	defer db.Close()
+
+	seeder.AddProject("prj_1", "/tmp/proj")
+	seeder.AddSession("ses_tools", "prj_1", "", "", 1700000000000, 1700000030000)
+
+	seeder.AddMessage("msg_u", "ses_tools", 1700000000000, 1700000000000, `{"role":"user"}`)
+	seeder.AddPart("prt_u", "msg_u", "ses_tools", 1700000000000, 1700000000000, `{"type":"text","text":"read my file"}`)
+
+	seeder.AddMessage("msg_a", "ses_tools", 1700000010000, 1700000012000, `{"role":"assistant"}`)
+	seeder.AddPart("prt_r", "msg_a", "ses_tools", 1700000010000, 1700000010000, `{"type":"reasoning","text":"Let me think about this..."}`)
+	seeder.AddPart("prt_t", "msg_a", "ses_tools", 1700000011000, 1700000011000, `{"type":"tool","tool":"read","callID":"call_1","state":{"input":{"file_path":"main.go"}}}`)
+	seeder.AddPart("prt_txt", "msg_a", "ses_tools", 1700000012000, 1700000012000, `{"type":"text","text":"Here is the file content."}`)
+
+	sessions, err := parseOpenCodeAll(dbPath, "m")
+	require.NoError(t, err, "ParseOpenCodeDB")
+
+	assertEq(t, "sessions len", len(sessions), 1)
+
+	msgs := sessions[0].Messages
+	assertEq(t, "messages len", len(msgs), 2)
+
+	ast := msgs[1]
+	assertEq(t, "HasThinking", ast.HasThinking, true)
+	assertEq(t, "HasToolUse", ast.HasToolUse, true)
+
+	assertToolCalls(t, ast.ToolCalls, []ParsedToolCall{{
+		ToolName:  "read",
+		Category:  "Read",
+		ToolUseID: "call_1",
+		InputJSON: `{"file_path":"main.go"}`,
+	}})
+}
+
+// TestParseOpenCodeDB_SkillTool verifies that a "skill" tool part
+// populates ParsedToolCall.SkillName straight from the tool's own
+// input, without going through the read-file/shell-command
+// inference heuristics. Before this fix extractOpenCodeToolCall
+// never set SkillName at all (#1040).
+func TestParseOpenCodeDB_SkillTool(t *testing.T) {
+	dbPath, seeder, db := newTestDB(t)
+	defer db.Close()
+
+	seeder.AddProject("prj_1", "/tmp/proj")
+	seeder.AddSession("ses_skill", "prj_1", "", "", 1700000000000, 1700000030000)
+
+	seeder.AddMessage("msg_u", "ses_skill", 1700000000000, 1700000000000, `{"role":"user"}`)
+	seeder.AddPart("prt_u", "msg_u", "ses_skill", 1700000000000, 1700000000000, `{"type":"text","text":"use the doc-writer skill"}`)
+
+	seeder.AddMessage("msg_a", "ses_skill", 1700000010000, 1700000010000, `{"role":"assistant"}`)
+	seeder.AddPart("prt_t", "msg_a", "ses_skill", 1700000010000, 1700000010000,
+		`{"type":"tool","tool":"skill","callID":"call_skill","state":{"input":{"name":"doc-writer"}}}`)
+
+	sessions, err := parseOpenCodeAll(dbPath, "m")
+	require.NoError(t, err, "ParseOpenCodeDB")
+	require.Len(t, sessions, 1, "sessions len")
+
+	msgs := sessions[0].Messages
+	require.Len(t, msgs, 2, "messages len")
+
+	ast := msgs[1]
+	require.Len(t, ast.ToolCalls, 1, "tool calls len")
+	assertEq(t, "SkillName", ast.ToolCalls[0].SkillName, "doc-writer")
+}
+
+// TestParseOpenCodeDB_InvalidToolCall verifies that an invalid
+// tool call (tool:"invalid") populates ResultEvents with
+// Status:"errored" so the signal engine detects it as a failure.
+func TestParseOpenCodeDB_InvalidToolCall(t *testing.T) {
+	dbPath, seeder, db := newTestDB(t)
+	defer db.Close()
+
+	seeder.AddProject("prj_1", "/tmp/proj")
+	seeder.AddSession("ses_inv", "prj_1", "", "", 1700000000000, 1700000030000)
+
+	seeder.AddMessage("msg_u", "ses_inv", 1700000000000, 1700000000000, `{"role":"user"}`)
+	seeder.AddPart("prt_u", "msg_u", "ses_inv", 1700000000000, 1700000000000, `{"type":"text","text":"do something"}`)
+
+	seeder.AddMessage("msg_a", "ses_inv", 1700000010000, 1700000010000, `{"role":"assistant"}`)
+	seeder.AddPart("prt_t", "msg_a", "ses_inv", 1700000010000, 1700000010000,
+		`{"type":"tool","tool":"invalid","callID":"call_inv","state":{"input":{"tool":"nonexistent_tool","error":"Model tried to call unavailable tool 'nonexistent_tool'"}}}`)
+
+	sessions, err := parseOpenCodeAll(dbPath, "m")
+	require.NoError(t, err, "ParseOpenCodeDB")
+	require.Len(t, sessions, 1, "sessions len")
+
+	msgs := sessions[0].Messages
+	require.Len(t, msgs, 2, "messages len")
+
+	ast := msgs[1]
+	require.Len(t, ast.ToolCalls, 1, "tool calls len")
+	require.Len(t, ast.ToolCalls[0].ResultEvents, 1, "result events len")
+	assertEq(t, "ResultEvents[0].Status", ast.ToolCalls[0].ResultEvents[0].Status, "errored")
+}
+
+// TestParseOpenCodeDB_BashExitFailure verifies that a bash tool whose
+// state metadata records a non-zero exit is reported as a failure even
+// when the output text lacks an "exit status N" marker, and that a
+// successful or exit-less part stays clean.
+func TestParseOpenCodeDB_BashExitFailure(t *testing.T) {
+	tests := []struct {
+		name        string
+		tool        string
+		state       string
+		wantErrored bool
+	}{
+		{
+			name:        "non-zero exit without exit-status text",
+			tool:        "bash",
+			state:       `{"input":{"command":"build"},"output":"error: command failed","metadata":{"exit":1}}`,
+			wantErrored: true,
+		},
+		{
+			name:        "non-zero exit with empty output",
+			tool:        "bash",
+			state:       `{"input":{"command":"build"},"output":"","metadata":{"exit":127}}`,
+			wantErrored: true,
+		},
+		{
+			name:        "zero exit is not a failure",
+			tool:        "bash",
+			state:       `{"input":{"command":"build"},"output":"ok","metadata":{"exit":0}}`,
+			wantErrored: false,
+		},
+		{
+			name:        "metadata without an exit key is not a failure",
+			tool:        "bash",
+			state:       `{"input":{"command":"build"},"output":"ok","metadata":{"truncated":false}}`,
+			wantErrored: false,
+		},
+		{
+			name:        "no metadata is not a failure",
+			tool:        "bash",
+			state:       `{"input":{"command":"build"},"output":"ok"}`,
+			wantErrored: false,
+		},
+		{
+			name:        "non-bash metadata exit is not a failure",
+			tool:        "mcp_lookup",
+			state:       `{"input":{"query":"exit routes"},"output":"route 1","metadata":{"exit":1}}`,
+			wantErrored: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbPath, seeder, db := newTestDB(t)
+			defer db.Close()
+
+			seeder.AddProject("prj_1", "/tmp/proj")
+			seeder.AddSession("ses_bexit", "prj_1", "", "", 1700000000000, 1700000030000)
+
+			seeder.AddMessage("msg_u", "ses_bexit", 1700000000000, 1700000000000, `{"role":"user"}`)
+			seeder.AddPart("prt_u", "msg_u", "ses_bexit", 1700000000000, 1700000000000, `{"type":"text","text":"build"}`)
+
+			seeder.AddMessage("msg_a", "ses_bexit", 1700000010000, 1700000010000, `{"role":"assistant"}`)
+			seeder.AddPart("prt_t", "msg_a", "ses_bexit", 1700000010000, 1700000010000,
+				`{"type":"tool","tool":"`+tt.tool+`","callID":"call_exit","state":`+tt.state+`}`)
+
+			sessions, err := parseOpenCodeAll(dbPath, "m")
+			require.NoError(t, err, "ParseOpenCodeDB")
+			require.Len(t, sessions, 1, "sessions len")
+
+			msgs := sessions[0].Messages
+			require.Len(t, msgs, 2, "messages len")
+
+			ast := msgs[1]
+			require.Len(t, ast.ToolCalls, 1, "tool calls len")
+			if !tt.wantErrored {
+				assert.Empty(t, ast.ToolCalls[0].ResultEvents, "result events")
+				return
+			}
+			require.Len(t, ast.ToolCalls[0].ResultEvents, 1, "result events len")
+			assertEq(t, "ResultEvents[0].Status", ast.ToolCalls[0].ResultEvents[0].Status, "errored")
+		})
+	}
+}
+
+// TestParseOpenCodeDB_SkillNameFromReadTool verifies that a
+// "read" tool part whose input points at a real on-disk SKILL.md
+// infers the skill name from the file's frontmatter, matching the
+// Cursor/Codex read-file heuristic shared via inferOpenCodeSkillName.
+func TestParseOpenCodeDB_SkillNameFromReadTool(t *testing.T) {
+	path := writeTestSkill(t, "foo", "foo")
+
+	dbPath, seeder, db := newTestDB(t)
+	defer db.Close()
+
+	seeder.AddProject("prj_1", "/tmp/proj")
+	seeder.AddSession("ses_read", "prj_1", "", "", 1700000000000, 1700000030000)
+
+	seeder.AddMessage("msg_u", "ses_read", 1700000000000, 1700000000000, `{"role":"user"}`)
+	seeder.AddPart("prt_u", "msg_u", "ses_read", 1700000000000, 1700000000000, `{"type":"text","text":"read the skill file"}`)
+
+	seeder.AddMessage("msg_a", "ses_read", 1700000010000, 1700000010000, `{"role":"assistant"}`)
+	seeder.AddPart("prt_t", "msg_a", "ses_read", 1700000010000, 1700000010000,
+		`{"type":"tool","tool":"read","callID":"call_read","state":{"input":{"file_path":`+
+			quoteJSON(t, path)+`}}}`)
+
+	sessions, err := parseOpenCodeAll(dbPath, "m")
+	require.NoError(t, err, "ParseOpenCodeDB")
+	require.Len(t, sessions, 1, "sessions len")
+
+	msgs := sessions[0].Messages
+	require.Len(t, msgs, 2, "messages len")
+
+	ast := msgs[1]
+	require.Len(t, ast.ToolCalls, 1, "tool calls len")
+	assertEq(t, "SkillName", ast.ToolCalls[0].SkillName, "foo")
+}
+
+// TestParseOpenCodeDB_SkillNameFromReadToolRelativePath verifies
+// that a read tool with a relative SKILL.md path resolves against
+// the session worktree and reads frontmatter instead of falling
+// back to the parent directory name.
+func TestParseOpenCodeDB_SkillNameFromReadToolRelativePath(t *testing.T) {
+	// Frontmatter name intentionally differs from the folder name
+	// ("renamed") to prove we read frontmatter, not the directory.
+	path := writeTestSkill(t, "renamed", "actual-skill")
+	directory := filepath.Dir(filepath.Dir(filepath.Dir(path)))
+
+	dbPath, seeder, db := newTestDB(t)
+	defer db.Close()
+
+	seeder.AddProject("prj_1", filepath.Join(t.TempDir(), "project-root"))
+	seeder.AddSessionDirectory(
+		"ses_rel", "prj_1", "", "", directory,
+		1700000000000, 1700000030000,
+	)
+
+	seeder.AddMessage("msg_u", "ses_rel", 1700000000000, 1700000000000, `{"role":"user"}`)
+	seeder.AddPart("prt_u", "msg_u", "ses_rel", 1700000000000, 1700000000000, `{"type":"text","text":"read the skill"}`)
+
+	seeder.AddMessage("msg_a", "ses_rel", 1700000010000, 1700000010000, `{"role":"assistant"}`)
+	seeder.AddPart("prt_t", "msg_a", "ses_rel", 1700000010000, 1700000010000,
+		`{"type":"tool","tool":"read","callID":"call_read","state":{"input":{"file_path":"skills/renamed/SKILL.md"}}}`)
+
+	sessions, err := parseOpenCodeAll(dbPath, "m")
+	require.NoError(t, err, "ParseOpenCodeDB")
+	require.Len(t, sessions, 1, "sessions len")
+
+	msgs := sessions[0].Messages
+	require.Len(t, msgs, 2, "messages len")
+
+	ast := msgs[1]
+	require.Len(t, ast.ToolCalls, 1, "tool calls len")
+	assertEq(t, "SkillName", ast.ToolCalls[0].SkillName, "actual-skill")
+}
+
+// TestParseOpenCodeDB_SkillNameFromShellCommandRelativePath
+// verifies that a "bash" tool part running a relative-path
+// SKILL.md read is resolved against the session's project
+// worktree (threaded through buildOpenCodeMessage), matching the
+// Codex shell-command heuristic.
+func TestParseOpenCodeDB_SkillNameFromShellCommandRelativePath(t *testing.T) {
+	path := writeTestSkill(t, "foo", "foo")
+	worktree := filepath.Dir(filepath.Dir(filepath.Dir(path)))
+
+	dbPath, seeder, db := newTestDB(t)
+	defer db.Close()
+
+	seeder.AddProject("prj_1", worktree)
+	seeder.AddSession("ses_bash", "prj_1", "", "", 1700000000000, 1700000030000)
+
+	seeder.AddMessage("msg_u", "ses_bash", 1700000000000, 1700000000000, `{"role":"user"}`)
+	seeder.AddPart("prt_u", "msg_u", "ses_bash", 1700000000000, 1700000000000, `{"type":"text","text":"cat the skill file"}`)
+
+	seeder.AddMessage("msg_a", "ses_bash", 1700000010000, 1700000010000, `{"role":"assistant"}`)
+	seeder.AddPart("prt_t", "msg_a", "ses_bash", 1700000010000, 1700000010000,
+		`{"type":"tool","tool":"bash","callID":"call_bash","state":{"input":{"command":"cat skills/foo/SKILL.md"}}}`)
+
+	sessions, err := parseOpenCodeAll(dbPath, "m")
+	require.NoError(t, err, "ParseOpenCodeDB")
+	require.Len(t, sessions, 1, "sessions len")
+
+	msgs := sessions[0].Messages
+	require.Len(t, msgs, 2, "messages len")
+
+	ast := msgs[1]
+	require.Len(t, ast.ToolCalls, 1, "tool calls len")
+	assertEq(t, "SkillName", ast.ToolCalls[0].SkillName, "foo")
+}
+
+func TestParseOpenCodeDB_EmptySession(t *testing.T) {
+	dbPath, seeder, db := newTestDB(t)
+	defer db.Close()
+
+	seeder.AddProject("prj_1", "/tmp/proj")
+	seeder.AddSession("ses_empty", "prj_1", "", "", 1700000000000, 1700000000000)
+
+	sessions, err := parseOpenCodeAll(dbPath, "m")
+	require.NoError(t, err, "ParseOpenCodeDB")
+
+	assertEq(t, "sessions len", len(sessions), 0)
+}
+
+func TestParseOpenCodeDB_NonexistentDB(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "nonexistent.db")
+
+	sessions, err := parseOpenCodeAll(dbPath, "m")
+	require.NoError(t, err, "expected nil error")
+	assert.Nil(t, sessions, "expected nil sessions")
+}
+
+func TestParseOpenCodeDB_ProjectFromWorktree(t *testing.T) {
+	dbPath, seeder, db := newTestDB(t)
+	defer db.Close()
+
+	// Create a temp dir that looks like a git repo so
+	// ExtractProjectFromCwd resolves it.
+	repoDir := filepath.Join(t.TempDir(), "my-project")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755))
+
+	seeder.AddProject("prj_git", repoDir)
+	seeder.AddSession("ses_git", "prj_git", "", "", 1700000000000, 1700000010000)
+	seeder.AddMessage("msg_1", "ses_git", 1700000000000, 1700000000000, `{"role":"user"}`)
+	seeder.AddPart("prt_1", "msg_1", "ses_git", 1700000000000, 1700000000000, `{"type":"text","text":"hello"}`)
+
+	sessions, err := parseOpenCodeAll(dbPath, "m")
+	require.NoError(t, err, "ParseOpenCodeDB")
+	assertEq(t, "sessions len", len(sessions), 1)
+
+	assertEq(t, "Project", sessions[0].Session.Project, "my_project")
+}
+
+func TestResolveOpenCodeWorktree(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		session string
+		project string
+		want    string
+	}{
+		{
+			name:    "prefers concrete session directory over global project",
+			session: "/home/user/code/myapp",
+			project: "/",
+			want:    "/home/user/code/myapp",
+		},
+		{
+			name:    "falls back when session directory empty",
+			session: "",
+			project: "/home/user/code/myapp",
+			want:    "/home/user/code/myapp",
+		},
+		{
+			name:    "falls back when session directory is root",
+			session: "/",
+			project: "/home/user/code/myapp",
+			want:    "/home/user/code/myapp",
+		},
+		{
+			name:    "trims session directory whitespace",
+			session: "  /home/user/code/myapp  ",
+			project: "/",
+			want:    "/home/user/code/myapp",
+		},
+		{
+			name:    "keeps project root when session unusable",
+			session: "/",
+			project: "/",
+			want:    "/",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := resolveOpenCodeWorktree(tt.session, tt.project)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestParseOpenCodeDB_PrefersSessionDirectoryOverGlobalProject(t *testing.T) {
+	dbPath, seeder, db := newTestDB(t)
+	defer db.Close()
+
+	// OpenCode's synthetic global project uses worktree="/".
+	seeder.AddProject("global", "/")
+	seeder.AddSessionDirectory(
+		"ses_global", "global", "", "Global Session",
+		"/home/user/code/lonely-app",
+		1700000000000, 1700000010000,
+	)
+	seeder.AddMessage("msg_1", "ses_global", 1700000000000, 1700000000000, `{"role":"user"}`)
+	seeder.AddPart(
+		"prt_1", "msg_1", "ses_global",
+		1700000000000, 1700000000000,
+		`{"type":"text","text":"hello from global project"}`,
+	)
+
+	sessions, err := parseOpenCodeAll(dbPath, "testmachine")
+	require.NoError(t, err, "ParseOpenCodeDB")
+	require.Len(t, sessions, 1)
+
+	s := sessions[0].Session
+	assert.Equal(t, "/home/user/code/lonely-app", s.Cwd)
+	assert.Equal(t, "lonely_app", s.Project)
+	assert.NotEqual(t, "unknown", s.Project)
+}
+
+func TestParseOpenCodeDB_ProjectFromUnavailableProjectWorktree(t *testing.T) {
+	dbPath, seeder, db := newTestDB(t)
+	defer db.Close()
+
+	worktree := filepath.Join(t.TempDir(), "unavailable-repo")
+	directory := filepath.Join(worktree, "subdir")
+	_, err := os.Stat(worktree)
+	require.Error(t, err)
+	require.True(t, os.IsNotExist(err), "project checkout must be unavailable")
+
+	seeder.AddProject("prj_unavailable", worktree)
+	seeder.AddSessionDirectory(
+		"ses_subdir", "prj_unavailable", "", "Unavailable Checkout",
+		directory, 1700000000000, 1700000010000,
+	)
+	seeder.AddMessage(
+		"msg_1", "ses_subdir", 1700000000000, 1700000000000,
+		`{"role":"user"}`,
+	)
+	seeder.AddPart(
+		"prt_1", "msg_1", "ses_subdir",
+		1700000000000, 1700000000000,
+		`{"type":"text","text":"hello"}`,
+	)
+
+	sessions, err := parseOpenCodeAll(dbPath, "testmachine")
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+
+	assert.Equal(t, directory, sessions[0].Session.Cwd)
+	assert.Equal(t, "unavailable_repo", sessions[0].Session.Project)
+}
+
+func TestParseOpenCodeDB_EmptySessionDirectoryUsesProjectWorktree(t *testing.T) {
+	dbPath, seeder, db := newTestDB(t)
+	defer db.Close()
+
+	seeder.AddProject("prj_1", "/home/user/code/myapp")
+	seeder.AddSessionDirectory(
+		"ses_empty_dir", "prj_1", "", "No Directory",
+		"",
+		1700000000000, 1700000010000,
+	)
+	seeder.AddMessage("msg_1", "ses_empty_dir", 1700000000000, 1700000000000, `{"role":"user"}`)
+	seeder.AddPart(
+		"prt_1", "msg_1", "ses_empty_dir",
+		1700000000000, 1700000000000,
+		`{"type":"text","text":"hello"}`,
+	)
+
+	sessions, err := parseOpenCodeAll(dbPath, "testmachine")
+	require.NoError(t, err, "ParseOpenCodeDB")
+	require.Len(t, sessions, 1)
+
+	s := sessions[0].Session
+	assert.Equal(t, "/home/user/code/myapp", s.Cwd)
+	assert.Equal(t, "myapp", s.Project)
+}
+
+// openCodeSchemaLegacy omits session.directory, matching older OpenCode-family
+// SQLite layouts still used by Kilo/MiMoCode/ICodeMate archives.
+const openCodeSchemaLegacy = `
 CREATE TABLE project (
 	id TEXT PRIMARY KEY,
 	worktree TEXT NOT NULL,
@@ -50,254 +1334,61 @@ CREATE TABLE part (
 );
 `
 
-func assertEq[T comparable](t *testing.T, name string, got, want T) {
+func newLegacyOpenCodeTestDB(t *testing.T) (string, *OpenCodeSeeder, *sql.DB) {
 	t.Helper()
-	if got != want {
-		t.Errorf("%s = %v, want %v", name, got, want)
-	}
-}
-
-type OpenCodeSeeder struct {
-	db *sql.DB
-	t  *testing.T
-}
-
-func (s *OpenCodeSeeder) AddProject(id, worktree string) {
-	s.t.Helper()
-	_, err := s.db.Exec(`INSERT INTO project (id, worktree) VALUES (?, ?)`, id, worktree)
-	if err != nil {
-		s.t.Fatalf("add project: %v", err)
-	}
-}
-
-func (s *OpenCodeSeeder) AddSession(id, projectID, parentID, title string, timeCreated, timeUpdated int64) {
-	s.t.Helper()
-
-	var pID, tStr any
-	if parentID != "" {
-		pID = parentID
-	}
-	if title != "" {
-		tStr = title
-	}
-
-	_, err := s.db.Exec(`INSERT INTO session (id, project_id, parent_id, title, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?)`,
-		id, projectID, pID, tStr, timeCreated, timeUpdated)
-	if err != nil {
-		s.t.Fatalf("add session: %v", err)
-	}
-}
-
-func (s *OpenCodeSeeder) AddMessage(id, sessionID string, timeCreated, timeUpdated int64, data string) {
-	s.t.Helper()
-	_, err := s.db.Exec(`INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)`,
-		id, sessionID, timeCreated, timeUpdated, data)
-	if err != nil {
-		s.t.Fatalf("add message: %v", err)
-	}
-}
-
-func (s *OpenCodeSeeder) AddPart(id, messageID, sessionID string, timeCreated, timeUpdated int64, data string) {
-	s.t.Helper()
-	_, err := s.db.Exec(`INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)`,
-		id, messageID, sessionID, timeCreated, timeUpdated, data)
-	if err != nil {
-		s.t.Fatalf("add part: %v", err)
-	}
-}
-
-func newTestDB(t *testing.T) (string, *OpenCodeSeeder, *sql.DB) {
-	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "opencode.db")
+	dbPath := filepath.Join(t.TempDir(), "opencode-legacy.db")
 	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		t.Fatalf("open test db: %v", err)
-	}
-
-	if _, err := db.Exec(openCodeSchema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-
-	seeder := &OpenCodeSeeder{db: db, t: t}
-	return dbPath, seeder, db
+	require.NoError(t, err, "open legacy test db")
+	_, err = db.Exec(openCodeSchemaLegacy)
+	require.NoError(t, err, "create legacy schema")
+	return dbPath, &OpenCodeSeeder{db: db, t: t}, db
 }
 
-func seedStandardSession(t *testing.T, seeder *OpenCodeSeeder) {
-	t.Helper()
-	seeder.AddProject("prj_1", "/home/user/code/myapp")
-	seeder.AddSession("ses_abc", "prj_1", "", "Test Session", 1700000000000, 1700000060000)
+func TestParseOpenCodeDB_LegacySchemaWithoutDirectoryUsesProjectWorktree(t *testing.T) {
+	dbPath, seeder, db := newLegacyOpenCodeTestDB(t)
+	defer db.Close()
 
-	seeder.AddMessage("msg_1", "ses_abc", 1700000000000, 1700000000000, `{"role":"user"}`)
-	seeder.AddPart("prt_1", "msg_1", "ses_abc", 1700000000000, 1700000000000, `{"type":"text","text":"Hello, help me with Go"}`)
+	seeder.AddProject("prj_legacy", "/home/user/code/legacy-app")
+	// AddSession inserts without directory; legacy schema has no such column.
+	seeder.AddSession(
+		"ses_legacy", "prj_legacy", "", "Legacy Session",
+		1700000000000, 1700000010000,
+	)
+	seeder.AddMessage("msg_1", "ses_legacy", 1700000000000, 1700000000000, `{"role":"user"}`)
+	seeder.AddPart(
+		"prt_1", "msg_1", "ses_legacy",
+		1700000000000, 1700000000000,
+		`{"type":"text","text":"hello from legacy schema"}`,
+	)
 
-	seeder.AddMessage("msg_2", "ses_abc", 1700000010000, 1700000010000, `{"role":"assistant"}`)
-	seeder.AddPart("prt_2", "msg_2", "ses_abc", 1700000010000, 1700000010000, `{"type":"text","text":"Sure, I can help with Go."}`)
+	// Confirm the column is actually absent so the test would fail closed
+	// if the modern SELECT path were used.
+	hasDir, err := openCodeSessionTableHasDirectory(db)
+	require.NoError(t, err)
+	require.False(t, hasDir, "legacy fixture must omit session.directory")
+
+	sessions, err := parseOpenCodeAll(dbPath, "testmachine")
+	require.NoError(t, err, "ParseOpenCodeDB on legacy schema")
+	require.Len(t, sessions, 1)
+
+	s := sessions[0].Session
+	assert.Equal(t, "/home/user/code/legacy-app", s.Cwd)
+	assert.Equal(t, "legacy_app", s.Project)
 }
 
-func TestParseOpenCodeDB_StandardSession(t *testing.T) {
+func TestParseOpenCodeDB_ModernSchemaDirectoryColumnDetected(t *testing.T) {
 	dbPath, seeder, db := newTestDB(t)
 	defer db.Close()
 	seedStandardSession(t, seeder)
 
-	sessions, err := ParseOpenCodeDB(dbPath, "testmachine")
-	if err != nil {
-		t.Fatalf("ParseOpenCodeDB: %v", err)
-	}
+	hasDir, err := openCodeSessionHasDirectoryCached(db, dbPath)
+	require.NoError(t, err)
+	assert.True(t, hasDir, "modern fixture must include session.directory")
 
-	assertEq(t, "sessions len", len(sessions), 1)
-
-	s := sessions[0]
-	assertEq(t, "ID", s.Session.ID, "opencode:ses_abc")
-	assertEq(t, "Agent", s.Session.Agent, AgentOpenCode)
-	assertEq(t, "Machine", s.Session.Machine, "testmachine")
-	assertEq(t, "Project", s.Session.Project, "myapp")
-	assertEq(t, "MessageCount", s.Session.MessageCount, 2)
-	assertEq(t, "FirstMessage", s.Session.FirstMessage, "Test Session")
-
-	wantPath := dbPath + "#ses_abc"
-	assertEq(t, "File.Path", s.Session.File.Path, wantPath)
-
-	wantMtime := int64(1700000060000) * 1_000_000
-	assertEq(t, "File.Mtime", s.Session.File.Mtime, wantMtime)
-
-	assertEq(t, "Messages len", len(s.Messages), 2)
-	assertEq(t, "msg[0].Role", s.Messages[0].Role, RoleUser)
-	assertEq(t, "msg[1].Role", s.Messages[1].Role, RoleAssistant)
-	assertEq(t, "msg[1].Content", s.Messages[1].Content, "Sure, I can help with Go.")
-}
-
-func TestParseOpenCodeDB_TitleFallback(t *testing.T) {
-	dbPath, seeder, db := newTestDB(t)
-	defer db.Close()
-
-	seeder.AddProject("prj_1", "/tmp/proj")
-
-	// Empty title: should use first user message.
-	seeder.AddSession("ses_empty", "prj_1", "", "",
-		1700000000000, 1700000010000)
-	seeder.AddMessage("msg_1", "ses_empty",
-		1700000000000, 1700000000000, `{"role":"user"}`)
-	seeder.AddPart("prt_1", "msg_1", "ses_empty",
-		1700000000000, 1700000000000,
-		`{"type":"text","text":"Help me debug this crash"}`)
-
-	// Placeholder title: should also use first user message.
-	seeder.AddSession("ses_default", "prj_1", "",
-		"New session - 2026-03-22T10:00:00.000Z",
-		1700000020000, 1700000030000)
-	seeder.AddMessage("msg_2", "ses_default",
-		1700000020000, 1700000020000, `{"role":"user"}`)
-	seeder.AddPart("prt_2", "msg_2", "ses_default",
-		1700000020000, 1700000020000,
-		`{"type":"text","text":"Refactor the auth module"}`)
-
-	sessions, err := ParseOpenCodeDB(dbPath, "m")
-	if err != nil {
-		t.Fatalf("ParseOpenCodeDB: %v", err)
-	}
-	assertEq(t, "sessions len", len(sessions), 2)
-
-	for _, s := range sessions {
-		switch s.Session.ID {
-		case "opencode:ses_empty":
-			assertEq(t, "empty title fallback",
-				s.Session.FirstMessage,
-				"Help me debug this crash")
-		case "opencode:ses_default":
-			assertEq(t, "placeholder title fallback",
-				s.Session.FirstMessage,
-				"Refactor the auth module")
-		}
-	}
-}
-
-func TestParseOpenCodeDB_ToolParts(t *testing.T) {
-	dbPath, seeder, db := newTestDB(t)
-	defer db.Close()
-
-	seeder.AddProject("prj_1", "/tmp/proj")
-	seeder.AddSession("ses_tools", "prj_1", "", "", 1700000000000, 1700000030000)
-
-	seeder.AddMessage("msg_u", "ses_tools", 1700000000000, 1700000000000, `{"role":"user"}`)
-	seeder.AddPart("prt_u", "msg_u", "ses_tools", 1700000000000, 1700000000000, `{"type":"text","text":"read my file"}`)
-
-	seeder.AddMessage("msg_a", "ses_tools", 1700000010000, 1700000012000, `{"role":"assistant"}`)
-	seeder.AddPart("prt_r", "msg_a", "ses_tools", 1700000010000, 1700000010000, `{"type":"reasoning","text":"Let me think about this..."}`)
-	seeder.AddPart("prt_t", "msg_a", "ses_tools", 1700000011000, 1700000011000, `{"type":"tool","tool":"read","callID":"call_1","state":{"input":{"file_path":"main.go"}}}`)
-	seeder.AddPart("prt_txt", "msg_a", "ses_tools", 1700000012000, 1700000012000, `{"type":"text","text":"Here is the file content."}`)
-
-	sessions, err := ParseOpenCodeDB(dbPath, "m")
-	if err != nil {
-		t.Fatalf("ParseOpenCodeDB: %v", err)
-	}
-
-	assertEq(t, "sessions len", len(sessions), 1)
-
-	msgs := sessions[0].Messages
-	assertEq(t, "messages len", len(msgs), 2)
-
-	ast := msgs[1]
-	assertEq(t, "HasThinking", ast.HasThinking, true)
-	assertEq(t, "HasToolUse", ast.HasToolUse, true)
-
-	assertToolCalls(t, ast.ToolCalls, []ParsedToolCall{{
-		ToolName:  "read",
-		Category:  "Read",
-		ToolUseID: "call_1",
-		InputJSON: `{"file_path":"main.go"}`,
-	}})
-}
-
-func TestParseOpenCodeDB_EmptySession(t *testing.T) {
-	dbPath, seeder, db := newTestDB(t)
-	defer db.Close()
-
-	seeder.AddProject("prj_1", "/tmp/proj")
-	seeder.AddSession("ses_empty", "prj_1", "", "", 1700000000000, 1700000000000)
-
-	sessions, err := ParseOpenCodeDB(dbPath, "m")
-	if err != nil {
-		t.Fatalf("ParseOpenCodeDB: %v", err)
-	}
-
-	assertEq(t, "sessions len", len(sessions), 0)
-}
-
-func TestParseOpenCodeDB_NonexistentDB(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "nonexistent.db")
-
-	sessions, err := ParseOpenCodeDB(dbPath, "m")
-	if err != nil {
-		t.Fatalf("expected nil error, got %v", err)
-	}
-	if sessions != nil {
-		t.Errorf("expected nil sessions, got %d", len(sessions))
-	}
-}
-
-func TestParseOpenCodeDB_ProjectFromWorktree(t *testing.T) {
-	dbPath, seeder, db := newTestDB(t)
-	defer db.Close()
-
-	// Create a temp dir that looks like a git repo so
-	// ExtractProjectFromCwd resolves it.
-	repoDir := filepath.Join(t.TempDir(), "my-project")
-	if err := os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	seeder.AddProject("prj_git", repoDir)
-	seeder.AddSession("ses_git", "prj_git", "", "", 1700000000000, 1700000010000)
-	seeder.AddMessage("msg_1", "ses_git", 1700000000000, 1700000000000, `{"role":"user"}`)
-	seeder.AddPart("prt_1", "msg_1", "ses_git", 1700000000000, 1700000000000, `{"type":"text","text":"hello"}`)
-
-	sessions, err := ParseOpenCodeDB(dbPath, "m")
-	if err != nil {
-		t.Fatalf("ParseOpenCodeDB: %v", err)
-	}
-	assertEq(t, "sessions len", len(sessions), 1)
-
-	assertEq(t, "Project", sessions[0].Session.Project, "my_project")
+	sessions, err := parseOpenCodeAll(dbPath, "testmachine")
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "/home/user/code/myapp", sessions[0].Session.Cwd)
 }
 
 func TestParseOpenCodeSession_SingleSession(t *testing.T) {
@@ -305,14 +1396,9 @@ func TestParseOpenCodeSession_SingleSession(t *testing.T) {
 	defer db.Close()
 	seedStandardSession(t, seeder)
 
-	sess, msgs, err := ParseOpenCodeSession(dbPath, "ses_abc", "testmachine")
-	if err != nil {
-		t.Fatalf("ParseOpenCodeSession: %v", err)
-	}
-	if sess == nil {
-		t.Fatal("expected non-nil session")
-		return
-	}
+	sess, msgs, err := parseOpenCodeDBSession(dbPath, "ses_abc", "testmachine")
+	require.NoError(t, err, "parseOpenCodeDBSession")
+	require.NotNil(t, sess, "expected non-nil session")
 
 	assertEq(t, "ID", sess.ID, "opencode:ses_abc")
 	assertEq(t, "messages len", len(msgs), 2)
@@ -345,10 +1431,8 @@ func TestParseOpenCodeDB_OrdinalContinuity(t *testing.T) {
 	seeder.AddMessage("msg_5", "ses_ord", 1700000040000, 1700000040000, `{"role":"user"}`)
 	seeder.AddPart("prt_5", "msg_5", "ses_ord", 1700000040000, 1700000040000, `{"type":"text","text":"follow up"}`)
 
-	sessions, err := ParseOpenCodeDB(dbPath, "m")
-	if err != nil {
-		t.Fatalf("ParseOpenCodeDB: %v", err)
-	}
+	sessions, err := parseOpenCodeAll(dbPath, "m")
+	require.NoError(t, err, "ParseOpenCodeDB")
 	assertEq(t, "sessions len", len(sessions), 1)
 
 	msgs := sessions[0].Messages
@@ -378,21 +1462,16 @@ func TestParseOpenCodeDB_ParentSession(t *testing.T) {
 	seeder.AddMessage("msg_c", "ses_child", 1700000020000, 1700000020000, `{"role":"user"}`)
 	seeder.AddPart("prt_c", "msg_c", "ses_child", 1700000020000, 1700000020000, `{"type":"text","text":"child msg"}`)
 
-	sessions, err := ParseOpenCodeDB(dbPath, "m")
-	if err != nil {
-		t.Fatalf("ParseOpenCodeDB: %v", err)
-	}
+	sessions, err := parseOpenCodeAll(dbPath, "m")
+	require.NoError(t, err, "ParseOpenCodeDB")
 
-	var child *OpenCodeSession
+	var child *ParseResult
 	for i := range sessions {
 		if sessions[i].Session.ID == "opencode:ses_child" {
 			child = &sessions[i]
 		}
 	}
-	if child == nil {
-		t.Fatal("child session not found")
-		return
-	}
+	require.NotNil(t, child, "child session not found")
 	assertEq(t, "ParentSessionID", child.Session.ParentSessionID, "opencode:ses_parent")
 }
 
@@ -402,9 +1481,7 @@ func TestListOpenCodeSessionMeta(t *testing.T) {
 	seedStandardSession(t, seeder)
 
 	metas, err := ListOpenCodeSessionMeta(dbPath)
-	if err != nil {
-		t.Fatalf("ListOpenCodeSessionMeta: %v", err)
-	}
+	require.NoError(t, err, "ListOpenCodeSessionMeta")
 	assertEq(t, "metas len", len(metas), 1)
 
 	m := metas[0]
@@ -420,9 +1497,7 @@ func TestListOpenCodeSessionMeta(t *testing.T) {
 func TestListOpenCodeSessionMeta_NonexistentDB(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "nope.db")
 	metas, err := ListOpenCodeSessionMeta(dbPath)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err, "unexpected error")
 	assertEq(t, "metas len", len(metas), 0)
 }
 
@@ -472,13 +1547,9 @@ func TestParseOpenCodeDB_TokenUsage(t *testing.T) {
 		1700000020000, 1700000020000,
 		`{"type":"text","text":"answer2"}`)
 
-	sessions, err := ParseOpenCodeDB(dbPath, "testmachine")
-	if err != nil {
-		t.Fatalf("ParseOpenCodeDB: %v", err)
-	}
-	if len(sessions) != 1 {
-		t.Fatalf("sessions len = %d, want 1", len(sessions))
-	}
+	sessions, err := parseOpenCodeAll(dbPath, "testmachine")
+	require.NoError(t, err, "ParseOpenCodeDB")
+	require.Len(t, sessions, 1, "sessions len")
 	s := sessions[0]
 
 	var asst1, asst2 *ParsedMessage
@@ -494,23 +1565,16 @@ func TestParseOpenCodeDB_TokenUsage(t *testing.T) {
 			asst2 = m
 		}
 	}
-	if asst1 == nil {
-		t.Fatal("missing gpt-5.2-codex assistant message")
-	}
-	if asst2 == nil {
-		t.Fatal("missing claude-sonnet assistant message")
-	}
+	require.NotNil(t, asst1, "missing gpt-5.2-codex assistant message")
+	require.NotNil(t, asst2, "missing claude-sonnet assistant message")
 
 	checkUsage := func(name string, m *ParsedMessage,
 		wantIn, wantOut, wantCacheRead, wantCacheCreate int) {
 		t.Helper()
-		if len(m.TokenUsage) == 0 {
-			t.Fatalf("%s: TokenUsage empty", name)
-		}
+		require.NotEmpty(t, m.TokenUsage, "%s: TokenUsage empty", name)
 		var got map[string]int
-		if err := json.Unmarshal(m.TokenUsage, &got); err != nil {
-			t.Fatalf("%s: unmarshal TokenUsage: %v", name, err)
-		}
+		require.NoError(t, json.Unmarshal(m.TokenUsage, &got),
+			"%s: unmarshal TokenUsage", name)
 		assertEq(t, name+" input_tokens",
 			got["input_tokens"], wantIn)
 		assertEq(t, name+" output_tokens",
@@ -534,14 +1598,10 @@ func TestParseOpenCodeDB_TokenUsage(t *testing.T) {
 	checkUsage("claude", asst2, 1, 102, 500, 11969)
 
 	// Session-level rollups via accumulateMessageTokenUsage.
-	if !s.Session.HasTotalOutputTokens {
-		t.Fatal("session HasTotalOutputTokens=false, want true")
-	}
+	assert.True(t, s.Session.HasTotalOutputTokens, "session HasTotalOutputTokens")
 	assertEq(t, "TotalOutputTokens",
 		s.Session.TotalOutputTokens, 137) // 35 + 102
-	if !s.Session.HasPeakContextTokens {
-		t.Fatal("session HasPeakContextTokens=false, want true")
-	}
+	assert.True(t, s.Session.HasPeakContextTokens, "session HasPeakContextTokens")
 	assertEq(t, "PeakContextTokens",
 		s.Session.PeakContextTokens, 12470) // 1 + 500 + 11969
 }
@@ -582,13 +1642,9 @@ func TestParseOpenCodeDB_UnknownTokensShape(t *testing.T) {
 				1700000005000, 1700000005000,
 				`{"type":"text","text":"answer"}`)
 
-			sessions, err := ParseOpenCodeDB(dbPath, "m")
-			if err != nil {
-				t.Fatalf("ParseOpenCodeDB: %v", err)
-			}
-			if len(sessions) != 1 {
-				t.Fatalf("sessions len = %d, want 1", len(sessions))
-			}
+			sessions, err := parseOpenCodeAll(dbPath, "m")
+			require.NoError(t, err, "ParseOpenCodeDB")
+			require.Len(t, sessions, 1, "sessions len")
 
 			var asst *ParsedMessage
 			for i := range sessions[0].Messages {
@@ -597,14 +1653,10 @@ func TestParseOpenCodeDB_UnknownTokensShape(t *testing.T) {
 					break
 				}
 			}
-			if asst == nil {
-				t.Fatal("missing assistant message")
-			}
+			require.NotNil(t, asst, "missing assistant message")
 			assertEq(t, "Model", asst.Model, "gpt-5.4")
-			if len(asst.TokenUsage) != 0 {
-				t.Fatalf("TokenUsage = %q, want empty",
-					string(asst.TokenUsage))
-			}
+			assert.Empty(t, asst.TokenUsage,
+				"TokenUsage = %q, want empty", string(asst.TokenUsage))
 			assertEq(t, "HasOutputTokens",
 				asst.HasOutputTokens, false)
 			assertEq(t, "HasContextTokens",
@@ -647,13 +1699,9 @@ func TestParseOpenCodeDB_ZeroTokens(t *testing.T) {
 		1700000005000, 1700000005000,
 		`{"type":"text","text":"sorry, request failed"}`)
 
-	sessions, err := ParseOpenCodeDB(dbPath, "m")
-	if err != nil {
-		t.Fatalf("ParseOpenCodeDB: %v", err)
-	}
-	if len(sessions) != 1 {
-		t.Fatalf("sessions len = %d, want 1", len(sessions))
-	}
+	sessions, err := parseOpenCodeAll(dbPath, "m")
+	require.NoError(t, err, "ParseOpenCodeDB")
+	require.Len(t, sessions, 1, "sessions len")
 
 	var asst *ParsedMessage
 	for i := range sessions[0].Messages {
@@ -662,17 +1710,11 @@ func TestParseOpenCodeDB_ZeroTokens(t *testing.T) {
 			break
 		}
 	}
-	if asst == nil {
-		t.Fatal("missing assistant message")
-	}
+	require.NotNil(t, asst, "missing assistant message")
 	assertEq(t, "Model", asst.Model, "gpt-5.2-chat-latest")
-	if len(asst.TokenUsage) == 0 {
-		t.Fatal("TokenUsage empty; want zero-valued JSON preserved")
-	}
+	require.NotEmpty(t, asst.TokenUsage, "TokenUsage empty; want zero-valued JSON preserved")
 	var got map[string]int
-	if err := json.Unmarshal(asst.TokenUsage, &got); err != nil {
-		t.Fatalf("unmarshal TokenUsage: %v", err)
-	}
+	require.NoError(t, json.Unmarshal(asst.TokenUsage, &got), "unmarshal TokenUsage")
 	assertEq(t, "input_tokens", got["input_tokens"], 0)
 	assertEq(t, "output_tokens", got["output_tokens"], 0)
 	assertEq(t, "cache_read_input_tokens",
@@ -710,13 +1752,9 @@ func TestParseOpenCodeDB_NoTokenUsage(t *testing.T) {
 		1700000005000, 1700000005000,
 		`{"type":"text","text":"oops"}`)
 
-	sessions, err := ParseOpenCodeDB(dbPath, "m")
-	if err != nil {
-		t.Fatalf("ParseOpenCodeDB: %v", err)
-	}
-	if len(sessions) != 1 {
-		t.Fatalf("sessions len = %d, want 1", len(sessions))
-	}
+	sessions, err := parseOpenCodeAll(dbPath, "m")
+	require.NoError(t, err, "ParseOpenCodeDB")
+	require.Len(t, sessions, 1, "sessions len")
 
 	var asst *ParsedMessage
 	for i := range sessions[0].Messages {
@@ -725,11 +1763,45 @@ func TestParseOpenCodeDB_NoTokenUsage(t *testing.T) {
 			break
 		}
 	}
-	if asst == nil {
-		t.Fatal("missing assistant message")
-	}
+	require.NotNil(t, asst, "missing assistant message")
 	assertEq(t, "Model", asst.Model, "gpt-5.4")
-	if len(asst.TokenUsage) != 0 {
-		t.Fatalf("TokenUsage = %q, want empty", string(asst.TokenUsage))
-	}
+	assert.Empty(t, asst.TokenUsage, "TokenUsage = %q, want empty", string(asst.TokenUsage))
+}
+
+func TestOpenCodeStorageFingerprintMissingDetectsContentRewrite(
+	t *testing.T,
+) {
+	stored := buildOpenCodeStorageFingerprint(
+		[]openCodeMessageRow{{
+			id:          "msg-1",
+			data:        `{"role":"assistant","modelID":"gpt-5"}`,
+			timeCreated: 100,
+		}},
+		map[string][]openCodePartRow{
+			"msg-1": {{
+				id:          "part-1",
+				messageID:   "msg-1",
+				data:        `{"type":"text","text":"complete"}`,
+				timeCreated: 101,
+			}},
+		},
+	)
+	current := buildOpenCodeStorageFingerprint(
+		[]openCodeMessageRow{{
+			id:          "msg-1",
+			data:        `{"role":"assistant","modelID":"gpt-5"}`,
+			timeCreated: 100,
+		}},
+		map[string][]openCodePartRow{
+			"msg-1": {{
+				id:          "part-1",
+				messageID:   "msg-1",
+				data:        `{"type":"text","text":"truncated"}`,
+				timeCreated: 101,
+			}},
+		},
+	)
+
+	assert.True(t, OpenCodeStorageFingerprintMissing(stored, current),
+		"expected content rewrite to invalidate fingerprint")
 }

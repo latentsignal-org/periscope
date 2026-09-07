@@ -1,12 +1,22 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
+  import { Button, Modal, Spinner } from "@kenn-io/kit-ui";
+  import { m } from "../../i18n/index.js";
   import { ui } from "../../stores/ui.svelte.js";
   import { sessions } from "../../stores/sessions.svelte.js";
   import {
-    getGithubConfig,
-    setGithubConfig,
-    publishSession,
-  } from "../../api/client.js";
+    ConfigService,
+    InsightsService,
+    SessionsService,
+  } from "../../api/generated/index";
+  import {
+    callGenerated,
+    configureGeneratedClient,
+    isAbortError,
+  } from "../../api/runtime.js";
   import type { PublishResponse } from "../../api/types.js";
+  import { copyToClipboard } from "../../utils/clipboard.js";
+  import { LatestRead } from "../../utils/latest-read.js";
 
   type View = "setup" | "progress" | "success" | "error";
 
@@ -14,17 +24,43 @@
   let tokenInput: string = $state("");
   let errorMessage: string = $state("");
   let result: PublishResponse | null = $state(null);
+  let closed = false;
+  const configRead = new LatestRead();
+
+  const target = ui.publishTarget ??
+    (sessions.activeSessionId
+      ? { kind: "session" as const, id: sessions.activeSessionId }
+      : null);
+  const publishSecret = ui.publishSecret;
+
+  function isClosed() {
+    return closed || ui.activeModal !== "publish";
+  }
+
+  function closeModal() {
+    closed = true;
+    ui.activeModal = null;
+  }
 
   async function init() {
+    const signal = configRead.begin();
     try {
-      const config = await getGithubConfig();
+      configureGeneratedClient();
+      const config = await callGenerated(
+        () => ConfigService.getApiV1ConfigGithub(),
+        signal,
+      );
+      if (isClosed() || !configRead.isCurrent(signal)) return;
       if (config.configured) {
         await doPublish();
       } else {
         view = "setup";
       }
-    } catch {
+    } catch (e) {
+      if (isAbortError(e) || !configRead.isCurrent(signal)) return;
       view = "setup";
+    } finally {
+      configRead.finish(signal);
     }
   }
 
@@ -34,202 +70,205 @@
 
     view = "progress";
     try {
-      await setGithubConfig(token);
+      configureGeneratedClient();
+      await ConfigService.postApiV1ConfigGithub({
+        requestBody: { token },
+      });
+      if (isClosed()) return;
       await doPublish();
     } catch (err) {
+      if (isClosed()) return;
       errorMessage =
-        err instanceof Error ? err.message : "Failed to save token";
+        err instanceof Error ? err.message : m.publish_save_token_failed();
       view = "error";
     }
   }
 
   async function doPublish() {
-    const id = sessions.activeSessionId;
-    if (!id) {
-      errorMessage = "No session selected";
+    if (isClosed()) return;
+    if (!target) {
+      errorMessage = m.publish_no_session_selected();
       view = "error";
+      return;
+    }
+
+    if (target.kind === "insight") {
+      view = "progress";
+      try {
+        configureGeneratedClient();
+        result =
+          await InsightsService.postApiV1InsightsIdPublish({
+            id: target.id,
+            secret: publishSecret,
+          }) as unknown as PublishResponse;
+        if (isClosed()) return;
+        view = "success";
+      } catch (err) {
+        if (isClosed()) return;
+        errorMessage =
+          err instanceof Error ? err.message : m.publish_failed();
+        view = "error";
+      }
       return;
     }
 
     view = "progress";
     try {
-      result = await publishSession(id);
+      configureGeneratedClient();
+      result =
+        await SessionsService.postApiV1SessionsIdPublish({
+          id: target.id,
+          secret: publishSecret,
+        }) as unknown as PublishResponse;
+      if (isClosed()) return;
       view = "success";
     } catch (err) {
+      if (isClosed()) return;
       errorMessage =
-        err instanceof Error ? err.message : "Publish failed";
+        err instanceof Error ? err.message : m.publish_failed();
       view = "error";
     }
   }
 
-  function copyToClipboard(text: string) {
-    navigator.clipboard.writeText(text);
-  }
-
-  function handleOverlayClick(e: MouseEvent) {
-    if (
-      (e.target as HTMLElement).classList.contains(
-        "modal-overlay",
-      )
-    ) {
-      ui.activeModal = null;
-    }
-  }
+  onDestroy(() => {
+    closed = true;
+    configRead.cancel();
+  });
 
   init();
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div
-  class="modal-overlay"
-  onclick={handleOverlayClick}
-  onkeydown={(e) => {
-    if (e.key === "Escape") ui.activeModal = null;
-  }}
+{#snippet actions()}
+  {#if view === "setup"}
+    <a
+      class="token-link"
+      href="https://github.com/settings/tokens/new?scopes=gist"
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      {m.publish_create_token()}
+    </a>
+    <Button
+      label={m.publish_save_and_publish()}
+      tone="info"
+      surface="solid"
+      disabled={!tokenInput.trim()}
+      onclick={handleSaveToken}
+    />
+  {:else if view === "success"}
+    <Button
+      label={m.publish_open_in_browser()}
+      tone="info"
+      surface="solid"
+      onclick={() => window.open(result!.view_url, "_blank")}
+    />
+    <Button
+      label={m.publish_close_btn()}
+      tone="neutral"
+      surface="outline"
+      onclick={closeModal}
+    />
+  {:else if view === "error"}
+    <Button
+      label={m.publish_retry()}
+      tone="info"
+      surface="solid"
+      onclick={doPublish}
+    />
+    <Button
+      label={m.publish_close_btn()}
+      tone="neutral"
+      surface="outline"
+      onclick={closeModal}
+    />
+  {/if}
+{/snippet}
+
+<Modal
+  title={publishSecret ? m.publish_title_secret() : m.publish_title_public()}
+  width="440px"
+  onclose={closeModal}
+  footer={view === "progress" ? undefined : actions}
 >
-  <div class="modal-panel publish-panel">
-    <div class="modal-header">
-      <h3 class="modal-title">Publish to GitHub Gist</h3>
-      <button
-        class="modal-close"
-        onclick={() => ui.activeModal = null}
-      >
-        &times;
-      </button>
+  {#if view === "setup"}
+    <p class="setup-text">
+      {m.publish_setup_text({ scope: "gist" })}
+    </p>
+    <input
+      class="token-input"
+      type="password"
+      placeholder="ghp_..."
+      bind:value={tokenInput}
+      onkeydown={(e) => {
+        if (e.key === "Enter") handleSaveToken();
+      }}
+    />
+
+  {:else if view === "progress"}
+    <div class="progress-view">
+      <Spinner />
+      <p>
+        {publishSecret ? m.publish_creating_secret() : m.publish_creating_public()}
+      </p>
     </div>
 
-    <div class="modal-body">
-      {#if view === "setup"}
-        <p class="setup-text">
-          Enter a GitHub personal access token with the
-          <code>gist</code> scope.
-        </p>
-        <input
-          class="token-input"
-          type="password"
-          placeholder="ghp_..."
-          bind:value={tokenInput}
-          onkeydown={(e) => {
-            if (e.key === "Enter") handleSaveToken();
-          }}
-        />
-        <div class="setup-actions">
-          <a
-            class="token-link"
-            href="https://github.com/settings/tokens/new?scopes=gist"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Create token on GitHub
-          </a>
-          <button
-            class="modal-btn modal-btn-primary"
-            onclick={handleSaveToken}
-            disabled={!tokenInput.trim()}
-          >
-            Save & Publish
-          </button>
+  {:else if view === "success" && result}
+    <div class="success-view">
+      <div class="url-field">
+        <label class="url-label" for="publish-view-url">
+          {m.publish_view_url()}
+        </label>
+        <div class="url-row">
+          <input
+            id="publish-view-url"
+            class="url-input"
+            type="text"
+            readonly
+            value={result.view_url}
+          />
+          <Button
+            class="btn-copy"
+            label={m.publish_copy()}
+            size="sm"
+            onclick={() => copyToClipboard(result!.view_url)}
+          />
         </div>
-
-      {:else if view === "progress"}
-        <div class="progress-view">
-          <div class="modal-spinner"></div>
-          <p>Creating GitHub Gist...</p>
+      </div>
+      <div class="url-field">
+        <label class="url-label" for="publish-gist-url">
+          {m.publish_gist_url()}
+        </label>
+        <div class="url-row">
+          <input
+            id="publish-gist-url"
+            class="url-input"
+            type="text"
+            readonly
+            value={result.gist_url}
+          />
+          <Button
+            class="btn-copy"
+            label={m.publish_copy()}
+            size="sm"
+            onclick={() => copyToClipboard(result!.gist_url)}
+          />
         </div>
-
-      {:else if view === "success" && result}
-        <div class="success-view">
-          <div class="url-field">
-            <label class="url-label" for="publish-view-url">
-              View URL
-            </label>
-            <div class="url-row">
-              <input
-                id="publish-view-url"
-                class="url-input"
-                type="text"
-                readonly
-                value={result.view_url}
-              />
-              <button
-                class="modal-btn btn-copy"
-                onclick={() => copyToClipboard(result!.view_url)}
-              >
-                Copy
-              </button>
-            </div>
-          </div>
-          <div class="url-field">
-            <label class="url-label" for="publish-gist-url">
-              Gist URL
-            </label>
-            <div class="url-row">
-              <input
-                id="publish-gist-url"
-                class="url-input"
-                type="text"
-                readonly
-                value={result.gist_url}
-              />
-              <button
-                class="modal-btn btn-copy"
-                onclick={() => copyToClipboard(result!.gist_url)}
-              >
-                Copy
-              </button>
-            </div>
-          </div>
-          <div class="success-actions">
-            <button
-              class="modal-btn modal-btn-primary"
-              onclick={() => window.open(result!.view_url, "_blank")}
-            >
-              Open in Browser
-            </button>
-            <button
-              class="modal-btn"
-              onclick={() => ui.activeModal = null}
-            >
-              Close
-            </button>
-          </div>
-        </div>
-
-      {:else if view === "error"}
-        <div class="error-view">
-          <p class="modal-error">{errorMessage}</p>
-          <div class="error-actions">
-            <button
-              class="modal-btn modal-btn-primary"
-              onclick={doPublish}
-            >
-              Retry
-            </button>
-            <button
-              class="modal-btn"
-              onclick={() => ui.activeModal = null}
-            >
-              Close
-            </button>
-          </div>
-        </div>
-      {/if}
+      </div>
     </div>
-  </div>
-</div>
+
+  {:else if view === "error"}
+    <p class="modal-error-text">{errorMessage}</p>
+  {/if}
+</Modal>
 
 <style>
-  .publish-panel {
-    width: 440px;
-  }
-
   .setup-text {
     font-size: 12px;
     color: var(--text-secondary);
     margin-bottom: 12px;
   }
 
-  .setup-text code {
+  .setup-text :global(code) {
     font-family: var(--font-mono);
     background: var(--bg-inset);
     padding: 1px 4px;
@@ -246,7 +285,6 @@
     font-size: 12px;
     font-family: var(--font-mono);
     color: var(--text-primary);
-    margin-bottom: 12px;
   }
 
   .token-input:focus {
@@ -254,13 +292,8 @@
     border-color: var(--accent-blue);
   }
 
-  .setup-actions {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-
   .token-link {
+    margin-right: auto;
     font-size: 11px;
     color: var(--accent-blue);
     text-decoration: none;
@@ -318,26 +351,17 @@
     min-width: 0;
   }
 
-  .btn-copy {
+  .url-row :global(.btn-copy) {
     flex-shrink: 0;
   }
 
-  .success-actions {
-    display: flex;
-    gap: 8px;
-    justify-content: flex-end;
-    margin-top: 4px;
-  }
-
-  .error-view {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .error-actions {
-    display: flex;
-    gap: 8px;
-    justify-content: flex-end;
+  .modal-error-text {
+    font-size: var(--font-size-sm);
+    color: var(--accent-red, #f85149);
+    background: var(--bg-inset);
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--accent-red, #f85149);
+    word-break: break-word;
   }
 </style>

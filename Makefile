@@ -10,6 +10,25 @@ LDFLAGS := -X main.version=$(VERSION) \
 
 LDFLAGS_RELEASE := $(LDFLAGS) -s -w
 DESKTOP_DIST_DIR := dist/desktop
+GOLANGCI_LINT_VERSION ?= v2.11.4
+# Isolate each checkout from stale sibling-worktree fixes and issue positions.
+GOLANGCI_LINT_CACHE ?= $(CURDIR)/.golangci-cache
+export GOLANGCI_LINT_CACHE
+CUSTOM_GCL := ./custom-gcl
+PRICING_SNAPSHOT_FILE := internal/pricing/snapshot/litellm_snapshot.json.gz
+
+# sqlite-vec's cgo bindings #include "sqlite3.h". Without an override the
+# compiler falls back to the system header (the macOS SDK one marks
+# sqlite3_auto_extension deprecated, warning on every build) which can also
+# drift from the amalgamation mattn/go-sqlite3 statically links. Compile
+# against the bundled amalgamation's own header instead, mirroring the
+# Linux release workflow in .github/workflows/release.yml.
+# Setting CGO_CFLAGS replaces Go's built-in default of "-O2 -g", so restate
+# it explicitly or the SQLite amalgamation compiles unoptimized (2-3x slower
+# queries, caught by the bench gate). Caller-provided flags stay last so
+# they can still override.
+SQLITE_INCLUDE_DIR := .sqlite-include
+export CGO_CFLAGS := -O2 -g -I$(CURDIR)/$(SQLITE_INCLUDE_DIR) $(CGO_CFLAGS)
 
 GOPATH_FIRST := $(shell go env GOPATH | cut -d: -f1)
 AIR_BIN := $(shell if command -v air >/dev/null 2>&1; then command -v air; \
@@ -17,29 +36,49 @@ AIR_BIN := $(shell if command -v air >/dev/null 2>&1; then command -v air; \
 	elif [ -x "$(GOPATH_FIRST)/bin/air" ]; then printf "%s" "$(GOPATH_FIRST)/bin/air"; \
 	fi)
 
-.PHONY: build build-release install frontend frontend-dev dev check-air air-install desktop-dev desktop-build desktop-macos-app desktop-macos-dmg desktop-windows-installer desktop-linux-appimage desktop-app test test-short test-postgres test-postgres-ci postgres-up postgres-down test-ssh test-ssh-ci ssh-up ssh-down e2e vet lint lint-ci tidy clean release release-darwin-arm64 release-darwin-amd64 release-linux-amd64 install-hooks ensure-embed-dir dev-snapshot help
+.PHONY: build build-release install frontend frontend-dev dev check-air air-install desktop-dev desktop-build desktop-macos-app desktop-macos-dmg desktop-windows-installer desktop-linux-appimage desktop-app docs-install docs-build docs-serve docs-check docs-screenshots docs-assets-branch docs-generated-assets-branch docs-deploy-staging docs-deploy test test-short test-evalingest bench-backends bench-gate bench-gate-config test-postgres test-postgres-ci test-s3 postgres-up postgres-down test-ssh test-ssh-ci ssh-up ssh-down e2e e2e-duckdb vet lint lint-ci lint-golangci lint-golangci-ci nilaway nilaway-golangci-build lint-tools tidy clean release release-darwin-arm64 release-darwin-amd64 release-linux-amd64 install-hooks ensure-embed-dir pricing-snapshot sqlite-vec-header dev-snapshot help
 
 # Ensure go:embed has at least one file (no-op if frontend is built)
 ensure-embed-dir:
 	@mkdir -p internal/web/dist
-	@test -n "$$(ls internal/web/dist/ 2>/dev/null)" \
-		|| echo ok > internal/web/dist/stub.html
+	@test -f internal/web/dist/.keep \
+		|| printf '%s\n' \
+			'keep embed dir for generated frontend assets' \
+			> internal/web/dist/.keep
 
-# Build the binary (debug, with embedded frontend)
-build: frontend
-	CGO_ENABLED=1 go build -tags fts5 -ldflags="$(LDFLAGS)" -o agentsview ./cmd/agentsview
-	@chmod +x agentsview
+# Copy the go-sqlite3 amalgamation header where CGO_CFLAGS points.
+# Chained from pricing-snapshot so every Go-compiling target stages it
+# without lengthening each prerequisite list.
+sqlite-vec-header:
+	@go mod download github.com/mattn/go-sqlite3
+	@mkdir -p $(SQLITE_INCLUDE_DIR)
+	@install -m 0644 \
+		"$$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3)/sqlite3-binding.h" \
+		$(SQLITE_INCLUDE_DIR)/sqlite3.h
+
+# Restore the generated LiteLLM fallback snapshot from its artifact branch.
+# Pinned ref, SHA256, and branch are compiled into the snapshot tool.
+pricing-snapshot: sqlite-vec-header
+	go run ./internal/pricing/cmd/litellm-snapshot -restore
+
+# Build the binary (debug, with embedded pricing snapshot and frontend)
+build: pricing-snapshot frontend
+	CGO_ENABLED=1 go build -tags fts5 -ldflags="$(LDFLAGS)" -o periscope ./cmd/periscope
+	@chmod +x periscope
 
 # Build with optimizations (release)
-build-release: frontend
-	CGO_ENABLED=1 go build -tags fts5 -ldflags="$(LDFLAGS_RELEASE)" -trimpath -o agentsview ./cmd/agentsview
-	@chmod +x agentsview
+build-release: pricing-snapshot frontend
+	CGO_ENABLED=1 go build -tags fts5 -ldflags="$(LDFLAGS_RELEASE)" -trimpath -o periscope ./cmd/periscope
+	@chmod +x periscope
 
-# Install to ~/.local/bin, $GOBIN, or $GOPATH/bin
+# Install to ~/.local/bin, $GOBIN, or $GOPATH/bin.
+# Copy to a temp file in the destination directory, then rename into place.
+# Rename is atomic and produces a fresh inode, so overwriting the binary while
+# an old periscope is still running does not leave the kernel validating exec
+# against stale code-signature pages (which SIGKILLs the new process on macOS).
 install: build-release
 	@if [ -d "$(HOME)/.local/bin" ]; then \
-		echo "Installing to ~/.local/bin/agentsview"; \
-		cp agentsview "$(HOME)/.local/bin/agentsview"; \
+		INSTALL_DIR="$(HOME)/.local/bin"; \
 	else \
 		INSTALL_DIR="$${GOBIN:-$$(go env GOBIN)}"; \
 		if [ -z "$$INSTALL_DIR" ]; then \
@@ -47,28 +86,38 @@ install: build-release
 			INSTALL_DIR="$$GOPATH_FIRST/bin"; \
 		fi; \
 		mkdir -p "$$INSTALL_DIR"; \
-		echo "Installing to $$INSTALL_DIR/agentsview"; \
-		cp agentsview "$$INSTALL_DIR/agentsview"; \
-	fi
+	fi; \
+	echo "Installing to $$INSTALL_DIR/periscope"; \
+	tmp="$$(mktemp "$$INSTALL_DIR/periscope.tmp.XXXXXX")" || exit $$?; \
+	cleanup() { rm -f "$$tmp"; }; \
+	trap cleanup EXIT HUP INT TERM; \
+	cp periscope "$$tmp" && chmod 755 "$$tmp" && mv -f "$$tmp" "$$INSTALL_DIR/periscope"; \
+	status=$$?; \
+	trap - EXIT HUP INT TERM; \
+	cleanup; \
+	exit $$status
 
 # Build frontend SPA and copy into embed directory
 frontend:
-	cd frontend && npm install && npm run build
+	cd frontend && npm ci && npm run build
 	rm -rf internal/web/dist
 	cp -r frontend/dist internal/web/dist
+	printf '%s\n' \
+		'keep embed dir for generated frontend assets' \
+		> internal/web/dist/.keep
 
-# Run Vite dev server (use alongside `make dev`)
+# Run Vite+ dev server (use alongside `make dev`)
 frontend-dev:
 	cd frontend && npm run dev
 
-# Build and run agentsview against a fresh snapshot of the prod SQLite DB.
+# Build and run periscope against a fresh snapshot of the prod SQLite DB.
 # Prod DB is never written; sqlite3 .backup is WAL-safe even with prod running.
 # Prod config.toml is NOT copied, so remote PG push is disabled in the snapshot.
 # Overrides:
-#   PROD_DATA_DIR  - source data dir (default: $$HOME/.agentsview)
+#   PROD_DATA_DIR  - source data dir (default: $$HOME/.periscope)
 #   SNAPSHOT_DIR   - destination dir (default: tmp/prod-snapshot)
 #   RESNAPSHOT=0   - reuse existing snapshot instead of re-cloning
-PROD_DATA_DIR ?= $(HOME)/.agentsview
+PROD_DATA_DIR ?= $(HOME)/.periscope
 SNAPSHOT_DIR ?= tmp/prod-snapshot
 # Resolve SNAPSHOT_DIR so relative and absolute paths both work.
 SNAPSHOT_ABS := $(abspath $(SNAPSHOT_DIR))
@@ -82,7 +131,7 @@ SNAPSHOT_ABS := $(abspath $(SNAPSHOT_DIR))
 # SNAPSHOT_DIR=tmp wiping unrelated tmp/ contents) even with a
 # denylist, so we now only ever delete a small set of files we
 # know we wrote.
-SNAPSHOT_MARKER := .agentsview-snapshot
+SNAPSHOT_MARKER := .periscope-snapshot
 
 dev-snapshot: build
 	@if [ ! -f "$(PROD_DATA_DIR)/sessions.db" ]; then \
@@ -115,7 +164,7 @@ dev-snapshot: build
 	else \
 		echo "Reusing existing snapshot at $(SNAPSHOT_ABS)/sessions.db"; \
 	fi
-	AGENT_VIEWER_DATA_DIR="$(SNAPSHOT_ABS)" ./agentsview --port 0
+	PERISCOPE_DATA_DIR="$(SNAPSHOT_ABS)" ./periscope serve --port 0
 
 # Ensure air is installed for backend live reload
 check-air:
@@ -130,32 +179,32 @@ air-install:
 
 # Run Go server in dev mode with live reload (use with frontend-dev).
 # Edits to .go files trigger a rebuild + restart via air.
-dev: ensure-embed-dir check-air
+dev: pricing-snapshot ensure-embed-dir check-air
 	"$(AIR_BIN)" -c .air.toml -- $(ARGS)
 
 # Run the Tauri desktop wrapper in development mode
 desktop-dev:
-	cd desktop && npm install && npm run tauri:dev
+	cd desktop && npm ci && npm run tauri:dev
 
 # Build desktop app bundles via Tauri
 desktop-build:
-	cd desktop && npm install && npm run tauri:build
+	cd desktop && npm ci && npm run tauri:build
 
 # Build only the macOS .app bundle (skip DMG packaging).
 # Skips updater artifact signing when TAURI_SIGNING_PRIVATE_KEY
 # is not set so local builds succeed without release keys.
 desktop-macos-app:
-	cd desktop && npm install && npm run tauri:build:macos-app \
+	cd desktop && npm ci && npm run tauri:build:macos-app \
 		$(if $(TAURI_SIGNING_PRIVATE_KEY),,-- --config '{"bundle":{"createUpdaterArtifacts":false}}')
 	mkdir -p $(DESKTOP_DIST_DIR)/macos
-	rm -rf $(DESKTOP_DIST_DIR)/macos/AgentsView.app
-	cp -R desktop/src-tauri/target/release/bundle/macos/AgentsView.app \
-		$(DESKTOP_DIST_DIR)/macos/AgentsView.app
-	@echo "macOS app bundle copied to $(DESKTOP_DIST_DIR)/macos/AgentsView.app"
+	rm -rf $(DESKTOP_DIST_DIR)/macos/Periscope.app
+	cp -R desktop/src-tauri/target/release/bundle/macos/Periscope.app \
+		$(DESKTOP_DIST_DIR)/macos/Periscope.app
+	@echo "macOS app bundle copied to $(DESKTOP_DIST_DIR)/macos/Periscope.app"
 
 # Build macOS DMG installer
 desktop-macos-dmg:
-	cd desktop && npm install && npm run tauri:build:macos-dmg
+	cd desktop && npm ci && npm run tauri:build:macos-dmg
 	mkdir -p $(DESKTOP_DIST_DIR)/macos
 	rm -f $(DESKTOP_DIST_DIR)/macos/*.dmg
 	@dmg_count=$$(find desktop/src-tauri/target/release/bundle/dmg \
@@ -172,16 +221,32 @@ desktop-macos-dmg:
 # Build Windows NSIS installer bundle (.exe)
 # Run on Windows runner/host.
 desktop-windows-installer:
-	cd desktop && npm install && npm run tauri:build:windows
+	cd desktop && npm ci && npm run tauri:build:windows
 	mkdir -p $(DESKTOP_DIST_DIR)/windows
 	rm -f $(DESKTOP_DIST_DIR)/windows/*.exe
-	@exe_count=$$(find desktop/src-tauri/target/release/bundle/nsis \
-		-maxdepth 1 -type f -name '*.exe' | wc -l | tr -d ' '); \
-	if [ "$$exe_count" -eq 0 ]; then \
-		echo "error: no Windows installer (.exe) found in bundle output" >&2; \
+	@bundle_dir="desktop/src-tauri/target/release/bundle/nsis"; \
+	target_triple="$${TAURI_ENV_TARGET_TRIPLE:-$${CARGO_BUILD_TARGET:-}}"; \
+	if [ -z "$$target_triple" ] && command -v rustc >/dev/null 2>&1; then \
+		host_triple=$$(rustc -vV | awk '/^host: /{print $$2}'); \
+		if [ "$$host_triple" = "aarch64-pc-windows-msvc" ]; then \
+			target_triple="$$host_triple"; \
+		fi; \
+	fi; \
+	if [ -n "$$target_triple" ] && \
+		[ -d "desktop/src-tauri/target/$$target_triple/release/bundle/nsis" ]; then \
+		bundle_dir="desktop/src-tauri/target/$$target_triple/release/bundle/nsis"; \
+	fi; \
+	if [ ! -d "$$bundle_dir" ]; then \
+		echo "error: Windows bundle output directory not found: $$bundle_dir" >&2; \
 		exit 1; \
 	fi; \
-	find desktop/src-tauri/target/release/bundle/nsis \
+	exe_count=$$(find "$$bundle_dir" \
+		-maxdepth 1 -type f -name '*.exe' | wc -l | tr -d ' '); \
+	if [ "$$exe_count" -eq 0 ]; then \
+		echo "error: no Windows installer (.exe) found in $$bundle_dir" >&2; \
+		exit 1; \
+	fi; \
+	find "$$bundle_dir" \
 		-maxdepth 1 -type f -name '*.exe' \
 		-exec cp {} $(DESKTOP_DIST_DIR)/windows/ \;; \
 	echo "Copied $$exe_count Windows installer(s) to $(DESKTOP_DIST_DIR)/windows/"
@@ -189,8 +254,10 @@ desktop-windows-installer:
 # Build Linux AppImage bundle
 # Run on a Linux host.
 desktop-linux-appimage:
-	cd desktop && npm install && npm run tauri:build:linux \
+	cd desktop && npm ci && npm run tauri:build:linux \
 		$(if $(TAURI_SIGNING_PRIVATE_KEY),,-- --config '{"bundle":{"createUpdaterArtifacts":false}}')
+	cd desktop && bash scripts/repair-appimage-diricon.sh \
+		src-tauri/target/release/bundle/appimage/*.AppImage
 	mkdir -p $(DESKTOP_DIST_DIR)/linux
 	rm -f $(DESKTOP_DIST_DIR)/linux/*.AppImage
 	@ai_count=$$(find desktop/src-tauri/target/release/bundle/appimage \
@@ -208,12 +275,56 @@ desktop-linux-appimage:
 desktop-app: desktop-macos-app
 
 # Run tests
-test: ensure-embed-dir
-	go test -tags fts5 ./... -v -count=1
+test: pricing-snapshot ensure-embed-dir
+	go test -tags "fts5" ./... -v -count=1
 
 # Run fast tests only
-test-short: ensure-embed-dir
-	go test -tags fts5 ./... -short -count=1
+test-short: pricing-snapshot ensure-embed-dir
+	go test -tags "fts5" ./... -short -count=1
+
+# Run the quarantined eval-ingest endpoint tests under their build tag.
+test-evalingest: pricing-snapshot ensure-embed-dir
+	CGO_ENABLED=1 go test -tags "fts5,evalingest" \
+		./internal/db ./internal/server -v -count=1
+
+# Compare db.Store read-query performance across SQLite, DuckDB, and PostgreSQL.
+# Requires Docker because the PostgreSQL backend is started with testcontainers.
+BENCH_BACKENDS_FLAGS ?= -bench . -run '^$$' -benchmem
+BENCH_BACKENDS_SESSIONS ?= 1000
+BENCH_BACKENDS_MESSAGES_PER_SESSION ?= 64
+bench-backends: pricing-snapshot ensure-embed-dir
+	AGENTSVIEW_BENCH_SESSIONS=$(BENCH_BACKENDS_SESSIONS) \
+		AGENTSVIEW_BENCH_MESSAGES_PER_SESSION=$(BENCH_BACKENDS_MESSAGES_PER_SESSION) \
+		CGO_ENABLED=1 go test -tags "fts5,benchdb" ./internal/backendbench $(BENCH_BACKENDS_FLAGS)
+
+# Hot-path benchmark gate. Runs every benchmark in the gated packages
+# (sync engine warm/cold/append, message write paths, usage
+# aggregation, secret scanning). This target is the single source of
+# truth for the gate configuration: CI's bench.yml runs it on both
+# the PR head and the merge base, then compares the outputs with
+# `go run ./cmd/benchgate -old old.txt -new new.txt`. Run it before
+# and after touching a sync or DB hot path.
+BENCH_GATE_PACKAGES ?= ./internal/sync ./internal/db ./internal/secrets
+# Count must stay >= 5: benchgate's time gate needs at least 5
+# candidate samples for its significance test.
+BENCH_GATE_COUNT ?= 6
+# Fixed iterations, not a duration: some gated benchmarks grow their
+# fixture as they iterate, so baseline and candidate must run the
+# same iteration count to measure identical workloads.
+BENCH_GATE_TIME ?= 20x
+bench-gate: pricing-snapshot ensure-embed-dir
+	CGO_ENABLED=1 go test -tags "fts5" -run '^$$' \
+		-bench . -benchmem \
+		-count $(BENCH_GATE_COUNT) -benchtime $(BENCH_GATE_TIME) \
+		-timeout 25m $(BENCH_GATE_PACKAGES)
+
+# Prints the gate's sample/iteration configuration in shell-evalable
+# form. CI evaluates this on the PR head and passes the values into
+# the merge-base `make bench-gate` invocation, so both sides measure
+# identical workloads even when a PR changes the defaults above (the
+# package list intentionally stays per-side).
+bench-gate-config:
+	@echo "BENCH_GATE_COUNT=$(BENCH_GATE_COUNT) BENCH_GATE_TIME=$(BENCH_GATE_TIME)"
 
 # Start test PostgreSQL container
 postgres-up:
@@ -224,15 +335,21 @@ postgres-down:
 	docker compose -f docker-compose.test.yml down
 
 # Run PostgreSQL integration tests (starts postgres automatically)
-test-postgres: ensure-embed-dir postgres-up
+test-postgres: pricing-snapshot ensure-embed-dir postgres-up
 	@echo "Waiting for postgres to be ready..."
 	@sleep 2
 	TEST_PG_URL="postgres://agentsview_test:agentsview_test_password@localhost:5433/agentsview_test?sslmode=disable" \
-		CGO_ENABLED=1 go test -tags "fts5,pgtest" -v ./internal/postgres/... -count=1
+		CGO_ENABLED=1 go test -tags "fts5,pgtest" -v ./internal/postgres/... ./internal/activity/... -count=1
 
 # PostgreSQL integration tests for CI (postgres already running as service)
-test-postgres-ci: ensure-embed-dir
-	CGO_ENABLED=1 go test -tags "fts5,pgtest" -v ./internal/postgres/... -count=1
+test-postgres-ci: pricing-snapshot ensure-embed-dir
+	CGO_ENABLED=1 go test -tags "fts5,pgtest" -v ./internal/postgres/... ./internal/activity/... -count=1
+
+# S3 discovery integration tests. testcontainers starts and tears down a
+# rustfs (S3-compatible) container automatically, so only a working Docker
+# daemon is required.
+test-s3: pricing-snapshot ensure-embed-dir
+	CGO_ENABLED=1 go test -tags "fts5,s3test" -v ./internal/sync/... -run TestS3 -count=1
 
 # Start test SSH container
 ssh-up:
@@ -245,75 +362,156 @@ ssh-down:
 	docker compose -f docker-compose.test.yml down sshd
 
 # Run SSH integration tests (starts sshd automatically)
-test-ssh: ensure-embed-dir ssh-up
+test-ssh: pricing-snapshot ensure-embed-dir ssh-up
 	TEST_SSH_HOST=localhost TEST_SSH_PORT=2222 TEST_SSH_USER=testuser \
 		TEST_SSH_KEY=$(CURDIR)/testdata/ssh/test_key \
 		CGO_ENABLED=1 go test -tags "fts5,sshtest" -v ./internal/ssh/... -count=1
 
 # SSH integration tests for CI (sshd already running)
-test-ssh-ci: ensure-embed-dir
+test-ssh-ci: pricing-snapshot ensure-embed-dir
 	CGO_ENABLED=1 go test -tags "fts5,sshtest" -v ./internal/ssh/... -count=1
 
 # Run Playwright E2E tests
 e2e:
 	cd frontend && npx playwright test
 
+# Run focused Playwright smoke tests against duckdb serve.
+e2e-duckdb:
+	cd frontend && AGENTSVIEW_E2E_BACKEND=duckdb npx playwright test \
+		e2e/duckdb-backend.spec.ts e2e/session-list.spec.ts --project=chromium
+
 # Vet
-vet: ensure-embed-dir
+vet: pricing-snapshot ensure-embed-dir
 	go vet -tags fts5 ./...
 
 # Lint Go code and auto-fix where possible (local development)
-lint: ensure-embed-dir
+lint: lint-golangci nilaway
+
+# Run golangci-lint with auto-fixes for local development.
+lint-golangci: pricing-snapshot ensure-embed-dir
 	@if ! command -v golangci-lint >/dev/null 2>&1; then \
-		echo "golangci-lint not found. Install with: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1" >&2; \
+		echo "golangci-lint not found. Install with: make lint-tools" >&2; \
 		exit 1; \
 	fi
 	golangci-lint run --fix ./...
 
 # Lint Go code without fixing (for CI)
-lint-ci: ensure-embed-dir
+lint-ci: lint-golangci-ci nilaway
+
+# Run golangci-lint without auto-fixes for CI.
+lint-golangci-ci: pricing-snapshot ensure-embed-dir
 	@if ! command -v golangci-lint >/dev/null 2>&1; then \
-		echo "golangci-lint not found. Install with: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1" >&2; \
+		echo "golangci-lint not found. Install with: make lint-tools" >&2; \
 		exit 1; \
 	fi
 	golangci-lint run ./...
 
+# Build a custom golangci-lint binary with the NilAway module plugin.
+# Strip every repo-local Git env var (GIT_DIR, GIT_INDEX_FILE,
+# GIT_CONFIG_PARAMETERS, etc.) and disable VCS stamping so the inner
+# `git clone` and `go build` don't inherit the parent repo's state.
+# When `make nilaway` runs from a pre-commit hook, git exports those
+# vars pointing at the parent repo, which makes the clone and the
+# VCS-stamped build fail with exit 128. The list comes from
+# `git rev-parse --local-env-vars` so it tracks whatever Git considers
+# repo-local at runtime.
+nilaway-golangci-build:
+	@if ! command -v golangci-lint >/dev/null 2>&1; then \
+		echo "golangci-lint not found. Install with: make lint-tools" >&2; \
+		exit 1; \
+	fi
+	@unset_args=$$(git rev-parse --local-env-vars 2>/dev/null | sed 's/^/-u /' | tr '\n' ' '); \
+	env $$unset_args GOFLAGS=-buildvcs=false \
+		golangci-lint custom --version "$(GOLANGCI_LINT_VERSION)" --name custom-gcl
+
+# Run NilAway through the custom golangci-lint module plugin.
+nilaway: pricing-snapshot ensure-embed-dir nilaway-golangci-build
+	@set -e; \
+	root=$$(pwd); \
+	dirs=$$(go list -f '{{.Dir}}' ./...); \
+	for dir in $$dirs; do \
+		if [ "$$dir" = "$$root" ]; then \
+			pkg="."; \
+		else \
+			pkg="./$${dir#$$root/}"; \
+		fi; \
+		echo "$(CUSTOM_GCL) run --config .golangci.nilaway.yml $$pkg"; \
+		GOMAXPROCS=$${GOMAXPROCS:-1} GOGC=$${GOGC:-10} GOMEMLIMIT=$${GOMEMLIMIT:-512MiB} \
+			$(CUSTOM_GCL) run --config .golangci.nilaway.yml "$$pkg"; \
+	done
+
+# Install pinned local lint tools.
+lint-tools:
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
 # Tidy dependencies
-tidy:
+tidy: pricing-snapshot
 	go mod tidy
 
 # Clean build artifacts
 clean:
-	rm -f agentsview agentsv
-	rm -rf internal/web/dist dist/ tmp/
+	rm -f periscope agentsv
+	rm -f $(PRICING_SNAPSHOT_FILE)
+	rm -rf internal/web/dist dist/ tmp/ $(SQLITE_INCLUDE_DIR)
+	mkdir -p internal/web/dist
+	printf '%s\n' \
+		'keep embed dir for generated frontend assets' \
+		> internal/web/dist/.keep
+
+docs-install:
+	cd docs && uv sync --frozen --no-dev
+
+docs-build:
+	cd docs && uv run --frozen bash ./vercel-build.sh
+
+docs-serve:
+	cd docs && bash assets/hydrate-assets.sh && uv run bash ./zensical-docs.sh serve
+
+docs-check:
+	bash scripts/check-docs.sh
+
+docs-screenshots:
+	bash docs/screenshots/run.sh
+
+docs-assets-branch:
+	bash docs/assets/update-static-assets-branch.sh
+
+docs-generated-assets-branch:
+	bash docs/screenshots/update-generated-assets-branch.sh
+
+docs-deploy-staging:
+	vercel deploy docs
+
+docs-deploy:
+	vercel deploy docs --prod
 
 # Build release binary for current platform (CGO required for sqlite3)
-release: frontend
+release: pricing-snapshot frontend
 	mkdir -p dist
 	CGO_ENABLED=1 go build -tags fts5 \
 		-ldflags="$(LDFLAGS_RELEASE)" -trimpath \
-		-o dist/agentsview-$$(go env GOOS)-$$(go env GOARCH) ./cmd/agentsview
+		-o dist/periscope-$$(go env GOOS)-$$(go env GOARCH) ./cmd/periscope
 
 # Cross-compile targets (require CC set to target cross-compiler)
-release-darwin-arm64: frontend
+release-darwin-arm64: pricing-snapshot frontend
 	mkdir -p dist
 	GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -tags fts5 \
 		-ldflags="$(LDFLAGS_RELEASE)" -trimpath \
-		-o dist/agentsview-darwin-arm64 ./cmd/agentsview
+		-o dist/periscope-darwin-arm64 ./cmd/periscope
 
-release-darwin-amd64: frontend
+release-darwin-amd64: pricing-snapshot frontend
 	mkdir -p dist
 	GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 go build -tags fts5 \
 		-ldflags="$(LDFLAGS_RELEASE)" -trimpath \
-		-o dist/agentsview-darwin-amd64 ./cmd/agentsview
+		-o dist/periscope-darwin-amd64 ./cmd/periscope
 
-release-linux-amd64: frontend
+release-linux-amd64: pricing-snapshot frontend
 	mkdir -p dist
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -tags fts5 \
 		-ldflags="$(LDFLAGS_RELEASE)" -trimpath \
-		-o dist/agentsview-linux-amd64 ./cmd/agentsview
+		-o dist/periscope-linux-amd64 ./cmd/periscope
 
-# Install pre-commit hooks via prek
+# Install pre-commit and pre-push hooks via prek
 install-hooks:
 	@if ! command -v prek >/dev/null 2>&1; then \
 		echo "prek not found. Install with: brew install prek" >&2; \
@@ -323,17 +521,18 @@ install-hooks:
 
 # Show help
 help:
-	@echo "agentsview build targets:"
+	@echo "periscope build targets:"
 	@echo ""
 	@echo "  build          - Build with embedded frontend"
 	@echo "  build-release  - Release build (optimized, stripped)"
+	@echo "  pricing-snapshot - Restore LiteLLM snapshot from artifact branch"
 	@echo "  install        - Build and install to ~/.local/bin or GOPATH"
 	@echo ""
 	@echo "  dev            - Run Go server with live reload via air (use with frontend-dev)"
-	@echo "  dev-snapshot   - Run agentsview against a fresh snapshot of prod sessions.db"
+	@echo "  dev-snapshot   - Run periscope against a fresh snapshot of prod sessions.db"
 	@echo "  air-install    - Install air for backend live reload"
 	@echo "  frontend       - Build frontend SPA"
-	@echo "  frontend-dev   - Run Vite dev server"
+	@echo "  frontend-dev   - Run Vite+ dev server"
 	@echo "  desktop-dev    - Run Tauri desktop wrapper in dev mode"
 	@echo "  desktop-build  - Build Tauri desktop app bundles"
 	@echo "  desktop-macos-app - Build macOS .app bundle only"
@@ -344,18 +543,25 @@ help:
 	@echo ""
 	@echo "  test           - Run all tests"
 	@echo "  test-short     - Run fast tests only"
+	@echo "  bench-backends - Benchmark SQLite, DuckDB, and PostgreSQL stores"
+	@echo "  bench-gate     - Run the hot-path benchmarks CI gates PRs on"
 	@echo "  test-postgres  - Run PostgreSQL integration tests"
+	@echo "  test-s3        - Run S3 discovery integration tests (Docker)"
 	@echo "  postgres-up    - Start test PostgreSQL container"
 	@echo "  postgres-down  - Stop test PostgreSQL container"
 	@echo "  test-ssh       - Run SSH integration tests"
 	@echo "  ssh-up         - Start test SSH container"
 	@echo "  ssh-down       - Stop test SSH container"
 	@echo "  e2e            - Run Playwright E2E tests"
+	@echo "  e2e-duckdb     - Run DuckDB-backed Playwright smoke tests"
 	@echo "  vet            - Run go vet"
-	@echo "  lint           - Run golangci-lint (auto-fix)"
-	@echo "  lint-ci        - Run golangci-lint (no fix, for CI)"
+	@echo "  lint           - Run golangci-lint and NilAway (auto-fix golangci issues)"
+	@echo "  lint-ci        - Run golangci-lint and NilAway (no fix, for CI)"
+	@echo "  lint-golangci  - Run golangci-lint with auto-fix"
+	@echo "  nilaway        - Run NilAway through custom golangci-lint"
+	@echo "  lint-tools     - Install pinned lint tools"
 	@echo "  tidy           - Tidy go.mod"
 	@echo ""
 	@echo "  release        - Release build for current platform"
 	@echo "  clean          - Remove build artifacts"
-	@echo "  install-hooks  - Install pre-commit git hooks"
+	@echo "  install-hooks  - Install pre-commit and pre-push git hooks"

@@ -81,7 +81,7 @@
 <style>
   .signal-card {
     display: flex;
-    gap: 14px;
+    gap: var(--space-6);
     padding: 14px 16px;
     border-radius: var(--radius-lg);
     border: 1px solid var(--border-muted);
@@ -144,7 +144,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 10px;
+    gap: var(--space-5);
   }
 
   h3 {
@@ -157,7 +157,7 @@
 
   .signal-badges {
     display: flex;
-    gap: 5px;
+    gap: var(--space-2);
     flex-shrink: 0;
   }
 

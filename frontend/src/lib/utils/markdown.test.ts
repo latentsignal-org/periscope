@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { renderMarkdown } from "./markdown.js";
 
 /**
@@ -46,6 +46,7 @@ function normalizeHref(raw: string): string {
     txt.innerHTML = prev;
     let cur = txt.value;
     // Strip control characters
+    // oxlint-disable-next-line no-control-regex -- intentional: strips control chars used to obfuscate dangerous href schemes
     cur = cur.replace(/[\x00-\x1f\x7f]/g, "");
     // Tolerant percent decode (valid %xx chunks only)
     cur = tolerantDecodeURI(cur);
@@ -154,6 +155,20 @@ describe("renderMarkdown", () => {
       const bq = dom.querySelector("blockquote");
       expect(bq).not.toBeNull();
       expect(bq!.textContent!.trim()).toBe("quoted text");
+    });
+
+    it("preserves prose around separated blockquotes", () => {
+      const dom = parseHTML(
+        renderMarkdown(
+          "blabla1\n\n> blabla2\n\nblabla3\n\n> blabla4\n\nblabla5",
+        ),
+      );
+      expect(dom.textContent).toContain("blabla1");
+      expect(dom.textContent).toContain("blabla2");
+      expect(dom.textContent).toContain("blabla3");
+      expect(dom.textContent).toContain("blabla4");
+      expect(dom.textContent).toContain("blabla5");
+      expect(dom.querySelectorAll("blockquote")).toHaveLength(2);
     });
 
     it("renders tables", () => {
@@ -308,6 +323,270 @@ describe("renderMarkdown", () => {
         assertFn(renderMarkdown(input));
       },
     );
+  });
+
+  describe("custom XML-style prompt tags", () => {
+    it("preserves non-HTML prompt tags as literal text", () => {
+      const dom = parseHTML(
+        renderMarkdown(
+          "<policy><rule importance=\"high\">keep tags</rule></policy>",
+        ),
+      );
+      const p = dom.querySelector("p");
+      expect(p).not.toBeNull();
+      expect(p!.innerHTML).toContain("&lt;policy&gt;");
+      expect(p!.innerHTML).toContain("&lt;rule importance=\"high\"&gt;");
+      expect(p!.innerHTML).toContain("&lt;/rule&gt;");
+      expect(p!.innerHTML).toContain("&lt;/policy&gt;");
+      expect(p!.textContent).toContain(
+        "<policy><rule importance=\"high\">keep tags</rule></policy>",
+      );
+    });
+
+    it("keeps standard HTML on the sanitize path", () => {
+      const dom = parseHTML(renderMarkdown("<img src=x onerror=\"alert(1)\">"));
+      const img = dom.querySelector("img");
+      expect(img).not.toBeNull();
+      expect(img!.hasAttribute("onerror")).toBe(false);
+    });
+
+    it("does not escape custom tags inside inline code spans", () => {
+      const dom = parseHTML(
+        renderMarkdown("`<policy>keep tags</policy>`"),
+      );
+      const code = dom.querySelector("p > code");
+      expect(code).not.toBeNull();
+      expect(code!.textContent).toBe("<policy>keep tags</policy>");
+    });
+
+    it("does not escape custom tags inside fenced code blocks", () => {
+      const dom = parseHTML(
+        renderMarkdown("```\n<policy>keep tags</policy>\n```"),
+      );
+      const code = dom.querySelector("pre > code");
+      expect(code).not.toBeNull();
+      expect(code!.textContent).toBe("<policy>keep tags</policy>\n");
+    });
+
+    it("keeps markdown angle autolinks intact", () => {
+      const dom = parseHTML(renderMarkdown("<https://example.com>"));
+      const link = dom.querySelector("p > a");
+      expect(link).not.toBeNull();
+      expect(link!.textContent).toBe("https://example.com");
+      expect(link!.getAttribute("href")).toBe("https://example.com");
+    });
+
+    it("preserves namespaced prompt tags as literal text", () => {
+      const dom = parseHTML(
+        renderMarkdown("<foo:bar>keep tags</foo:bar>"),
+      );
+      const p = dom.querySelector("p");
+      expect(p).not.toBeNull();
+      expect(p!.innerHTML).toContain("&lt;foo:bar&gt;");
+      expect(p!.innerHTML).toContain("&lt;/foo:bar&gt;");
+      expect(p!.textContent).toContain("<foo:bar>keep tags</foo:bar>");
+    });
+
+    it("keeps markdown links with custom-tag labels clickable", () => {
+      const dom = parseHTML(
+        renderMarkdown("[<policy>read</policy>](https://example.com)"),
+      );
+      const link = dom.querySelector("p > a");
+      expect(link).not.toBeNull();
+      expect(link!.getAttribute("href")).toBe("https://example.com");
+      expect(link!.textContent).toBe("<policy>read</policy>");
+    });
+
+    it("preserves custom tags inside GFM table cells", () => {
+      const dom = parseHTML(
+        renderMarkdown("| A |\n| --- |\n| <policy>keep tags</policy> |"),
+      );
+      const cell = dom.querySelector("tbody td");
+      expect(cell).not.toBeNull();
+      expect(cell!.innerHTML).toContain("&lt;policy&gt;");
+      expect(cell!.innerHTML).toContain("&lt;/policy&gt;");
+      expect(cell!.textContent).toBe("<policy>keep tags</policy>");
+    });
+  });
+
+  describe("Claude Code shell shortcuts", () => {
+    it("renders <bash-input> as a shell code block with ! prefix", () => {
+      const dom = parseHTML(
+        renderMarkdown("<bash-input>git pull origin main</bash-input>"),
+      );
+      const code = dom.querySelector("pre > code");
+      expect(code).not.toBeNull();
+      expect(code!.textContent).toBe("!git pull origin main\n");
+      // Tag itself must not survive in the output.
+      expect(dom.innerHTML).not.toMatch(/<\/?bash-input>/);
+    });
+
+    it("preserves multi-line commands in <bash-input>", () => {
+      const dom = parseHTML(
+        renderMarkdown(
+          "<bash-input>cd /tmp\nls -la</bash-input>",
+        ),
+      );
+      const code = dom.querySelector("pre > code");
+      expect(code).not.toBeNull();
+      expect(code!.textContent).toBe("!cd /tmp\nls -la\n");
+    });
+
+    it("renders <bash-stdout> as an unlabelled code block", () => {
+      const dom = parseHTML(
+        renderMarkdown("<bash-stdout>hello world</bash-stdout>"),
+      );
+      const code = dom.querySelector("pre > code");
+      expect(code).not.toBeNull();
+      expect(code!.textContent).toBe("hello world\n");
+      expect(dom.innerHTML).not.toMatch(/<\/?bash-stdout>/);
+    });
+
+    it("renders <bash-stderr> as an unlabelled code block", () => {
+      const dom = parseHTML(
+        renderMarkdown("<bash-stderr>oops</bash-stderr>"),
+      );
+      const code = dom.querySelector("pre > code");
+      expect(code).not.toBeNull();
+      expect(code!.textContent).toBe("oops\n");
+      expect(dom.innerHTML).not.toMatch(/<\/?bash-stderr>/);
+    });
+
+    it("drops empty <bash-stdout> and <bash-stderr> blocks", () => {
+      const dom = parseHTML(
+        renderMarkdown(
+          "<bash-input>true</bash-input>" +
+            "<bash-stdout></bash-stdout>" +
+            "<bash-stderr></bash-stderr>",
+        ),
+      );
+      const codes = dom.querySelectorAll("pre > code");
+      expect(codes.length).toBe(1);
+      expect(codes[0]!.textContent).toBe("!true\n");
+    });
+
+    it("handles input with backticks by picking a longer fence", () => {
+      const dom = parseHTML(
+        renderMarkdown(
+          "<bash-input>echo ```triple``` and ` single`</bash-input>",
+        ),
+      );
+      const code = dom.querySelector("pre > code");
+      expect(code).not.toBeNull();
+      expect(code!.textContent).toBe(
+        "!echo ```triple``` and ` single`\n",
+      );
+    });
+
+    it("handles consecutive input/stdout pair", () => {
+      const dom = parseHTML(
+        renderMarkdown(
+          "<bash-input>echo hi</bash-input>" +
+            "<bash-stdout>hi\n</bash-stdout>",
+        ),
+      );
+      const codes = dom.querySelectorAll("pre > code");
+      expect(codes.length).toBe(2);
+      expect(codes[0]!.textContent).toBe("!echo hi\n");
+      expect(codes[1]!.textContent).toBe("hi\n");
+    });
+
+    it("leaves wrappers inside fenced code blocks alone", () => {
+      // The user is talking ABOUT the tag, not invoking one. The
+      // marked extension runs at the lexer level, so once the
+      // fenced block consumes these characters they are never
+      // re-tokenized as wrappers.
+      const dom = parseHTML(
+        renderMarkdown(
+          "```\n<bash-input>echo hi</bash-input>\n```",
+        ),
+      );
+      const code = dom.querySelector("pre > code");
+      expect(code).not.toBeNull();
+      expect(code!.textContent).toBe(
+        "<bash-input>echo hi</bash-input>\n",
+      );
+    });
+
+    it("leaves wrappers inside indented code blocks alone", () => {
+      const dom = parseHTML(
+        renderMarkdown(
+          "    <bash-input>echo hi</bash-input>",
+        ),
+      );
+      const code = dom.querySelector("pre > code");
+      expect(code).not.toBeNull();
+      expect(code!.textContent).toBe("<bash-input>echo hi</bash-input>\n");
+    });
+
+    it("leaves custom tags inside longer-closing fences alone", () => {
+      const dom = parseHTML(
+        renderMarkdown("~~~\n<policy>keep tags</policy>\n~~~~"),
+      );
+      const code = dom.querySelector("pre > code");
+      expect(code).not.toBeNull();
+      expect(code!.textContent).toBe("<policy>keep tags</policy>\n");
+    });
+
+    it("leaves custom tags inside unclosed fences alone", () => {
+      const dom = parseHTML(
+        renderMarkdown("~~~\n<policy>keep tags</policy>"),
+      );
+      const code = dom.querySelector("pre > code");
+      expect(code).not.toBeNull();
+      expect(code!.textContent).toBe("<policy>keep tags</policy>\n");
+    });
+
+    it("tags the input block with language-shell", () => {
+      const html = renderMarkdown(
+        "<bash-input>echo hi</bash-input>",
+      );
+      expect(html).toMatch(
+        /<code[^>]*class="language-shell"/,
+      );
+    });
+
+    it("preserves leading whitespace and indentation in stdout", () => {
+      // Shell output frequently has indentation that's meaningful
+      // (tree output, table layouts, log-line columns). Trimming
+      // would corrupt the transcript.
+      const dom = parseHTML(
+        renderMarkdown(
+          "<bash-stdout>  line one\n    nested\n  line two</bash-stdout>",
+        ),
+      );
+      const code = dom.querySelector("pre > code");
+      expect(code).not.toBeNull();
+      expect(code!.textContent).toBe(
+        "  line one\n    nested\n  line two\n",
+      );
+    });
+
+    it("preserves leading and trailing blank lines in stdout", () => {
+      const dom = parseHTML(
+        renderMarkdown(
+          "<bash-stdout>\n\nbody\n\n</bash-stdout>",
+        ),
+      );
+      const code = dom.querySelector("pre > code");
+      expect(code).not.toBeNull();
+      // marked normalizes the final newline but leading blanks
+      // and the interior blank-line structure are preserved.
+      expect(code!.textContent).toMatch(
+        /^\n\nbody\n/,
+      );
+    });
+
+    it("leaves custom tags inside bash output literal", () => {
+      const dom = parseHTML(
+        renderMarkdown(
+          "<bash-stdout><policy>keep tags</policy></bash-stdout>",
+        ),
+      );
+      const code = dom.querySelector("pre > code");
+      expect(code).not.toBeNull();
+      expect(code!.textContent).toBe("<policy>keep tags</policy>\n");
+    });
   });
 
   describe("edge cases", () => {

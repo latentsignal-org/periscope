@@ -1,3 +1,8 @@
+---
+title: Periscope Product Specification
+description: Draft product specification for Periscope implementation handoff
+---
+
 # Periscope Product Specification
 
 ## Document Status

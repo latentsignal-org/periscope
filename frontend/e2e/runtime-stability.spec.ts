@@ -7,14 +7,19 @@ const DEPTH_ERROR_RE =
 
 // Svelte 5 fires each_key_duplicate warnings when virtual-scroll
 // items shift keys during rapid filter/sort transitions. These
-// are cosmetic — the DOM recovers immediately.
-const KNOWN_SVELTE_WARNINGS_RE = /each_key_duplicate/;
+// are cosmetic — the DOM recovers immediately. WebKit additionally
+// reports the benign "ResizeObserver loop completed with undelivered
+// notifications" when kit-ui's TopBar re-lays-out inside its own
+// ResizeObserver measurement — the loop is settled on the next frame.
+const KNOWN_SVELTE_WARNINGS_RE =
+  /each_key_duplicate|ResizeObserver loop completed with undelivered notifications/;
 
 // Test-fixture assumptions: project-alpha has sessions with 2
-// and 5+ messages, totalling 8 sessions across all projects.
+// and 5+ messages, totalling 10 sessions across all projects
+// (including the project-duration showcase and project-edits fixture).
 const TEST_PROJECT = "project-alpha";
 const FILTERED_SESSION_COUNT = 2;
-const TOTAL_SESSION_COUNT = 8;
+const TOTAL_SESSION_COUNT = 10;
 
 // Session deep in the list to exercise virtualizer scroll.
 const TARGET_SESSION_INDEX = 6;
@@ -32,7 +37,18 @@ test.describe("Runtime stability", () => {
       const monitor = new RuntimeErrorMonitor(page);
       const sp = new SessionsPage(page);
 
-      await sp.goto();
+      try {
+        await sp.goto();
+      } catch (error) {
+        const startupErrors = monitor.all();
+        if (startupErrors.length === 0) {
+          throw error;
+        }
+        throw new Error(
+          `session startup failed after browser errors:\n${startupErrors.join("\n")}`,
+          { cause: error },
+        );
+      }
 
       // Exercise the highest-churn flows: session open,
       // sort toggle, and project filtering.

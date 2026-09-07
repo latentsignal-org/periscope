@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.agentsview.pg-serve</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/mariusvniekerk/.local/share/mise/installs/github-kenn-io-agentsview/0.25.0/agentsview</string>
+    <string>pg</string>
+    <string>serve</string>
+    <string>--no-browser</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>18080</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/mariusvniekerk</string>
+
+  <key>StandardOutPath</key>
+  <string>/Users/mariusvniekerk/.agentsview/pg-serve.launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/mariusvniekerk/.agentsview/pg-serve.launchd.err.log</string>
+</dict>
+</plist>

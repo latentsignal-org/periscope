@@ -124,6 +124,23 @@ export function extractToolParamMeta(
  *  These should not appear in the expanded content display. */
 const INTERNAL_PARAMS = new Set(["agent__intent", "_i"]);
 
+function visibleParamLines(
+  params: Params,
+  excluded = new Set<string>(),
+): string[] {
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(params)) {
+    if (INTERNAL_PARAMS.has(key) || excluded.has(key)) continue;
+    if (value == null || value === "") continue;
+    const strVal =
+      typeof value === "string"
+        ? value
+        : JSON.stringify(value);
+    lines.push(`${key}: ${strVal}`);
+  }
+  return lines;
+}
+
 /** Generate displayable content from input params when
  *  the regex-captured content is empty. */
 export function generateFallbackContent(
@@ -131,6 +148,28 @@ export function generateFallbackContent(
   params: Params,
 ): string | null {
   if (toolName === "Task" || toolName === "Agent") return null;
+  if (toolName === "Bash" || toolName === "run_command") {
+    const cmd = params.command ?? params.cmd;
+    if (cmd != null) {
+      const text = String(cmd);
+      const lines: string[] = [];
+      if (params.description)
+        lines.push(`description: ${String(params.description)}`);
+      lines.push(`command: ${text}`);
+      lines.push(
+        ...visibleParamLines(
+          params,
+          new Set(["description", "command", "cmd"]),
+        ),
+      );
+      const allLines = lines.join("\n").split("\n");
+      if (allLines.length > MAX_DIFF_LINES) {
+        return allLines.slice(0, MAX_DIFF_LINES).join("\n")
+          + `\n... (${allLines.length} lines total)`;
+      }
+      return lines.join("\n");
+    }
+  }
   const isEdit =
     toolName === "Edit" ||
     params.command === "strReplace";
@@ -150,6 +189,15 @@ export function generateFallbackContent(
           + `\n... (${diffLines.length} lines total)`;
       }
       return diffText;
+    }
+    const patchText = params.patch ?? params.patch_text ?? params.patchText;
+    if (!lines.length && typeof patchText === "string" && patchText) {
+      const patchLines = patchText.split("\n");
+      if (patchLines.length > MAX_DIFF_LINES) {
+        return patchLines.slice(0, MAX_DIFF_LINES).join("\n")
+          + `\n... (${patchLines.length} lines total)`;
+      }
+      return patchText;
     }
     if (oldStr != null || newStr != null) {
       const oldText = String(oldStr ?? "");
@@ -227,15 +275,12 @@ export function generateFallbackContent(
       return header + body + suffix;
     }
   }
-  const lines: string[] = [];
-  for (const [key, value] of Object.entries(params)) {
-    if (INTERNAL_PARAMS.has(key)) continue;
-    if (value == null || value === "") continue;
-    const strVal =
-      typeof value === "string"
-        ? value
-        : JSON.stringify(value);
-    lines.push(`${key}: ${truncate(strVal, 200)}`);
+  const lines = visibleParamLines(params);
+  if (!lines.length) return null;
+  const allLines = lines.join("\n").split("\n");
+  if (allLines.length > MAX_DIFF_LINES) {
+    return allLines.slice(0, MAX_DIFF_LINES).join("\n")
+      + `\n... (${allLines.length} lines total)`;
   }
-  return lines.length ? lines.join("\n") : null;
+  return lines.join("\n");
 }

@@ -1,11 +1,53 @@
 import {
-  getSettings,
-  updateSettings,
-  type AppSettings,
-  ApiError,
+  ApiError as GeneratedApiError,
+  SettingsService,
+  type SettingsResponse,
+  type SettingsUpdateRequest,
+  type TerminalResponse,
+} from "../api/generated/index";
+import {
+  configureGeneratedClient,
+  generatedErrorMessage,
   setAuthToken,
   isRemoteConnection,
-} from "../api/client.js";
+} from "../api/runtime.js";
+import {
+  DEFAULT_CHART_PALETTE,
+  isChartPalette,
+  type ChartPalette,
+} from "../utils/chartPalette.js";
+
+type TerminalConfig = TerminalResponse & {
+  mode: "auto" | "custom" | "clipboard";
+};
+
+interface AppSettings extends Omit<
+  SettingsResponse,
+  "terminal" | "agent_dirs" | "chart_palette"
+> {
+  agent_dirs: Record<string, string[]>;
+  terminal: TerminalConfig;
+  chart_palette: ChartPalette;
+}
+
+/** Build an actionable message for a 403 from the settings API. A
+ *  403 means the server rejected the request origin/Host (not that a
+ *  token is required), which typically happens behind SSH
+ *  port-forwarding, a reverse proxy, or a remote dev environment.
+ *  Newer servers return a descriptive body; for older servers that
+ *  return a bare "Forbidden", supply the actionable hint ourselves. */
+function forbiddenMessage(serverMessage: string): string {
+  const detail = serverMessage.trim();
+  if (detail && detail.toLowerCase() !== "forbidden") {
+    return detail;
+  }
+  return (
+    "Server rejected this origin. If you are reaching agentsview " +
+    "through SSH port-forwarding, a reverse proxy, or a remote dev " +
+    "environment, restart it with --public-url <origin> matching the " +
+    "URL in your browser."
+  );
+}
 
 class SettingsStore {
   agentDirs: Record<string, string[]> = $state({});
@@ -17,19 +59,30 @@ class SettingsStore {
   port: number = $state(0);
   authToken: string = $state("");
   requireAuth: boolean = $state(false);
+  readOnly: boolean = $state(false);
+  chartPalette: ChartPalette = $state(DEFAULT_CHART_PALETTE);
+  loaded: boolean = $state(false);
   loading: boolean = $state(false);
   saving: boolean = $state(false);
   error: string | null = $state(null);
-  /** True when the API returned 401/403, indicating the user needs
+  /** True when the API returned 401, indicating the user needs
    *  to provide an auth token before the app can load. */
   needsAuth: boolean = $state(false);
 
   async load() {
     this.loading = true;
+    this.loaded = false;
     this.error = null;
     this.needsAuth = false;
     try {
-      const data = await getSettings();
+      configureGeneratedClient();
+      const data =
+        await SettingsService.getApiV1Settings() as unknown as AppSettings;
+      if (!isChartPalette(data.chart_palette)) {
+        throw new Error(
+          `Invalid chart_palette in settings response: ${String(data.chart_palette)}`,
+        );
+      }
       this.agentDirs = data.agent_dirs;
       this.githubConfigured = data.github_configured;
       this.terminal = data.terminal;
@@ -37,6 +90,8 @@ class SettingsStore {
       this.port = data.port;
       this.authToken = data.auth_token ?? "";
       this.requireAuth = data.require_auth ?? false;
+      this.readOnly = data.read_only === true;
+      this.chartPalette = data.chart_palette;
       // When the server returns an auth token (localhost only), persist
       // it so the client stays authenticated after remote access is
       // toggled on (which starts requiring auth for all requests).
@@ -44,14 +99,17 @@ class SettingsStore {
         setAuthToken(data.auth_token);
       }
     } catch (e) {
-      if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+      if (e instanceof GeneratedApiError && e.status === 401) {
         this.needsAuth = true;
+      } else if (e instanceof GeneratedApiError && e.status === 403) {
+        this.error = forbiddenMessage(generatedErrorMessage(e));
       } else {
         this.error =
           e instanceof Error ? e.message : "Failed to load settings";
       }
     } finally {
       this.loading = false;
+      this.loaded = true;
     }
   }
 
@@ -59,7 +117,16 @@ class SettingsStore {
     this.saving = true;
     this.error = null;
     try {
-      const data = await updateSettings(patch);
+      configureGeneratedClient();
+      const data =
+        await SettingsService.putApiV1Settings({
+          requestBody: patch as SettingsUpdateRequest,
+        }) as unknown as AppSettings;
+      if (!isChartPalette(data.chart_palette)) {
+        throw new Error(
+          `Invalid chart_palette in settings response: ${String(data.chart_palette)}`,
+        );
+      }
       this.agentDirs = data.agent_dirs;
       this.githubConfigured = data.github_configured;
       this.terminal = data.terminal;
@@ -67,6 +134,8 @@ class SettingsStore {
       this.port = data.port;
       this.authToken = data.auth_token ?? "";
       this.requireAuth = data.require_auth ?? false;
+      this.readOnly = data.read_only === true;
+      this.chartPalette = data.chart_palette;
       if (data.auth_token && !isRemoteConnection()) {
         setAuthToken(data.auth_token);
       }

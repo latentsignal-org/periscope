@@ -1,13 +1,45 @@
 <script lang="ts">
+  import { m } from "../../i18n/index.js";
+  import {
+    FitStages,
+    KbdBadge,
+    Spinner,
+    TopBar,
+    type TopBarTab,
+  } from "@kenn-io/kit-ui";
+  import {
+    AlignJustifyIcon,
+    ArrowDownIcon,
+    ArrowDownWideNarrowIcon,
+    ArrowUpNarrowWideIcon,
+    CheckIcon,
+    CloudUploadIcon,
+    CopyIcon,
+    DatabaseBackupIcon,
+    DownloadIcon,
+    FunnelIcon,
+    GlobeIcon,
+    LinkIcon,
+    ListCollapseIcon,
+    LockIcon,
+    LogsIcon,
+    LayoutListIcon,
+    MenuIcon,
+    MoonIcon,
+    MoreHorizontalIcon,
+    SearchIcon,
+    SettingsIcon,
+    SunIcon,
+    UploadIcon,
+  } from "../../icons.js";
   import {
     ui,
     ALL_BLOCK_TYPES,
     type BlockType,
-    type TranscriptMode,
   } from "../../stores/ui.svelte.js";
   import { sessions } from "../../stores/sessions.svelte.js";
   import { sync } from "../../stores/sync.svelte.js";
-  import { router } from "../../stores/router.svelte.js";
+  import { router, type Route } from "../../stores/router.svelte.js";
   import {
     downloadExport,
     getMarkdownExportUrl,
@@ -17,17 +49,17 @@
   import ImportModal from "../import/ImportModal.svelte";
 
   const isMac = navigator.platform.toUpperCase().includes("MAC");
-  const modKey = isMac ? "Cmd" : "Ctrl";
+  const modKey = isMac ? "⌘" : "Ctrl";
 
   let showImportModal = $state(false);
   let showBlockFilter = $state(false);
   let showExportMenu = $state(false);
+  let showPublishMenu = $state(false);
   let showOverflow = $state(false);
   let copiedMarkdownLink = $state(false);
   let copiedMarkdownLinkTimer:
     | ReturnType<typeof setTimeout>
     | undefined;
-  let moreOpen = $state(false);
   let filterBtnRef: HTMLButtonElement | undefined =
     $state(undefined);
   let filterDropRef: HTMLDivElement | undefined =
@@ -36,21 +68,53 @@
     $state(undefined);
   let exportDropRef: HTMLDivElement | undefined =
     $state(undefined);
+  let publishBtnRef: HTMLButtonElement | undefined =
+    $state(undefined);
+  let publishDropRef: HTMLDivElement | undefined =
+    $state(undefined);
   let overflowBtnRef: HTMLButtonElement | undefined =
     $state(undefined);
   let overflowDropRef: HTMLDivElement | undefined =
     $state(undefined);
-  let moreBtnRef: HTMLButtonElement | undefined =
-    $state(undefined);
-  let moreDropRef: HTMLDivElement | undefined =
-    $state(undefined);
 
-  const BLOCK_LABELS: Record<BlockType, string> = {
-    user: "User messages",
-    assistant: "Assistant text",
-    thinking: "Thinking blocks",
-    tool: "Tool calls",
-    code: "Code blocks",
+  /** True while TopBar has collapsed the nav tabs into its dropdown —
+   * side-region snippets read it to drop their labels. */
+  let navCollapsed = $state(false);
+
+  const NAV_ROUTES = [
+    "sessions",
+    "usage",
+    "activity",
+    "trends",
+    "pinned",
+    "insights",
+    "trash",
+    "recent-edits",
+  ] as const;
+
+  const tabs: TopBarTab[] = $derived([
+    { id: "sessions", label: m.nav_sessions() },
+    { id: "usage", label: m.nav_usage() },
+    { id: "activity", label: m.nav_activity() },
+    { id: "trends", label: m.nav_trends() },
+    { id: "pinned", label: m.nav_pinned() },
+    { id: "insights", label: m.nav_insights() },
+    { id: "trash", label: m.nav_trash() },
+    { id: "recent-edits", label: m.nav_recent_edits() },
+  ]);
+
+  const activeTab = $derived(
+    (NAV_ROUTES as readonly string[]).includes(router.route)
+      ? router.route
+      : "",
+  );
+
+  const BLOCK_LABELS: Record<BlockType, () => string> = {
+    user: m.header_transcript_blocks_user,
+    assistant: m.header_transcript_blocks_assistant,
+    thinking: m.header_transcript_blocks_thinking,
+    tool: m.header_transcript_blocks_tool,
+    code: m.header_transcript_blocks_code,
   };
 
   const BLOCK_COLORS: Record<BlockType, string> = {
@@ -88,8 +152,34 @@
     showOverflow = false;
   }
 
+  async function handleCopySourceFilePath() {
+    const filePath = sessions.activeSession?.file_path;
+    if (!filePath) return;
+    const ok = await copyToClipboard(filePath);
+    if (!ok) return;
+    showExportMenu = false;
+    showOverflow = false;
+  }
+
+  function openPublish(secret: boolean) {
+    const id = sessions.activeSessionId;
+    if (!id) return;
+    ui.publishSecret = secret;
+    ui.setPublishTarget({ kind: "session", id });
+    ui.activeModal = "publish";
+    showPublishMenu = false;
+    showOverflow = false;
+  }
+
+  function openCommandPalette() {
+    ui.activeModal = "commandPalette";
+  }
+
   const hasActiveSession = $derived(
     sessions.activeSessionId !== null,
+  );
+  const activeSessionFilePath = $derived(
+    sessions.activeSession?.file_path ?? "",
   );
 
   // Close block filter dropdown on outside click
@@ -134,6 +224,27 @@
       );
   });
 
+  // Close publish menu on outside click
+  $effect(() => {
+    if (!showPublishMenu) return;
+    function onClickOutside(e: MouseEvent) {
+      const target = e.target as Node;
+      if (
+        publishBtnRef?.contains(target) ||
+        publishDropRef?.contains(target)
+      )
+        return;
+      showPublishMenu = false;
+    }
+    document.addEventListener("click", onClickOutside, true);
+    return () =>
+      document.removeEventListener(
+        "click",
+        onClickOutside,
+        true,
+      );
+  });
+
   // Close overflow dropdown on outside click
   $effect(() => {
     if (!showOverflow) return;
@@ -154,37 +265,52 @@
         true,
       );
   });
-
-  // Close More dropdown on outside click or Escape
-  $effect(() => {
-    if (!moreOpen) return;
-    function onClickOutside(e: MouseEvent) {
-      const target = e.target as Node;
-      if (
-        moreBtnRef?.contains(target) ||
-        moreDropRef?.contains(target)
-      )
-        return;
-      moreOpen = false;
-    }
-    function onKeydown(e: KeyboardEvent) {
-      if (e.key === "Escape") moreOpen = false;
-    }
-    document.addEventListener("click", onClickOutside, true);
-    document.addEventListener("keydown", onKeydown);
-    return () => {
-      document.removeEventListener(
-        "click",
-        onClickOutside,
-        true,
-      );
-      document.removeEventListener("keydown", onKeydown);
-    };
-  });
 </script>
 
-<header class="header">
-  <div class="header-left">
+{#snippet messageLayoutIcon(size: string)}
+  {#if ui.messageLayout === "default"}
+    <LayoutListIcon {size} strokeWidth="2" aria-hidden="true" />
+  {:else if ui.messageLayout === "compact"}
+    <ListCollapseIcon {size} strokeWidth="2" aria-hidden="true" />
+  {:else if ui.messageLayout === "stream"}
+    <LogsIcon {size} strokeWidth="2" aria-hidden="true" />
+  {:else}
+    <AlignJustifyIcon {size} strokeWidth="2" aria-hidden="true" />
+  {/if}
+{/snippet}
+
+{#snippet searchField()}
+  <button
+    class="search-hint"
+    onclick={openCommandPalette}
+    title={m.nav_search_sessions_shortcut({ shortcut: `${modKey} K` })}
+  >
+    <SearchIcon size="12" strokeWidth="2" aria-hidden="true" />
+    <span class="search-hint-text">{m.nav_search_sessions()}</span>
+    <KbdBadge keys={[modKey, "K"]} joiner="compact" />
+  </button>
+{/snippet}
+
+{#snippet searchIconOnly()}
+  <button
+    class="search-hint search-hint--icon"
+    onclick={openCommandPalette}
+    title={m.nav_search_sessions_shortcut({ shortcut: `${modKey} K` })}
+    aria-label={m.nav_search_sessions()}
+  >
+    <SearchIcon size="12" strokeWidth="2" aria-hidden="true" />
+  </button>
+{/snippet}
+
+<TopBar
+  {tabs}
+  active={activeTab}
+  onchange={(id) => router.navigate(id as Route)}
+  bind:collapsed={navCollapsed}
+  searchMinWidth={navCollapsed ? 48 : 220}
+  ariaLabel={m.nav_primary()}
+>
+  {#snippet left()}
     <button
       class="hamburger"
       onclick={() => {
@@ -195,17 +321,15 @@
           ui.toggleSidebar();
         }
       }}
-      title="Toggle sidebar (b)"
-      aria-label="Toggle sidebar"
+      title={m.nav_toggle_sidebar_shortcut()}
+      aria-label={m.nav_toggle_sidebar()}
     >
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M1 2.75A.75.75 0 011.75 2h12.5a.75.75 0 010 1.5H1.75A.75.75 0 011 2.75zm0 5A.75.75 0 011.75 7h12.5a.75.75 0 010 1.5H1.75A.75.75 0 011 7.75zm0 5a.75.75 0 01.75-.75h12.5a.75.75 0 010 1.5H1.75a.75.75 0 01-.75-.75z"/>
-      </svg>
+      <MenuIcon size="16" strokeWidth="2" aria-hidden="true" />
     </button>
     <button
       class="header-home"
       onclick={() => router.navigate("sessions")}
-      title="Home"
+      title={m.nav_home()}
     >
       <svg class="header-logo" width="18" height="18" viewBox="0 0 32 32" aria-hidden="true">
         <rect width="32" height="32" rx="6" fill="var(--accent-blue, #3b82f6)"/>
@@ -217,12 +341,20 @@
       <span class="header-title">Periscope</span>
     </button>
 
-    <ProjectTypeahead
-      projects={sessions.projects}
-      value={sessions.filters.project}
-      onselect={(v) => sessions.setProjectFilter(v)}
-    />
+    <span class="project-picker">
+      <ProjectTypeahead
+        projects={sessions.projects}
+        value={sessions.filters.project}
+        onselect={(v) => sessions.setProjectFilter(v)}
+      />
+    </span>
+  {/snippet}
 
+  {#snippet search()}
+    <FitStages class="search-fit" stages={[searchField, searchIconOnly]} />
+  {/snippet}
+
+  {#snippet right()}
     <button
       class="nav-btn"
       class:active={router.route === "sessions" || router.route === "context"}
@@ -235,69 +367,6 @@
       </svg>
       <span class="nav-label">Sessions</span>
     </button>
-
-    <button
-      class="nav-btn"
-      class:active={router.route === "usage"}
-      onclick={() => router.navigate("usage")}
-      title="Token Usage"
-      aria-label="Usage"
-    >
-      <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-        <path d="M1 2.5A1.5 1.5 0 012.5 1h3A1.5 1.5 0 017 2.5v3A1.5 1.5 0 015.5 7h-3A1.5 1.5 0 011 5.5v-3zM2.5 2a.5.5 0 00-.5.5v3a.5.5 0 00.5.5h3a.5.5 0 00.5-.5v-3a.5.5 0 00-.5-.5h-3zm6.5.5A1.5 1.5 0 0110.5 1h3A1.5 1.5 0 0115 2.5v3A1.5 1.5 0 0113.5 7h-3A1.5 1.5 0 019 5.5v-3zm1.5-.5a.5.5 0 00-.5.5v3a.5.5 0 00.5.5h3a.5.5 0 00.5-.5v-3a.5.5 0 00-.5-.5h-3zM1 10.5A1.5 1.5 0 012.5 9h3A1.5 1.5 0 017 10.5v3A1.5 1.5 0 015.5 15h-3A1.5 1.5 0 011 13.5v-3zm1.5-.5a.5.5 0 00-.5.5v3a.5.5 0 00.5.5h3a.5.5 0 00.5-.5v-3a.5.5 0 00-.5-.5h-3zm6.5.5A1.5 1.5 0 0110.5 9h3a1.5 1.5 0 011.5 1.5v3a1.5 1.5 0 01-1.5 1.5h-3A1.5 1.5 0 019 13.5v-3zm1.5-.5a.5.5 0 00-.5.5v3a.5.5 0 00.5.5h3a.5.5 0 00.5-.5v-3a.5.5 0 00-.5-.5h-3z"/>
-      </svg>
-      <span class="nav-label">Usage</span>
-    </button>
-
-    <div class="more-wrap">
-      <button
-        class="nav-btn"
-        class:active={router.route === "pinned" || router.route === "insights" || router.route === "trash" || moreOpen}
-        bind:this={moreBtnRef}
-        onclick={() => { moreOpen = !moreOpen; }}
-        aria-label="More navigation"
-        aria-expanded={moreOpen}
-      >
-        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-          <path d="M3 9.5a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm5 0a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm5 0a1.5 1.5 0 110-3 1.5 1.5 0 010 3z"/>
-        </svg>
-        <span class="nav-label">More</span>
-      </button>
-      {#if moreOpen}
-        <div class="more-dropdown" role="menu" bind:this={moreDropRef}>
-          <button class="more-item" role="menuitem"
-            class:active={router.route === "pinned"}
-            onclick={() => { router.navigate("pinned"); moreOpen = false; }}>
-            Pinned
-          </button>
-          <button class="more-item" role="menuitem"
-            class:active={router.route === "insights"}
-            onclick={() => { router.navigate("insights"); moreOpen = false; }}>
-            Insights
-          </button>
-          <button class="more-item" role="menuitem"
-            class:active={router.route === "trash"}
-            onclick={() => { router.navigate("trash"); moreOpen = false; }}>
-            Trash
-          </button>
-        </div>
-      {/if}
-    </div>
-  </div>
-
-  <button
-    class="search-hint"
-    onclick={() => (ui.activeModal = "commandPalette")}
-    title="Search sessions ({modKey}+K)"
-  >
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M11.742 10.344a6.5 6.5 0 10-1.397 1.398h-.001l3.85 3.85a1 1 0 001.415-1.414l-3.85-3.85zm-5.44.656a5 5 0 110-10 5 5 0 010 10z"/>
-    </svg>
-    <span class="search-hint-text">Search sessions...</span>
-    <kbd class="search-hint-kbd">{modKey}+K</kbd>
-  </button>
-
-  <div class="header-right">
     {#if hasActiveSession}
       <!-- Transcript controls: mode pills + filter, grouped visually -->
       <div class="transcript-strip">
@@ -305,19 +374,19 @@
           class="pill"
           class:active={ui.transcriptMode === "normal"}
           onclick={() => ui.setTranscriptMode("normal")}
-          title="Normal transcript — show all messages"
-          aria-label="Normal transcript mode"
+          title={m.header_transcript_normal_title()}
+          aria-label={m.header_transcript_normal_label()}
         >
-          <span class="pill-label">Normal</span>
+          <span class="pill-label">{m.header_transcript_normal()}</span>
         </button>
         <button
           class="pill"
           class:active={ui.transcriptMode === "focused"}
           onclick={() => ui.setTranscriptMode("focused")}
-          title="Focused transcript — user prompts and final answers only"
-          aria-label="Focused transcript mode"
+          title={m.header_transcript_focused_title()}
+          aria-label={m.header_transcript_focused_label()}
         >
-          <span class="pill-label">Focused</span>
+          <span class="pill-label">{m.header_transcript_focused()}</span>
         </button>
 
         <span class="strip-divider"></span>
@@ -328,20 +397,18 @@
             class:filter-active={ui.hasBlockFilters}
             bind:this={filterBtnRef}
             onclick={() => (showBlockFilter = !showBlockFilter)}
-            title="Filter block types"
-            aria-label="Filter block types"
+            title={m.header_transcript_filter_title()}
+            aria-label={m.header_transcript_filter_label()}
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
-            </svg>
+            <FunnelIcon size="12" strokeWidth="2" aria-hidden="true" />
             {#if ui.hasBlockFilters}
               <span class="filter-badge">{ui.hiddenBlockCount}</span>
             {/if}
           </button>
 
           {#if showBlockFilter}
-            <div class="block-filter-dropdown" bind:this={filterDropRef}>
-              <div class="block-filter-title">Block Visibility</div>
+            <div class="block-filter-dropdown kit-popover-card" bind:this={filterDropRef}>
+              <div class="block-filter-title">{m.header_transcript_visibility()}</div>
               {#each ALL_BLOCK_TYPES as bt}
                 {@const visible = ui.isBlockVisible(bt)}
                 <button
@@ -353,12 +420,10 @@
                     class="block-filter-dot"
                     style:background={visible ? BLOCK_COLORS[bt] : "var(--border-muted)"}
                   ></span>
-                  <span class="block-filter-label">{BLOCK_LABELS[bt]}</span>
+                  <span class="block-filter-label">{BLOCK_LABELS[bt]()}</span>
                   <span class="block-filter-check" class:on={visible}>
                     {#if visible}
-                      <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
-                        <path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z"/>
-                      </svg>
+                      <CheckIcon size="10" strokeWidth="2.4" aria-hidden="true" />
                     {/if}
                   </span>
                 </button>
@@ -368,7 +433,7 @@
                   class="block-filter-reset"
                   onclick={() => ui.showAllBlocks()}
                 >
-                  Show all
+                  {m.header_transcript_show_all()}
                 </button>
               {/if}
             </div>
@@ -378,18 +443,25 @@
 
       <button
         class="header-btn"
+        class:active={ui.followLatest}
+        onclick={() => ui.toggleFollowLatest()}
+        title={m.header_actions_follow_latest()}
+        aria-label={m.header_actions_follow_latest()}
+        aria-pressed={ui.followLatest}
+      >
+        <ArrowDownIcon size="14" strokeWidth="2" aria-hidden="true" />
+      </button>
+
+      <button
+        class="header-btn"
         onclick={() => ui.toggleSort()}
-        title="Toggle sort order (o)"
-        aria-label="Toggle sort order"
+        title={m.header_actions_toggle_sort()}
+        aria-label={m.header_actions_toggle_sort()}
       >
         {#if ui.sortNewestFirst}
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M3.5 3a.5.5 0 01.5.5v8.793l2.146-2.147a.5.5 0 01.708.708l-3 3a.5.5 0 01-.708 0l-3-3a.5.5 0 01.708-.708L3 12.293V3.5a.5.5 0 01.5-.5zm4 0h7a.5.5 0 010 1h-7a.5.5 0 010-1zm0 3h5a.5.5 0 010 1h-5a.5.5 0 010-1zm0 3h3a.5.5 0 010 1h-3a.5.5 0 010-1z"/>
-          </svg>
+          <ArrowDownWideNarrowIcon size="14" strokeWidth="2" aria-hidden="true" />
         {:else}
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M3.5 13a.5.5 0 00.5-.5V3.707l2.146 2.147a.5.5 0 00.708-.708l-3-3a.5.5 0 00-.708 0l-3 3a.5.5 0 00.708.708L3 3.707V12.5a.5.5 0 00.5.5zm4-10h3a.5.5 0 010 1h-3a.5.5 0 010-1zm0 3h5a.5.5 0 010 1h-5a.5.5 0 010-1zm0 3h7a.5.5 0 010 1h-7a.5.5 0 010-1z"/>
-          </svg>
+          <ArrowUpNarrowWideIcon size="14" strokeWidth="2" aria-hidden="true" />
         {/if}
       </button>
 
@@ -397,25 +469,10 @@
       <button
         class="header-btn collapsible"
         onclick={() => ui.cycleLayout()}
-        title="Cycle layout: {ui.messageLayout} (l)"
-        aria-label="Cycle message layout"
+        title={m.header_actions_cycle_layout({ layout: ui.messageLayout })}
+        aria-label={m.header_actions_cycle_layout_label()}
       >
-        {#if ui.messageLayout === "default"}
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M1.5 2A1.5 1.5 0 000 3.5v2A1.5 1.5 0 001.5 7h13A1.5 1.5 0 0016 5.5v-2A1.5 1.5 0 0014.5 2h-13zm0 1h13a.5.5 0 01.5.5v2a.5.5 0 01-.5.5h-13a.5.5 0 01-.5-.5v-2a.5.5 0 01.5-.5zm0 6A1.5 1.5 0 000 10.5v2A1.5 1.5 0 001.5 14h13a1.5 1.5 0 001.5-1.5v-2A1.5 1.5 0 0014.5 9h-13zm0 1h13a.5.5 0 01.5.5v2a.5.5 0 01-.5.5h-13a.5.5 0 01-.5-.5v-2a.5.5 0 01.5-.5z"/>
-          </svg>
-        {:else if ui.messageLayout === "compact"}
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M3 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-            <line x1="9" y1="12" x2="14" y2="12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-          </svg>
-        {:else}
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-            <rect x="1" y="1" width="14" height="4" rx="1" opacity="0.2"/>
-            <rect x="1" y="6" width="14" height="4" rx="1" opacity="0.08"/>
-            <rect x="1" y="11" width="14" height="4" rx="1" opacity="0.2"/>
-          </svg>
-        {/if}
+        {@render messageLayoutIcon("14")}
       </button>
 
       <div class="export-wrap collapsible">
@@ -427,18 +484,15 @@
             showOverflow = false;
           }}
           disabled={!sessions.activeSessionId}
-          title="Export session options"
-          aria-label="Export session"
+          title={m.header_actions_export_options()}
+          aria-label={m.header_actions_export_session()}
           aria-expanded={showExportMenu}
         >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M4.406 1.342A5.53 5.53 0 018 0c2.69 0 4.923 2 5.166 4.579C14.758 4.804 16 6.137 16 7.773 16 9.569 14.502 11 12.687 11H10a.5.5 0 010-1h2.688C13.979 10 15 8.988 15 7.773c0-1.216-1.02-2.228-2.313-2.228h-.5v-.5C12.188 2.825 10.328 1 8 1a4.53 4.53 0 00-2.941 1.1c-.757.652-1.153 1.438-1.153 2.055v.448l-.445.049C2.064 4.805 1 5.952 1 7.318 1 8.785 2.23 10 3.781 10H6a.5.5 0 010 1H3.781C1.708 11 0 9.366 0 7.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383z"/>
-            <path d="M7.646 4.146a.5.5 0 01.708 0l3 3a.5.5 0 01-.708.708L8.5 5.707V14.5a.5.5 0 01-1 0V5.707L5.354 7.854a.5.5 0 11-.708-.708l3-3z"/>
-          </svg>
+          <CloudUploadIcon size="14" strokeWidth="2" aria-hidden="true" />
         </button>
 
         {#if showExportMenu}
-          <div class="export-dropdown" bind:this={exportDropRef}>
+          <div class="export-dropdown kit-popover-card" bind:this={exportDropRef}>
             <button
               class="overflow-item"
               onclick={() => {
@@ -446,43 +500,75 @@
                 showExportMenu = false;
               }}
             >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M4.406 1.342A5.53 5.53 0 018 0c2.69 0 4.923 2 5.166 4.579C14.758 4.804 16 6.137 16 7.773 16 9.569 14.502 11 12.687 11H10a.5.5 0 010-1h2.688C13.979 10 15 8.988 15 7.773c0-1.216-1.02-2.228-2.313-2.228h-.5v-.5C12.188 2.825 10.328 1 8 1a4.53 4.53 0 00-2.941 1.1c-.757.652-1.153 1.438-1.153 2.055v.448l-.445.049C2.064 4.805 1 5.952 1 7.318 1 8.785 2.23 10 3.781 10H6a.5.5 0 010 1H3.781C1.708 11 0 9.366 0 7.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383z"/>
-                <path d="M7.646 4.146a.5.5 0 01.708 0l3 3a.5.5 0 01-.708.708L8.5 5.707V14.5a.5.5 0 01-1 0V5.707L5.354 7.854a.5.5 0 11-.708-.708l3-3z"/>
-              </svg>
-              <span>Download HTML export</span>
+              <CloudUploadIcon size="13" strokeWidth="2" aria-hidden="true" />
+              <span>{m.header_actions_download_html()}</span>
             </button>
             <button
               class="overflow-item"
               onclick={handleCopyMarkdownExportLink}
             >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M4.5 2A2.5 2.5 0 002 4.5v7A2.5 2.5 0 004.5 14h5A2.5 2.5 0 0012 11.5v-1a.5.5 0 011 0v1A3.5 3.5 0 019.5 15h-5A3.5 3.5 0 011 11.5v-7A3.5 3.5 0 014.5 1h1a.5.5 0 010 1h-1z"/>
-                <path d="M6.854 1.146a.5.5 0 010 .708L5.707 3H11.5A3.5 3.5 0 0115 6.5v5a3.5 3.5 0 01-3.5 3.5h-1a.5.5 0 010-1h1A2.5 2.5 0 0014 11.5v-5A2.5 2.5 0 0011.5 4H5.707l1.147 1.146a.5.5 0 11-.708.708l-2-2a.5.5 0 010-.708l2-2a.5.5 0 01.708 0z"/>
-              </svg>
+              {#if copiedMarkdownLink}
+                <CheckIcon size="13" strokeWidth="2.4" aria-hidden="true" />
+              {:else}
+                <LinkIcon size="13" strokeWidth="2" aria-hidden="true" />
+              {/if}
               <span>
                 {#if copiedMarkdownLink}
-                  Copied markdown link
+                  {m.header_actions_copied_markdown_link()}
                 {:else}
-                  Copy markdown export link
+                  {m.header_actions_copy_markdown_link()}
                 {/if}
               </span>
             </button>
+            {#if activeSessionFilePath}
+              <button
+                class="overflow-item"
+                onclick={handleCopySourceFilePath}
+              >
+                <CopyIcon size="13" strokeWidth="2" aria-hidden="true" />
+                <span>{m.header_actions_copy_source_path()}</span>
+              </button>
+            {/if}
           </div>
         {/if}
       </div>
 
-      <button
-        class="header-btn collapsible"
-        onclick={() => (ui.activeModal = "publish")}
-        disabled={!sessions.activeSessionId}
-        title="Publish to Gist (p)"
-        aria-label="Publish to Gist"
-      >
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M3.5 13h9a.5.5 0 010 1h-9a.5.5 0 010-1zm4.854-9.354a.5.5 0 00-.708 0l-3 3a.5.5 0 10.708.708L7.5 5.207V11.5a.5.5 0 001 0V5.207l2.146 2.147a.5.5 0 00.708-.708l-3-3z"/>
-        </svg>
-      </button>
+      <div class="export-wrap collapsible">
+        <button
+          class="header-btn"
+          bind:this={publishBtnRef}
+          onclick={() => {
+            showPublishMenu = !showPublishMenu;
+            showExportMenu = false;
+            showOverflow = false;
+          }}
+          disabled={!sessions.activeSessionId}
+          title={m.header_actions_publish_title()}
+          aria-label={m.header_actions_publish_label()}
+          aria-expanded={showPublishMenu}
+        >
+          <UploadIcon size="14" strokeWidth="2" aria-hidden="true" />
+        </button>
+
+        {#if showPublishMenu}
+          <div class="export-dropdown kit-popover-card" bind:this={publishDropRef}>
+            <button
+              class="overflow-item"
+              onclick={() => openPublish(false)}
+            >
+              <GlobeIcon size="13" strokeWidth="2" aria-hidden="true" />
+              <span>{m.header_actions_publish_public()}</span>
+            </button>
+            <button
+              class="overflow-item"
+              onclick={() => openPublish(true)}
+            >
+              <LockIcon size="13" strokeWidth="2" aria-hidden="true" />
+              <span>{m.header_actions_publish_secret()}</span>
+            </button>
+          </div>
+        {/if}
+      </div>
 
       <!-- Overflow menu (visible only at narrow widths) -->
       <div class="overflow-wrap">
@@ -490,68 +576,67 @@
           class="header-btn overflow-btn"
           bind:this={overflowBtnRef}
           onclick={() => (showOverflow = !showOverflow)}
-          title="More actions"
-          aria-label="More actions"
+          title={m.header_actions_more_actions()}
+          aria-label={m.header_actions_more_actions()}
         >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M3 8a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zm6.5 0a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0zm5 1.5a1.5 1.5 0 100-3 1.5 1.5 0 000 3z"/>
-          </svg>
+          <MoreHorizontalIcon size="14" strokeWidth="2.4" aria-hidden="true" />
         </button>
 
         {#if showOverflow}
-          <div class="overflow-dropdown" bind:this={overflowDropRef}>
+          <div class="overflow-dropdown kit-popover-card" bind:this={overflowDropRef}>
             <button
               class="overflow-item"
               onclick={() => { ui.cycleLayout(); showOverflow = false; }}
             >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-                {#if ui.messageLayout === "default"}
-                  <path d="M1.5 2A1.5 1.5 0 000 3.5v2A1.5 1.5 0 001.5 7h13A1.5 1.5 0 0016 5.5v-2A1.5 1.5 0 0014.5 2h-13zm0 1h13a.5.5 0 01.5.5v2a.5.5 0 01-.5.5h-13a.5.5 0 01-.5-.5v-2a.5.5 0 01.5-.5zm0 6A1.5 1.5 0 000 10.5v2A1.5 1.5 0 001.5 14h13a1.5 1.5 0 001.5-1.5v-2A1.5 1.5 0 0014.5 9h-13zm0 1h13a.5.5 0 01.5.5v2a.5.5 0 01-.5.5h-13a.5.5 0 01-.5-.5v-2a.5.5 0 01.5-.5z"/>
-                {:else if ui.messageLayout === "compact"}
-                  <path d="M3 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                  <line x1="9" y1="12" x2="14" y2="12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                {:else}
-                  <rect x="1" y="1" width="14" height="4" rx="1" opacity="0.2"/>
-                  <rect x="1" y="6" width="14" height="4" rx="1" opacity="0.08"/>
-                  <rect x="1" y="11" width="14" height="4" rx="1" opacity="0.2"/>
-                {/if}
-              </svg>
-              <span>Layout: {ui.messageLayout}</span>
+              {@render messageLayoutIcon("13")}
+              <span>{m.header_actions_layout({ layout: ui.messageLayout })}</span>
             </button>
             <button
               class="overflow-item"
               onclick={() => { handleExport(); showOverflow = false; }}
             >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M4.406 1.342A5.53 5.53 0 018 0c2.69 0 4.923 2 5.166 4.579C14.758 4.804 16 6.137 16 7.773 16 9.569 14.502 11 12.687 11H10a.5.5 0 010-1h2.688C13.979 10 15 8.988 15 7.773c0-1.216-1.02-2.228-2.313-2.228h-.5v-.5C12.188 2.825 10.328 1 8 1a4.53 4.53 0 00-2.941 1.1c-.757.652-1.153 1.438-1.153 2.055v.448l-.445.049C2.064 4.805 1 5.952 1 7.318 1 8.785 2.23 10 3.781 10H6a.5.5 0 010 1H3.781C1.708 11 0 9.366 0 7.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383z"/>
-                <path d="M7.646 4.146a.5.5 0 01.708 0l3 3a.5.5 0 01-.708.708L8.5 5.707V14.5a.5.5 0 01-1 0V5.707L5.354 7.854a.5.5 0 11-.708-.708l3-3z"/>
-              </svg>
-              <span>Download HTML export</span>
+              <CloudUploadIcon size="13" strokeWidth="2" aria-hidden="true" />
+              <span>{m.header_actions_download_html()}</span>
             </button>
             <button
               class="overflow-item"
               onclick={handleCopyMarkdownExportLink}
             >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M4.5 2A2.5 2.5 0 002 4.5v7A2.5 2.5 0 004.5 14h5A2.5 2.5 0 0012 11.5v-1a.5.5 0 011 0v1A3.5 3.5 0 019.5 15h-5A3.5 3.5 0 011 11.5v-7A3.5 3.5 0 014.5 1h1a.5.5 0 010 1h-1z"/>
-                <path d="M6.854 1.146a.5.5 0 010 .708L5.707 3H11.5A3.5 3.5 0 0115 6.5v5a3.5 3.5 0 01-3.5 3.5h-1a.5.5 0 010-1h1A2.5 2.5 0 0014 11.5v-5A2.5 2.5 0 0011.5 4H5.707l1.147 1.146a.5.5 0 11-.708.708l-2-2a.5.5 0 010-.708l2-2a.5.5 0 01.708 0z"/>
-              </svg>
+              {#if copiedMarkdownLink}
+                <CheckIcon size="13" strokeWidth="2.4" aria-hidden="true" />
+              {:else}
+                <LinkIcon size="13" strokeWidth="2" aria-hidden="true" />
+              {/if}
               <span>
                 {#if copiedMarkdownLink}
-                  Copied markdown link
+                  {m.header_actions_copied_markdown_link()}
                 {:else}
-                  Copy markdown export link
+                  {m.header_actions_copy_markdown_link()}
                 {/if}
               </span>
             </button>
+            {#if activeSessionFilePath}
+              <button
+                class="overflow-item"
+                onclick={handleCopySourceFilePath}
+              >
+                <CopyIcon size="13" strokeWidth="2" aria-hidden="true" />
+                <span>{m.header_actions_copy_source_path()}</span>
+              </button>
+            {/if}
             <button
               class="overflow-item"
-              onclick={() => { ui.activeModal = "publish"; showOverflow = false; }}
+              onclick={() => openPublish(false)}
             >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M3.5 13h9a.5.5 0 010 1h-9a.5.5 0 010-1zm4.854-9.354a.5.5 0 00-.708 0l-3 3a.5.5 0 10.708.708L7.5 5.207V11.5a.5.5 0 001 0V5.207l2.146 2.147a.5.5 0 00.708-.708l-3-3z"/>
-              </svg>
-              <span>Publish to Gist</span>
+              <UploadIcon size="13" strokeWidth="2" aria-hidden="true" />
+              <span>{m.header_actions_publish_public()}</span>
+            </button>
+            <button
+              class="overflow-item"
+              onclick={() => openPublish(true)}
+            >
+              <LockIcon size="13" strokeWidth="2" aria-hidden="true" />
+              <span>{m.header_actions_publish_secret()}</span>
             </button>
           </div>
         {/if}
@@ -559,29 +644,34 @@
     {/if}
 
     <button
-      class="header-btn"
+      class="header-btn sync-btn"
       class:syncing={sync.syncing}
       onclick={() => sync.triggerSync()}
       disabled={sync.syncing}
-      title="Sync sessions (r)"
-      aria-label="Sync sessions"
+      title={sync.readOnly ? m.header_actions_refresh_data_shortcut() : m.header_actions_sync_sessions_shortcut()}
+      aria-label={sync.readOnly ? m.header_actions_refresh_data() : m.header_actions_sync_sessions()}
     >
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M8 3a5 5 0 00-4.546 2.914.5.5 0 01-.908-.418A6 6 0 0114 8a.5.5 0 01-1 0 5 5 0 00-5-5zm4.546 7.086a.5.5 0 01.908.418A6 6 0 012 8a.5.5 0 011 0 5 5 0 005 5 5 5 0 004.546-2.914z"/>
-      </svg>
+      {#if sync.syncing}
+        <span class="sync-spinner" aria-hidden="true"><Spinner size={13} /></span>
+      {:else}
+        <DatabaseBackupIcon size="14" strokeWidth="2" aria-hidden="true" />
+      {/if}
+      <span class="sync-label" class:collapsed={navCollapsed}>{sync.readOnly ? m.header_actions_refresh() : m.header_actions_sync()}</span>
     </button>
 
     <button
       class="import-btn"
-      onclick={() => showImportModal = true}
-      title="Import conversations"
-      aria-label="Import conversations"
+      onclick={() => {
+        if (!sync.readOnly) showImportModal = true;
+      }}
+      disabled={sync.readOnly}
+      title={sync.readOnly
+        ? m.header_actions_import_unavailable()
+        : m.header_actions_import_conversations()}
+      aria-label={m.header_actions_import_conversations()}
     >
-      <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M2.75 14A1.75 1.75 0 011 12.25v-2.5a.75.75 0 011.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 00.25-.25v-2.5a.75.75 0 011.5 0v2.5A1.75 1.75 0 0113.25 14H2.75z"/>
-        <path d="M11.78 4.72a.75.75 0 00-1.06 0L8.75 6.69V1.5a.75.75 0 00-1.5 0v5.19L5.28 4.72a.75.75 0 00-1.06 1.06l3.25 3.25a.75.75 0 001.06 0l3.25-3.25a.75.75 0 000-1.06z"/>
-      </svg>
-      <span class="import-label">Import</span>
+      <DownloadIcon size="12" strokeWidth="2" aria-hidden="true" />
+      <span class="import-label" class:collapsed={navCollapsed}>{m.header_actions_import()}</span>
     </button>
 
     <span class="header-divider"></span>
@@ -589,17 +679,13 @@
     <button
       class="header-btn"
       onclick={() => ui.toggleTheme()}
-      title="Toggle theme"
-      aria-label="Toggle theme"
+      title={m.header_actions_toggle_theme()}
+      aria-label={m.header_actions_toggle_theme()}
     >
       {#if ui.theme === "light"}
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M6 .278a.768.768 0 01.08.858 7.208 7.208 0 00-.878 3.46c0 4.021 3.278 7.277 7.318 7.277.527 0 1.04-.055 1.533-.16a.787.787 0 01.81.316.733.733 0 01-.031.893A8.349 8.349 0 018.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.752.752 0 016 .278z"/>
-        </svg>
+        <MoonIcon size="14" strokeWidth="2" aria-hidden="true" />
       {:else}
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M8 12a4 4 0 100-8 4 4 0 000 8zM8 0a.5.5 0 01.5.5v2a.5.5 0 01-1 0v-2A.5.5 0 018 0zm0 13a.5.5 0 01.5.5v2a.5.5 0 01-1 0v-2A.5.5 0 018 13zm8-5a.5.5 0 01-.5.5h-2a.5.5 0 010-1h2A.5.5 0 0116 8zM3 8a.5.5 0 01-.5.5h-2a.5.5 0 010-1h2A.5.5 0 013 8zm10.657-5.657a.5.5 0 010 .707l-1.414 1.414a.5.5 0 11-.707-.707l1.414-1.414a.5.5 0 01.707 0zm-9.193 9.193a.5.5 0 010 .707L3.05 13.657a.5.5 0 01-.707-.707l1.414-1.414a.5.5 0 01.707 0zm9.193 2.121a.5.5 0 01-.707 0l-1.414-1.414a.5.5 0 01.707-.707l1.414 1.414a.5.5 0 010 .707zM4.464 4.465a.5.5 0 01-.707 0L2.343 3.05a.5.5 0 01.707-.707l1.414 1.414a.5.5 0 010 .708z"/>
-        </svg>
+        <SunIcon size="14" strokeWidth="2" aria-hidden="true" />
       {/if}
     </button>
 
@@ -607,23 +693,22 @@
       class="header-btn"
       class:active={router.route === "settings"}
       onclick={() => router.navigate("settings")}
-      title="Settings"
-      aria-label="Settings"
+      title={m.header_actions_settings()}
+      aria-label={m.header_actions_settings()}
     >
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 01-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 01.872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 012.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 012.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 01.872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 01-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 01-2.105-.872l-.1-.34zM8 10.93a2.929 2.929 0 110-5.86 2.929 2.929 0 010 5.858z"/>
-      </svg>
+      <SettingsIcon size="14" strokeWidth="2" aria-hidden="true" />
     </button>
 
     <button
       class="header-btn"
       onclick={() => (ui.activeModal = "shortcuts")}
-      title="Keyboard shortcuts (?)"
+      title={m.header_actions_keyboard_shortcuts_shortcut()}
+      aria-label={m.header_actions_keyboard_shortcuts()}
     >
       ?
     </button>
-  </div>
-</header>
+  {/snippet}
+</TopBar>
 
 <ImportModal
   bind:open={showImportModal}
@@ -635,25 +720,6 @@
 />
 
 <style>
-  .header {
-    height: var(--header-height, 40px);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 10px;
-    background: var(--bg-surface);
-    border-bottom: 1px solid var(--border-default);
-    flex-shrink: 0;
-    gap: 8px;
-  }
-
-  .header-left {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-width: 0;
-  }
-
   .header-home {
     display: flex;
     align-items: center;
@@ -680,84 +746,29 @@
     letter-spacing: -0.01em;
   }
 
-  .nav-btn {
-    height: 26px;
+  .project-picker {
     display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 0 10px;
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--text-muted);
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 0.12s, color 0.12s;
+    min-width: 0;
   }
 
-  .nav-btn:hover {
-    background: var(--bg-surface-hover);
-    color: var(--text-primary);
-  }
-
-  .nav-btn.active {
-    color: var(--accent-blue);
-    background: color-mix(
-      in srgb,
-      var(--accent-blue) 8%,
-      transparent
-    );
-  }
-
-  .more-wrap {
-    position: relative;
-  }
-
-  .more-dropdown {
-    position: absolute;
-    top: calc(100% + 4px);
-    left: 0;
-    min-width: 140px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-md);
-    box-shadow: var(--shadow-md);
+  /* FitStages' sizing contract: the host is sized by the flexible search
+   * region, never by its own content. */
+  :global(.search-fit) {
+    width: 100%;
     display: flex;
-    flex-direction: column;
-    padding: 4px;
-    z-index: 20;
-    animation: dropdown-in 0.12s ease-out;
-  }
-
-  .more-item {
-    padding: 6px 10px;
-    font-size: 12px;
-    color: var(--text-secondary);
-    border-radius: var(--radius-sm);
-    text-align: left;
-    background: transparent;
-    border: none;
-    cursor: pointer;
-    transition: background 0.08s, color 0.08s;
-  }
-
-  .more-item:hover {
-    background: var(--bg-surface-hover);
-    color: var(--text-primary);
-  }
-
-  .more-item.active {
-    color: var(--text-primary);
-    font-weight: 500;
-    background: var(--bg-inset);
+    justify-content: center;
   }
 
   .search-hint {
     height: 26px;
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
     padding: 0 10px;
+    min-width: 220px;
+    width: 100%;
+    max-width: 340px;
     background: var(--bg-inset);
     border: 1px solid var(--border-muted);
     border-radius: var(--radius-md);
@@ -768,6 +779,12 @@
     transition: border-color 0.15s, box-shadow 0.15s;
   }
 
+  .search-hint--icon {
+    min-width: 0;
+    width: auto;
+    padding: 0 8px;
+  }
+
   .search-hint:hover {
     border-color: var(--border-default);
     box-shadow: var(--shadow-sm);
@@ -775,24 +792,6 @@
 
   .search-hint-text {
     color: var(--text-muted);
-  }
-
-  .search-hint-kbd {
-    font-size: 10px;
-    padding: 0 4px;
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm);
-    color: var(--text-muted);
-    background: var(--bg-surface);
-    font-family: var(--font-sans);
-    line-height: 16px;
-  }
-
-  .header-right {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    flex-shrink: 0;
   }
 
   /* ── Transcript strip: mode pills + filter ── */
@@ -877,7 +876,7 @@
     height: 11px;
     border-radius: 50%;
     background: var(--accent-amber);
-    color: white;
+    color: var(--accent-amber-foreground);
     font-size: 7px;
     font-weight: 700;
     display: flex;
@@ -894,12 +893,9 @@
     right: 0;
     margin-top: 4px;
     width: 190px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-md);
-    box-shadow: var(--shadow-lg);
+    /* card chrome comes from the shared kit-popover-card class */
     padding: 6px 0;
-    z-index: 100;
+    z-index: var(--z-popover);
     animation: dropdown-in 0.12s ease-out;
     transform-origin: top right;
   }
@@ -1003,12 +999,38 @@
     color: var(--text-secondary);
   }
 
+  .header-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
+
   .header-btn.active {
     color: var(--accent-purple);
   }
 
   .header-btn.syncing {
-    animation: spin 1s linear infinite;
+    color: var(--text-secondary);
+  }
+
+  .sync-spinner {
+    display: flex;
+    align-items: center;
+  }
+
+  .sync-btn {
+    width: auto;
+    min-width: 56px;
+    gap: var(--space-2);
+    padding: 0 9px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  /* Labels drop while the nav tabs are collapsed, keeping the side
+     regions lean at tight widths (TopBar's side regions never shrink). */
+  .sync-label.collapsed,
+  .import-label.collapsed {
+    display: none;
   }
 
   /* ── Import button (icon + label) ── */
@@ -1016,7 +1038,7 @@
     height: 26px;
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: var(--space-2);
     padding: 0 10px;
     border-radius: var(--radius-sm);
     font-size: 11px;
@@ -1026,9 +1048,14 @@
     transition: background 0.12s, color 0.12s;
   }
 
-  .import-btn:hover {
+  .import-btn:hover:not(:disabled) {
     background: var(--bg-surface-hover);
     color: var(--text-primary);
+  }
+
+  .import-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
   }
 
   .header-divider {
@@ -1050,19 +1077,11 @@
     right: 0;
     margin-top: 4px;
     width: 220px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-md);
-    box-shadow: var(--shadow-lg);
+    /* card chrome comes from the shared kit-popover-card class */
     padding: 4px 0;
-    z-index: 100;
+    z-index: var(--z-popover);
     animation: dropdown-in 0.12s ease-out;
     transform-origin: top right;
-  }
-
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
   }
 
   .hamburger {
@@ -1093,12 +1112,9 @@
     right: 0;
     margin-top: 4px;
     width: 180px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-md);
-    box-shadow: var(--shadow-lg);
+    /* card chrome comes from the shared kit-popover-card class */
     padding: 4px 0;
-    z-index: 100;
+    z-index: var(--z-popover);
     animation: dropdown-in 0.12s ease-out;
     transform-origin: top right;
   }
@@ -1121,47 +1137,23 @@
     color: var(--text-primary);
   }
 
-  .overflow-item svg {
+  .overflow-item :global(svg) {
     flex-shrink: 0;
     color: var(--text-muted);
   }
 
-  /* ── Responsive ── */
+  /* ── Responsive ──
+   * Nav tabs and the search field degrade by measurement (TopBar +
+   * FitStages); only the app-owned side-region content still uses the
+   * shared layout breakpoints. */
 
-  /* 1024px: Hide nav button labels + search text/kbd */
-  @media (max-width: 1023px) {
-    .nav-label,
-    .import-label {
+  /* 760px: hide the project picker; collapse layout/export/publish into
+   * the overflow menu; shrink mode pills to single letters */
+  @media (max-width: 760px) {
+    .project-picker {
       display: none;
     }
 
-    .search-hint-text {
-      display: none;
-    }
-
-    .search-hint-kbd {
-      display: none;
-    }
-
-    .hamburger {
-      display: flex;
-    }
-  }
-
-  /* 767px: Hide nav buttons and typeahead */
-  @media (max-width: 767px) {
-    .header-left .nav-btn,
-    .header-left .more-wrap {
-      display: none;
-    }
-
-    .header-left :global(.typeahead) {
-      display: none;
-    }
-  }
-
-  /* 699px: Collapse layout/export/publish into overflow menu */
-  @media (max-width: 699px) {
     .collapsible {
       display: none;
     }
@@ -1190,8 +1182,8 @@
     }
   }
 
-  /* 549px: Minimal mode — collapse further */
-  @media (max-width: 549px) {
+  /* 640px: minimal mode — collapse further */
+  @media (max-width: 640px) {
     .header-title {
       display: none;
     }
@@ -1199,21 +1191,11 @@
     .search-hint {
       padding: 0 8px;
     }
-
-    .header {
-      padding: 0 6px;
-      gap: 4px;
-    }
-
-    .header-left {
-      gap: 6px;
-    }
   }
 
   /* Touch targets for coarse pointers */
   @media (pointer: coarse) {
     .header-btn,
-    .nav-btn,
     .hamburger,
     .import-btn {
       min-width: 44px;

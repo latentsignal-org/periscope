@@ -1,21 +1,18 @@
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  afterEach,
-} from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vite-plus/test";
 import { ui } from "../stores/ui.svelte.js";
 import { sessions } from "../stores/sessions.svelte.js";
 import { starred } from "../stores/starred.svelte.js";
 import { router } from "../stores/router.svelte.js";
+import { messages } from "../stores/messages.svelte.js";
+import { SessionsService } from "../api/generated/index";
+import { copyToClipboard } from "../utils/clipboard.js";
 import { registerShortcuts } from "./keyboard.js";
 
-function fireKey(
-  key: string,
-  opts: Partial<KeyboardEventInit> = {},
-) {
+vi.mock("../utils/clipboard.js", () => ({
+  copyToClipboard: vi.fn().mockResolvedValue(true),
+}));
+
+function fireKey(key: string, opts: Partial<KeyboardEventInit> = {}) {
   const event = new KeyboardEvent("keydown", {
     key,
     bubbles: true,
@@ -27,6 +24,7 @@ function fireKey(
 describe("registerShortcuts", () => {
   let cleanup: () => void;
   let navigateMessage: (delta: number) => void;
+  let navigateUserPrompt: (delta: number) => void;
 
   beforeEach(() => {
     ui.activeModal = null;
@@ -34,11 +32,12 @@ describe("registerShortcuts", () => {
     sessions.activeSessionId = null;
     sessions.sessions = [];
     starred.filterOnly = false;
-    for (const id of [...starred.ids]) {
+    for (const id of starred.ids) {
       starred.unstar(id);
     }
     navigateMessage = vi.fn();
-    cleanup = registerShortcuts({ navigateMessage });
+    navigateUserPrompt = vi.fn();
+    cleanup = registerShortcuts({ navigateMessage, navigateUserPrompt });
   });
 
   afterEach(() => {
@@ -107,6 +106,21 @@ describe("registerShortcuts", () => {
     });
   });
 
+  describe("Publish shortcut", () => {
+    it("opens publish modal with the active session target", () => {
+      sessions.activeSessionId = "sess-123";
+
+      fireKey("p");
+
+      expect(ui.activeModal).toBe("publish");
+      expect(ui.publishSecret).toBe(false);
+      expect(ui.publishTarget).toEqual({
+        kind: "session",
+        id: "sess-123",
+      });
+    });
+  });
+
   describe("modal blocks other shortcuts", () => {
     it("should block navigation when modal is open", () => {
       ui.activeModal = "commandPalette";
@@ -117,6 +131,38 @@ describe("registerShortcuts", () => {
     it("should allow navigation when no modal is open", () => {
       fireKey("j");
       expect(navigateMessage).toHaveBeenCalledWith(1);
+    });
+
+    it("should block prompt navigation when modal is open", () => {
+      ui.activeModal = "commandPalette";
+      fireKey("J", { shiftKey: true });
+      expect(navigateUserPrompt).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("prompt navigation", () => {
+    it("dispatches Shift+J and Shift+K without changing adjacent navigation", () => {
+      fireKey("J", { shiftKey: true });
+      fireKey("K", { shiftKey: true });
+      fireKey("j");
+      fireKey("k");
+
+      expect(navigateUserPrompt).toHaveBeenNthCalledWith(1, 1);
+      expect(navigateUserPrompt).toHaveBeenNthCalledWith(2, -1);
+      expect(navigateMessage).toHaveBeenNthCalledWith(1, 1);
+      expect(navigateMessage).toHaveBeenNthCalledWith(2, -1);
+    });
+
+    it("suppresses prompt navigation while a focused input owns keys", () => {
+      const input = document.createElement("input");
+      document.body.appendChild(input);
+      input.focus();
+      try {
+        fireKey("J", { shiftKey: true });
+        expect(navigateUserPrompt).not.toHaveBeenCalled();
+      } finally {
+        document.body.removeChild(input);
+      }
     });
   });
 
@@ -212,16 +258,13 @@ describe("registerShortcuts", () => {
         user_message_count: 1,
         total_output_tokens: 0,
         peak_context_tokens: 0,
+        is_automated: false,
         created_at: "2024-01-01T00:00:00Z",
       };
     }
 
     it("should navigate forward skipping unstarred when filterOnly is enabled", () => {
-      sessions.sessions = [
-        makeSession("s1"),
-        makeSession("s2"),
-        makeSession("s3"),
-      ];
+      sessions.sessions = [makeSession("s1"), makeSession("s2"), makeSession("s3")];
       sessions.activeSessionId = "s1";
       starred.star("s1");
       starred.star("s3");
@@ -234,11 +277,7 @@ describe("registerShortcuts", () => {
     });
 
     it("should navigate forward without filter when filterOnly is disabled", () => {
-      sessions.sessions = [
-        makeSession("s1"),
-        makeSession("s2"),
-        makeSession("s3"),
-      ];
+      sessions.sessions = [makeSession("s1"), makeSession("s2"), makeSession("s3")];
       sessions.activeSessionId = "s1";
       starred.star("s1");
       starred.star("s3");
@@ -251,11 +290,7 @@ describe("registerShortcuts", () => {
     });
 
     it("should navigate backward skipping unstarred when filterOnly is enabled", () => {
-      sessions.sessions = [
-        makeSession("s1"),
-        makeSession("s2"),
-        makeSession("s3"),
-      ];
+      sessions.sessions = [makeSession("s1"), makeSession("s2"), makeSession("s3")];
       sessions.activeSessionId = "s3";
       starred.star("s1");
       starred.star("s3");
@@ -268,10 +303,7 @@ describe("registerShortcuts", () => {
     });
 
     it("should be a no-op when filtered list is empty", () => {
-      sessions.sessions = [
-        makeSession("s1"),
-        makeSession("s2"),
-      ];
+      sessions.sessions = [makeSession("s1"), makeSession("s2")];
       sessions.activeSessionId = "s1";
       // No sessions are starred, so filtered list will be empty
       starred.filterOnly = true;
@@ -342,5 +374,196 @@ describe("registerShortcuts", () => {
       fireKey("k", { metaKey: true });
       expect(ui.activeModal).toBeNull();
     });
+  });
+
+  it("pins the active session model in the resume fallback", async () => {
+    const session = {
+      id: "run:keyboard-session",
+      project: "proj",
+      machine: "local",
+      agent: "claude",
+      first_message: null,
+      started_at: null,
+      ended_at: null,
+      message_count: 1,
+      user_message_count: 1,
+      total_output_tokens: 0,
+      peak_context_tokens: 0,
+      is_automated: false,
+      created_at: "2024-01-01T00:00:00Z",
+    };
+    sessions.sessions = [session];
+    sessions.activeSessionId = session.id;
+    messages.sessionId = session.id;
+    messages.historyComplete = true;
+    messages.messages = [
+      {
+        id: 1,
+        session_id: session.id,
+        ordinal: 0,
+        role: "assistant",
+        content: "answer",
+        timestamp: "",
+        has_thinking: false,
+        thinking_text: "",
+        has_tool_use: false,
+        content_length: 6,
+        model: "claude sonnet",
+        token_usage: null,
+        context_tokens: 0,
+        output_tokens: 0,
+        has_context_tokens: false,
+        has_output_tokens: false,
+        is_system: false,
+      },
+    ];
+    vi.spyOn(SessionsService, "postApiV1SessionsIdResume").mockRejectedValue(
+      new Error("backend unavailable"),
+    );
+
+    fireKey("c");
+    await vi.waitFor(() => {
+      expect(copyToClipboard).toHaveBeenCalledWith(
+        "claude --resume 'run:keyboard-session' --model 'claude sonnet'",
+      );
+    });
+    messages.clear();
+  });
+
+  it("keeps successful backend resume commands authoritative", async () => {
+    const session = {
+      id: "run:keyboard-session",
+      project: "proj",
+      machine: "local",
+      agent: "claude",
+      first_message: null,
+      started_at: null,
+      ended_at: null,
+      message_count: 1,
+      user_message_count: 1,
+      total_output_tokens: 0,
+      peak_context_tokens: 0,
+      is_automated: false,
+      created_at: "2024-01-01T00:00:00Z",
+    };
+    sessions.sessions = [session];
+    sessions.activeSessionId = session.id;
+    messages.sessionId = session.id;
+    messages.messages = [
+      {
+        id: 1,
+        session_id: session.id,
+        ordinal: 0,
+        role: "assistant",
+        content: "answer",
+        timestamp: "",
+        has_thinking: false,
+        thinking_text: "",
+        has_tool_use: false,
+        content_length: 6,
+        model: "claude sonnet",
+        token_usage: null,
+        context_tokens: 0,
+        output_tokens: 0,
+        has_context_tokens: false,
+        has_output_tokens: false,
+        is_system: false,
+      },
+    ];
+    vi.spyOn(SessionsService, "postApiV1SessionsIdResume").mockResolvedValue({
+      launched: false,
+      command: "claude --resume run:keyboard-session",
+      cwd: "/tmp/project",
+    });
+
+    fireKey("c");
+    await vi.waitFor(() => {
+      expect(copyToClipboard).toHaveBeenCalledWith("claude --resume run:keyboard-session");
+    });
+    messages.clear();
+  });
+
+  it("does not pin a partial-history model in the resume fallback", async () => {
+    const session = {
+      id: "run:keyboard-session",
+      project: "proj",
+      machine: "local",
+      agent: "claude",
+      first_message: null,
+      started_at: null,
+      ended_at: null,
+      message_count: 3001,
+      user_message_count: 1,
+      total_output_tokens: 0,
+      peak_context_tokens: 0,
+      is_automated: false,
+      created_at: "2024-01-01T00:00:00Z",
+    };
+    sessions.sessions = [session];
+    sessions.activeSessionId = session.id;
+    messages.sessionId = session.id;
+    messages.messages = [
+      {
+        id: 1,
+        session_id: session.id,
+        ordinal: 0,
+        role: "assistant",
+        content: "answer",
+        timestamp: "",
+        has_thinking: false,
+        thinking_text: "",
+        has_tool_use: false,
+        content_length: 6,
+        model: "claude sonnet",
+        token_usage: null,
+        context_tokens: 0,
+        output_tokens: 0,
+        has_context_tokens: false,
+        has_output_tokens: false,
+        is_system: false,
+      },
+    ];
+    messages.hasOlder = true;
+    vi.spyOn(SessionsService, "postApiV1SessionsIdResume").mockRejectedValue(
+      new Error("backend unavailable"),
+    );
+
+    fireKey("c");
+    await vi.waitFor(() => {
+      expect(copyToClipboard).toHaveBeenCalledWith("claude --resume 'run:keyboard-session'");
+    });
+    messages.clear();
+  });
+
+  it("does not pin a reloading stable model in the resume fallback", async () => {
+    const session = {
+      id: "run:keyboard-session",
+      project: "proj",
+      machine: "local",
+      agent: "claude",
+      first_message: null,
+      started_at: null,
+      ended_at: null,
+      message_count: 3001,
+      user_message_count: 1,
+      total_output_tokens: 0,
+      peak_context_tokens: 0,
+      is_automated: false,
+      created_at: "2024-01-01T00:00:00Z",
+    };
+    sessions.sessions = [session];
+    sessions.activeSessionId = session.id;
+    messages.sessionId = session.id;
+    messages.loading = true;
+    (messages as any)._stableMainModel = "claude sonnet";
+    vi.spyOn(SessionsService, "postApiV1SessionsIdResume").mockRejectedValue(
+      new Error("backend unavailable"),
+    );
+
+    fireKey("c");
+    await vi.waitFor(() => {
+      expect(copyToClipboard).toHaveBeenCalledWith("claude --resume 'run:keyboard-session'");
+    });
+    messages.clear();
   });
 });

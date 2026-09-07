@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { Card } from "@kenn-io/kit-ui";
   import { analytics } from "../../stores/analytics.svelte.js";
+  import { m } from "../../i18n/index.js";
 
   function formatNum(n: number): string {
     return n.toLocaleString();
@@ -9,35 +11,35 @@
     return `${(n * 100).toFixed(1)}%`;
   }
 
-  interface Card {
-    label: string;
+  interface SummaryCard {
+    label: () => string;
     value: () => string;
     sub?: () => string;
   }
 
-  const cards: Card[] = [
+  const cards: SummaryCard[] = [
     {
-      label: "Sessions",
+      label: () => m.analytics_summary_sessions(),
       value: () =>
         formatNum(analytics.summary?.total_sessions ?? 0),
     },
     {
-      label: "Messages",
+      label: () => m.analytics_summary_messages(),
       value: () =>
         formatNum(analytics.summary?.total_messages ?? 0),
     },
     {
-      label: "Projects",
+      label: () => m.analytics_summary_projects(),
       value: () =>
         String(analytics.summary?.active_projects ?? 0),
     },
     {
-      label: "Active Days",
+      label: () => m.analytics_summary_active_days(),
       value: () =>
         String(analytics.summary?.active_days ?? 0),
     },
     {
-      label: "Messages/Session",
+      label: () => m.analytics_summary_messages_per_session(),
       value: () => {
         const s = analytics.summary;
         if (!s) return "-";
@@ -46,11 +48,14 @@
       sub: () => {
         const s = analytics.summary;
         if (!s) return "";
-        return `med ${s.median_messages} / p90 ${s.p90_messages}`;
+        return m.analytics_summary_median_p90({
+          median: s.median_messages,
+          p90: s.p90_messages,
+        });
       },
     },
     {
-      label: "Concentration",
+      label: () => m.analytics_summary_concentration(),
       value: () => pct(analytics.summary?.concentration ?? 0),
       sub: () => analytics.summary?.most_active_project ?? "",
     },
@@ -59,15 +64,15 @@
 
 <div class="summary-cards">
   {#each cards as card}
-    <div class="card">
+    <Card level="default" padding="none" class="card">
       {#if analytics.errors.summary}
         <span class="card-value error">--</span>
-        <span class="card-label">{card.label}</span>
+        <span class="card-label">{card.label()}</span>
       {:else}
         <span class="card-value">
           {card.value()}
         </span>
-        <span class="card-label">{card.label}</span>
+        <span class="card-label">{card.label()}</span>
         {#if card.sub}
           {@const subtext = card.sub()}
           {#if subtext}
@@ -75,7 +80,7 @@
           {/if}
         {/if}
       {/if}
-    </div>
+    </Card>
   {/each}
 </div>
 
@@ -86,7 +91,7 @@
       class="retry-btn"
       onclick={() => analytics.fetchSummary()}
     >
-      Retry
+      {m.shared_retry()}
     </button>
   </div>
 {/if}
@@ -98,16 +103,17 @@
     flex-wrap: wrap;
   }
 
-  .card {
+  .summary-cards :global(.card) {
     flex: 1;
     min-width: 120px;
     padding: 12px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-muted);
-    border-radius: var(--radius-md);
     display: flex;
     flex-direction: column;
     gap: 2px;
+  }
+
+  .summary-cards :global(.card > .kit-card__body) {
+    display: contents;
   }
 
   .card-value {
@@ -156,6 +162,6 @@
 
   .retry-btn:hover {
     background: var(--accent-red);
-    color: #fff;
+    color: var(--accent-red-foreground);
   }
 </style>

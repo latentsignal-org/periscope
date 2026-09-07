@@ -1,0 +1,19 @@
+/* generated using openapi-typescript-codegen -- do not edit */
+/* istanbul ignore file */
+/* tslint:disable */
+/* eslint-disable */
+import type { MoneyMoney } from './MoneyMoney';
+export type DbDailyUsageEntry = {
+  agentBreakdowns: any[] | null;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  date: string;
+  inputTokens: number;
+  machineBreakdowns: any[] | null;
+  modelBreakdowns: any[] | null;
+  modelsUsed: any[] | null;
+  outputTokens: number;
+  projectBreakdowns: any[] | null;
+  totalCost: MoneyMoney;
+};
+

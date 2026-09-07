@@ -1,17 +1,24 @@
 <script lang="ts">
   import { usage, type GroupBy } from "../../stores/usage.svelte.js";
-  import { projectColor } from "../../utils/projectColor.js";
+  import { m } from "../../i18n/index.js";
+  import { formatMoney, moneyFromMicrodollars } from "../../money.js";
+  import { sumSelectedTokens } from "../../stores/usageTokenTypes.js";
+
+  interface Props {
+    colorMap: ReadonlyMap<string, string>;
+  }
+
+  let { colorMap }: Props = $props();
 
   const CHART_H = 180;
   const X_LABEL_H = 20;
   const Y_LABEL_W = 40;
+  const X_LABEL_RIGHT_PAD = 24;
   // Reserved headroom at the top of the plot area so the
   // maximum bar, its grid line, and the top y-axis label's
   // ascenders do not clip against the SVG viewBox edge.
   const TOP_PAD = 10;
   const MAX_SERIES = 5;
-
-  const OTHER_COLOR = "var(--text-muted)";
 
   let containerEl: HTMLDivElement | undefined = $state();
   let containerWidth = $state(600);
@@ -34,34 +41,64 @@
   }
 
   const groupBy = $derived(usage.toggles.timeSeries.groupBy);
+  const isTokenMode = $derived(usage.mode === "token");
+
+  function breakdownTokens(b: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens: number;
+    cacheReadTokens: number;
+  }): number {
+    return sumSelectedTokens(b, usage.selectedTokenTypes);
+  }
 
   const seriesData = $derived.by((): {
     points: Point[];
     keys: string[];
     maxY: number;
+	labels: Record<string, string>;
   } => {
     const daily = usage.summary?.daily;
     if (!daily || daily.length === 0) {
-      return { points: [], keys: [], maxY: 0 };
+      return { points: [], keys: [], maxY: 0, labels: {} };
     }
 
-    // Sum cost per key across the whole range to find top N.
+    // Sum the selected value per key across the whole range to find top N.
     const totals = new Map<string, number>();
+	const labels: Record<string, string> = {};
     for (const day of daily) {
       if (groupBy === "project" && day.projectBreakdowns) {
         for (const b of day.projectBreakdowns) {
-          totals.set(b.project,
-            (totals.get(b.project) ?? 0) + b.cost);
+          labels[b.project_key] = b.project;
+          const value = isTokenMode
+            ? breakdownTokens(b)
+            : b.cost.microdollars;
+          totals.set(
+            b.project_key,
+            (totals.get(b.project_key) ?? 0) + value,
+          );
         }
       } else if (groupBy === "model" && day.modelBreakdowns) {
         for (const b of day.modelBreakdowns) {
-          totals.set(b.modelName,
-            (totals.get(b.modelName) ?? 0) + b.cost);
+          const value = isTokenMode
+            ? breakdownTokens(b)
+            : b.cost.microdollars;
+          totals.set(
+            b.modelName,
+            (totals.get(b.modelName) ?? 0) + value,
+          );
+          labels[b.modelName] = b.modelName;
         }
       } else if (groupBy === "agent" && day.agentBreakdowns) {
         for (const b of day.agentBreakdowns) {
-          totals.set(b.agent,
-            (totals.get(b.agent) ?? 0) + b.cost);
+          const value = isTokenMode
+            ? breakdownTokens(b)
+            : b.cost.microdollars;
+          totals.set(
+            b.agent,
+            (totals.get(b.agent) ?? 0) + value,
+          );
+          labels[b.agent] = b.agent;
         }
       }
     }
@@ -70,16 +107,20 @@
     if (totals.size === 0) {
       const points = daily.map((d) => ({
         date: d.date,
-        values: { total: d.totalCost },
+        values: {
+          total: isTokenMode
+            ? breakdownTokens(d)
+            : d.totalCost.microdollars,
+        },
       }));
       let maxY = 0;
       for (const pt of points) {
         if (pt.values.total > maxY) maxY = pt.values.total;
       }
-      return { points, keys: ["total"], maxY: maxY || 1 };
+      return { points, keys: ["total"], maxY: maxY || 1, labels };
     }
 
-    // Pick top N by total cost, group the rest as "Other".
+    // Pick top N by total value, group the rest as "Other".
     const ranked = [...totals.entries()]
       .sort((a, b) => b[1] - a[1]);
     const topKeys = new Set(
@@ -90,34 +131,37 @@
     const points: Point[] = [];
     for (const day of daily) {
       const values: Record<string, number> = {};
-      let items: Array<{ key: string; cost: number }> = [];
+      let items: Array<{ key: string; value: number }> = [];
 
       if (groupBy === "project" && day.projectBreakdowns) {
         items = day.projectBreakdowns.map((b) => ({
-          key: b.project, cost: b.cost,
+          key: b.project_key,
+          value: isTokenMode ? breakdownTokens(b) : b.cost.microdollars,
         }));
       } else if (groupBy === "model" && day.modelBreakdowns) {
         items = day.modelBreakdowns.map((b) => ({
-          key: b.modelName, cost: b.cost,
+          key: b.modelName,
+          value: isTokenMode ? breakdownTokens(b) : b.cost.microdollars,
         }));
       } else if (groupBy === "agent" && day.agentBreakdowns) {
         items = day.agentBreakdowns.map((b) => ({
-          key: b.agent, cost: b.cost,
+          key: b.agent,
+          value: isTokenMode ? breakdownTokens(b) : b.cost.microdollars,
         }));
       }
 
-      for (const { key, cost } of items) {
+      for (const { key, value } of items) {
         if (topKeys.has(key)) {
-          values[key] = (values[key] ?? 0) + cost;
+          values[key] = (values[key] ?? 0) + value;
         } else {
           values["__other__"] =
-            (values["__other__"] ?? 0) + cost;
+            (values["__other__"] ?? 0) + value;
         }
       }
       points.push({ date: day.date, values });
     }
 
-    // Build ordered key list: top N by cost desc, then
+    // Build ordered key list: top N by value desc, then
     // __other__ (displayed as "Other" in legend/labels).
     const keys = ranked
       .slice(0, MAX_SERIES)
@@ -133,11 +177,11 @@
       if (stack > maxY) maxY = stack;
     }
 
-    return { points, keys, maxY: maxY || 1 };
+    return { points, keys, maxY: maxY || 1, labels };
   });
 
   const chartWidth = $derived(
-    Math.max(containerWidth - Y_LABEL_W - 8, 100),
+    Math.max(containerWidth - Y_LABEL_W - X_LABEL_RIGHT_PAD, 100),
   );
 
   const BAR_WIDTH = 40;
@@ -187,6 +231,7 @@
     maxY: number,
     w: number,
     h: number,
+    colors: ReadonlyMap<string, string>,
   ): Array<{ key: string; d: string; color: string }> {
     if (points.length === 0) return [];
 
@@ -212,7 +257,7 @@
           `L${x0 + BAR_WIDTH},${bot}Z`;
         const color = key === "__other__"
           ? "var(--text-muted)"
-          : projectColor(key);
+          : colors.get(key) ?? "var(--text-muted)";
         result.push({ key, d, color });
         baseline += val;
       }
@@ -248,11 +293,11 @@
 
       const color = key === "__other__"
         ? "var(--text-muted)"
-        : projectColor(key);
+        : colors.get(key) ?? "var(--text-muted)";
       result.push({ key, d, color });
 
       for (let i = 0; i < points.length; i++) {
-        baselines[i] += points[i]!.values[key] ?? 0;
+        baselines[i] = baselines[i]! + (points[i]!.values[key] ?? 0);
       }
     }
 
@@ -266,6 +311,7 @@
       scale.max,
       chartWidth,
       CHART_H,
+      colorMap,
     ),
   );
 
@@ -303,10 +349,15 @@
     return labels;
   });
 
-  function fmtYLabel(v: number): string {
-    if (v >= 100) return `$${v.toFixed(0)}`;
-    if (v >= 1) return `$${v.toFixed(1)}`;
-    return `$${v.toFixed(2)}`;
+  function fmtCostYLabel(v: number): string {
+    return formatMoney(moneyFromMicrodollars(v));
+  }
+
+  function fmtTokenYLabel(v: number): string {
+    if (v >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(1)}B`;
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
+    return String(Math.round(v));
   }
 
   const yTicks = $derived.by(() => {
@@ -321,7 +372,9 @@
       const val = step * i;
       ticks.push({
         y: scaleY(val, max, CHART_H),
-        label: fmtYLabel(val),
+        label: isTokenMode
+          ? fmtTokenYLabel(val)
+          : fmtCostYLabel(val),
       });
     }
     return ticks;
@@ -334,40 +387,44 @@
 
 <div class="chart-container">
   <div class="chart-header">
-    <h3 class="chart-title">Cost Over Time</h3>
+    <h3 class="chart-title">
+      {isTokenMode
+        ? m.usage_tokens_over_time_title()
+        : m.usage_cost_over_time_title()}
+    </h3>
     <div class="segment-toggle">
       <button
         class="toggle-btn"
         class:active={groupBy === "project"}
         onclick={() => handleGroupByChange("project")}
       >
-        Project
+        {m.analytics_col_project()}
       </button>
       <button
         class="toggle-btn"
         class:active={groupBy === "model"}
         onclick={() => handleGroupByChange("model")}
       >
-        Model
+        {m.usage_model()}
       </button>
       <button
         class="toggle-btn"
         class:active={groupBy === "agent"}
         onclick={() => handleGroupByChange("agent")}
       >
-        Agent
+        {m.analytics_col_agent()}
       </button>
     </div>
   </div>
 
   {#if seriesData.points.length === 0}
-    <div class="empty">No data for this period</div>
+    <div class="empty">{m.shared_no_data_for_period()}</div>
   {:else}
     <div class="chart-scroll" bind:this={containerEl}>
       <svg
         width="100%"
         height={CHART_H + X_LABEL_H}
-        viewBox="0 0 {chartWidth + Y_LABEL_W + 8} {CHART_H + X_LABEL_H}"
+        viewBox="0 0 {chartWidth + Y_LABEL_W + X_LABEL_RIGHT_PAD} {CHART_H + X_LABEL_H}"
         preserveAspectRatio="xMidYMid meet"
         class="chart-svg"
       >
@@ -412,9 +469,9 @@
           <span class="legend-item">
             <span
               class="legend-dot"
-              style="background: {key === '__other__' ? 'var(--text-muted)' : projectColor(key)}"
+              style="background: {colorMap.get(key) ?? 'var(--text-muted)'}"
             ></span>
-            {key === "__other__" ? "Other" : key}
+			{key === "__other__" ? m.shared_other() : (seriesData.labels[key] ?? key)}
           </span>
         {/each}
       </div>

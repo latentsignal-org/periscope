@@ -8,40 +8,70 @@ import (
 	"log"
 	"net"
 	"net/http"
+	httppprof "net/http/pprof"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	gosync "sync"
 	"time"
 
-	"github.com/wesm/agentsview/internal/config"
-	"github.com/wesm/agentsview/internal/db"
-	"github.com/wesm/agentsview/internal/insight"
-	"github.com/wesm/agentsview/internal/llm"
-	"github.com/wesm/agentsview/internal/summarize"
-	"github.com/wesm/agentsview/internal/sync"
-	"github.com/wesm/agentsview/internal/web"
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
+
+	"go.kenn.io/agentsview/internal/config"
+	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/insight"
+	"go.kenn.io/agentsview/internal/llm"
+	"go.kenn.io/agentsview/internal/postgres"
+	"go.kenn.io/agentsview/internal/pricingrefresh"
+	"go.kenn.io/agentsview/internal/remotesync"
+	"go.kenn.io/agentsview/internal/service"
+	"go.kenn.io/agentsview/internal/summarize"
+	"go.kenn.io/agentsview/internal/sync"
+	"go.kenn.io/agentsview/internal/web"
+	"go.kenn.io/kit/daemon"
 )
 
 // VersionInfo holds build-time version metadata.
 type VersionInfo struct {
-	Version   string `json:"version"`
-	Commit    string `json:"commit"`
-	BuildDate string `json:"build_date"`
-	ReadOnly  bool   `json:"read_only,omitempty"`
+	Version                    string `json:"version"`
+	Commit                     string `json:"commit"`
+	BuildDate                  string `json:"build_date"`
+	ReadOnly                   bool   `json:"read_only,omitempty"`
+	InsightGenerationAvailable bool   `json:"insight_generation_available,omitempty"`
+	APIVersion                 int    `json:"api_version"`
+	DataVersion                int    `json:"data_version"`
 }
+
+// APIVersion is shared by HTTP version reporting and local daemon discovery.
+// Bump it when a client-visible contract cannot be decoded safely by an older
+// CLI or daemon.
+const APIVersion = 4
+
+const daemonService = "periscope"
+
+const (
+	defaultInsightLogDrainTimeout    = 2 * time.Second
+	defaultInsightLogStopWaitTimeout = 500 * time.Millisecond
+)
 
 // Server is the HTTP server that serves the SPA and REST API.
 type Server struct {
-	mu          gosync.RWMutex
-	cfg         config.Config
-	db          db.Store
-	engine      *sync.Engine
-	broadcaster *Broadcaster
-	mux         *http.ServeMux
-	httpSrv     *http.Server
-	version     VersionInfo
-	dataDir     string
+	mu             gosync.RWMutex
+	cfg            config.Config
+	db             db.Store
+	engine         *sync.Engine
+	onDemandEngine *sync.Engine
+	sessions       service.SessionService
+	broadcaster    *Broadcaster
+	mux            *http.ServeMux
+	api            huma.API
+	httpSrv        *http.Server
+	version        VersionInfo
+	dataDir        string
+
+	httpRemoteCleanupRegistry *remotesync.CleanupRegistry
 
 	// baseCtx, when set, is used as the base context for all
 	// incoming requests. Cancelling it causes SSE handlers to
@@ -51,6 +81,9 @@ type Server struct {
 	generateStreamFunc insight.GenerateStreamFunc
 	spaFS              fs.FS
 	spaHandler         http.Handler
+
+	insightLogDrainTimeout    time.Duration
+	insightLogStopWaitTimeout time.Duration
 
 	// summarizer produces per-turn LLM summaries for starred
 	// sessions. Optional: when nil (no ANTHROPIC_API_KEY), the
@@ -81,6 +114,55 @@ type Server struct {
 	// under this prefix and a <base href> tag is injected
 	// into the SPA's index.html.
 	basePath string
+	idle     *IdleTracker
+
+	// sessionMutationNotify, when set, is called after a route changes a
+	// session's lifecycle (trash, restore, permanent delete), so consumers
+	// that reconcile against session state — the recall-extraction
+	// scheduler's retraction pass — hear about changes that no sync
+	// activity would otherwise surface. Called synchronously; it must not
+	// block.
+	sessionMutationNotify func()
+	// recallCorpusMutationNotify, when set, is called after an import adds or
+	// supersedes accepted recall entries so semantic mirrors can refresh.
+	recallCorpusMutationNotify func()
+
+	// pprofEnabled registers net/http/pprof handlers under
+	// /debug/pprof/ so a running daemon can be profiled. Off by
+	// default; enabled by the hidden serve --pprof flag.
+	pprofEnabled bool
+
+	// embeddingsManager, when set, backs the /api/v1/embeddings/...
+	// build lifecycle routes. Nil (the default) leaves those routes
+	// unregistered, e.g. when semantic search is not configured.
+	embeddingsManager EmbeddingsManager
+	embeddingsStores  map[string]EmbeddingsManager
+
+	// embeddingsUnavailableReason, when non-empty, replaces the generic
+	// "embeddings manager not available" 501 message on the embeddings
+	// routes with a cause-specific one (e.g. vector serving disabled at
+	// startup because vectors.write.lock was held).
+	embeddingsUnavailableReason string
+
+	// embeddingsIncludeAutomatedDefault is the daemon's configured
+	// [vector].include_automated scope, applied to HTTP build requests
+	// that leave include_automated unset.
+	embeddingsIncludeAutomatedDefault bool
+
+	// vectorPushSource, when set, supplies the local vectors.db active
+	// generation to the daemon's pg push handler. Nil leaves the vector
+	// push phase skipped, e.g. when [vector] is disabled.
+	vectorPushSource postgres.VectorPushSource
+
+	// localSyncRunner, when set, backs the foreground local-sync HTTP handler
+	// with the worker-backed pass instead of running SyncThenRun in process.
+	localSyncRunner LocalSyncRunner
+
+	// localResyncRunner, when set, backs the foreground full-resync HTTP handler
+	// with the worker-backed build-and-swap instead of an in-process resync.
+	localResyncRunner LocalResyncRunner
+
+	ensurePricing func(context.Context, *db.DB) error
 }
 
 // New creates a new Server.
@@ -93,19 +175,52 @@ func New(
 		log.Fatalf("embedded frontend not found: %v", err)
 	}
 
+	// Pick the backend that matches the concrete store. A local *db.DB uses
+	// the direct backend even when the sync engine is nil; direct Sync already
+	// returns db.ErrReadOnly without an engine, while read APIs such as stats
+	// still need the local handle. Non-SQLite stores use the generic read-only
+	// backend.
+	var sessions service.SessionService
+	if local, ok := database.(*db.DB); ok {
+		sessions = service.NewDirectBackend(local, engine)
+	} else {
+		sessions = service.NewReadOnlyBackend(database)
+	}
+
 	s := &Server{
-		cfg:                cfg,
-		db:                 database,
-		engine:             engine,
-		mux:                http.NewServeMux(),
-		generateStreamFunc: insight.GenerateStream,
-		spaFS:              dist,
-		spaHandler:         http.FileServerFS(dist),
-		guidanceModel:      llm.DefaultGenerateModel,
-		guidanceCache:      map[string]guidanceCacheEntry{},
+		cfg:                       cfg,
+		db:                        database,
+		engine:                    engine,
+		sessions:                  sessions,
+		mux:                       http.NewServeMux(),
+		httpRemoteCleanupRegistry: new(remotesync.CleanupRegistry),
+		insightLogDrainTimeout:    defaultInsightLogDrainTimeout,
+		insightLogStopWaitTimeout: defaultInsightLogStopWaitTimeout,
+		ensurePricing:             pricingrefresh.EnsureCurrent,
+		generateStreamFunc: func(
+			ctx context.Context, agent, prompt string,
+			onLog insight.LogFunc,
+		) (insight.Result, error) {
+			return insight.GenerateStreamWithOptions(
+				ctx, agent, prompt, onLog,
+				insight.GenerateOptions{
+					Agents: insightAgentConfig(cfg.Agent),
+				},
+			)
+		},
+		spaFS:         dist,
+		spaHandler:    http.FileServerFS(dist),
+		guidanceModel: llm.DefaultGenerateModel,
+		guidanceCache: map[string]guidanceCacheEntry{},
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.version.APIVersion == 0 {
+		s.version.APIVersion = APIVersion
+	}
+	if s.version.DataVersion == 0 {
+		s.version.DataVersion = db.CurrentDataVersion()
 	}
 	s.routes()
 	return s
@@ -114,9 +229,29 @@ func New(
 // Option configures a Server.
 type Option func(*Server)
 
-// WithVersion sets the build-time version metadata.
+func insightAgentConfig(
+	cfg map[string]config.AgentConfig,
+) map[string]insight.AgentConfig {
+	if len(cfg) == 0 {
+		return nil
+	}
+	agents := make(map[string]insight.AgentConfig, len(cfg))
+	for name, agentCfg := range cfg {
+		agents[name] = insight.AgentConfig{
+			Binary:      agentCfg.Binary,
+			Sandbox:     agentCfg.Sandbox,
+			AllowUnsafe: agentCfg.AllowUnsafe,
+		}
+	}
+	return agents
+}
+
+// WithVersion sets the build-time version metadata. Zero-valued fields are
+// filled with defaults in New after all options have been applied.
 func WithVersion(v VersionInfo) Option {
-	return func(s *Server) { s.version = v }
+	return func(s *Server) {
+		s.version = v
+	}
 }
 
 // WithDataDir sets the data directory used for update caching.
@@ -130,6 +265,16 @@ func WithDataDir(dir string) Option {
 // exit and unblocking graceful shutdown.
 func WithBaseContext(ctx context.Context) Option {
 	return func(s *Server) { s.baseCtx = ctx }
+}
+
+// WithHTTPRemoteCleanupRegistry shares cleanup ownership with other HTTP sync
+// entry points in the same process, such as scheduled daemon syncs.
+func WithHTTPRemoteCleanupRegistry(registry *remotesync.CleanupRegistry) Option {
+	return func(s *Server) {
+		if registry != nil {
+			s.httpRemoteCleanupRegistry = registry
+		}
+	}
 }
 
 // WithSummarizer wires a turn-summary worker into the server. When
@@ -194,142 +339,166 @@ func WithGenerateStreamFunc(f insight.GenerateStreamFunc) Option {
 	}
 }
 
+// WithInsightLogDrainTimeouts overrides SSE insight log stream drain timeouts.
+// Zero or negative values keep the production defaults.
+func WithInsightLogDrainTimeouts(drain, stopWait time.Duration) Option {
+	return func(s *Server) {
+		if drain > 0 {
+			s.insightLogDrainTimeout = drain
+		}
+		if stopWait > 0 {
+			s.insightLogStopWaitTimeout = stopWait
+		}
+	}
+}
+
+func WithIdleTracker(t *IdleTracker) Option {
+	return func(s *Server) { s.idle = t }
+}
+
+// WithSessionMutationNotifier registers fn to run after a route changes a
+// session's lifecycle (trash, restore, permanent delete). Multiple options
+// fan out in registration order so independent lifecycle consumers do not
+// suppress one another. Each fn is called synchronously on the request path
+// and must not block; a non-blocking scheduler signal is the intended shape.
+func WithSessionMutationNotifier(fn func()) Option {
+	return func(s *Server) {
+		if fn == nil {
+			return
+		}
+		previous := s.sessionMutationNotify
+		if previous == nil {
+			s.sessionMutationNotify = fn
+			return
+		}
+		s.sessionMutationNotify = func() {
+			previous()
+			fn()
+		}
+	}
+}
+
+// WithRecallCorpusMutationNotifier registers fn to run after a successful
+// import changes the accepted recall corpus. fn must not block; a scheduler's
+// coalescing Notify method is the intended shape.
+func WithRecallCorpusMutationNotifier(fn func()) Option {
+	return func(s *Server) { s.recallCorpusMutationNotify = fn }
+}
+
+// WithPprof enables the net/http/pprof handlers under
+// /debug/pprof/ for live profiling of a running daemon.
+func WithPprof(enabled bool) Option {
+	return func(s *Server) { s.pprofEnabled = enabled }
+}
+
+// LocalSyncRunner runs the daemon's foreground local sync, streaming progress
+// to the optional callback and returning the resulting stats. When injected,
+// the sync HTTP handler routes through it (the worker-backed path) instead of
+// running the archive-scale sync in the daemon process.
+type LocalSyncRunner func(
+	ctx context.Context, progress func(sync.Progress),
+) (sync.SyncStats, error)
+
+// WithLocalSyncRunner injects the worker-backed foreground sync runner. Nil (the
+// default) keeps the in-process SyncThenRun path, which server tests rely on.
+func WithLocalSyncRunner(r LocalSyncRunner) Option {
+	return func(s *Server) { s.localSyncRunner = r }
+}
+
+// LocalResyncRunner runs the daemon's foreground full resync, streaming progress
+// to the optional callback and returning the resulting stats. When injected, the
+// resync HTTP handler routes through it (the worker-backed build-and-swap)
+// instead of running the archive-scale resync in the daemon process.
+type LocalResyncRunner func(
+	ctx context.Context, progress func(sync.Progress),
+) (sync.SyncStats, error)
+
+// WithLocalResyncRunner injects the worker-backed foreground resync runner. Nil
+// (the default) keeps the in-process SyncThenRun resync path.
+func WithLocalResyncRunner(r LocalResyncRunner) Option {
+	return func(s *Server) { s.localResyncRunner = r }
+}
+
+func (s *Server) humaConfig() huma.Config {
+	version := s.version.Version
+	if version == "" {
+		version = "dev"
+	}
+	cfg := huma.DefaultConfig("Periscope API", version)
+	cfg.Info.Description = "HTTP API for browsing, searching, syncing, and managing local agent sessions."
+	cfg.OpenAPIPath = "/api/openapi"
+	cfg.DocsPath = ""
+	cfg.SchemasPath = ""
+	cfg.CreateHooks = nil
+	cfg.Components.Schemas = huma.NewMapRegistry(
+		"#/components/schemas/",
+		agentsViewSchemaNamer,
+	)
+	if s.basePath != "" {
+		cfg.Servers = []*huma.Server{{
+			URL:         s.basePath,
+			Description: "Configured reverse-proxy base path",
+		}}
+	}
+	return cfg
+}
+
 func (s *Server) routes() {
-	// API v1 routes
-	s.mux.Handle("GET /api/v1/sessions", s.withTimeout(s.handleListSessions))
-	s.mux.Handle("GET /api/v1/sessions/{id}", s.withTimeout(s.handleGetSession))
-	s.mux.Handle(
-		"GET /api/v1/sessions/{id}/messages", s.withTimeout(s.handleGetMessages),
-	)
-	s.mux.Handle(
-		"GET /api/v1/sessions/{id}/children", s.withTimeout(s.handleGetChildSessions),
-	)
-	s.mux.Handle(
-		"GET /api/v1/sessions/{id}/activity", s.withTimeout(s.handleGetSessionActivity),
-	)
-	s.mux.Handle(
-		"GET /api/v1/sessions/{id}/context", s.withTimeout(s.handleGetSessionContext),
-	)
-	s.mux.Handle(
-		"GET /api/v1/sessions/{id}/context/timeline", s.withTimeout(s.handleGetSessionContextTimeline),
-	)
-	s.mux.Handle(
-		"POST /api/v1/sessions/{id}/summarize", s.withTimeout(s.handleEnqueueSummarize),
-	)
-	// SSE: Do not use timeout, as this is a long-lived connection.
-	s.mux.HandleFunc(
-		"GET /api/v1/sessions/{id}/watch", s.handleWatchSession,
-	)
-	// SSE: Do not use timeout, as this is a long-lived connection.
-	s.mux.HandleFunc(
-		"GET /api/v1/events", s.handleEvents,
-	)
-	// Export: Do not use timeout handler to support large downloads and avoid buffering.
-	s.mux.Handle(
-		"GET /api/v1/sessions/{id}/export", http.HandlerFunc(s.handleExportSession),
-	)
-	s.mux.Handle(
-		"GET /api/v1/sessions/{id}/md", http.HandlerFunc(s.handleMarkdownSession),
-	)
-	s.mux.Handle(
-		"POST /api/v1/sessions/{id}/publish", s.withTimeout(s.handlePublishSession),
-	)
-	s.mux.Handle(
-		"POST /api/v1/sessions/{id}/resume", s.withTimeout(s.handleResumeSession),
-	)
-	s.mux.Handle("GET /api/v1/openers", s.withTimeout(s.handleListOpeners))
-	s.mux.Handle("GET /api/v1/sessions/{id}/directory", s.withTimeout(s.handleGetSessionDir))
-	s.mux.Handle("GET /api/v1/sessions/{id}/search", s.withTimeout(s.handleSearchSession))
-	s.mux.Handle("POST /api/v1/sessions/{id}/open", s.withTimeout(s.handleOpenSession))
-	s.mux.Handle(
-		"POST /api/v1/sessions/upload", s.withTimeout(s.handleUploadSession),
-	)
-	s.mux.Handle("GET /api/v1/analytics/summary", s.withTimeout(s.handleAnalyticsSummary))
-	s.mux.Handle("GET /api/v1/analytics/activity", s.withTimeout(s.handleAnalyticsActivity))
-	s.mux.Handle("GET /api/v1/analytics/heatmap", s.withTimeout(s.handleAnalyticsHeatmap))
-	s.mux.Handle("GET /api/v1/analytics/projects", s.withTimeout(s.handleAnalyticsProjects))
-	s.mux.Handle("GET /api/v1/analytics/hour-of-week", s.withTimeout(s.handleAnalyticsHourOfWeek))
-	s.mux.Handle("GET /api/v1/analytics/sessions", s.withTimeout(s.handleAnalyticsSessionShape))
-	s.mux.Handle("GET /api/v1/analytics/velocity", s.withTimeout(s.handleAnalyticsVelocity))
-	s.mux.Handle("GET /api/v1/analytics/tools", s.withTimeout(s.handleAnalyticsTools))
-	s.mux.Handle("GET /api/v1/analytics/top-sessions", s.withTimeout(s.handleAnalyticsTopSessions))
-	s.mux.Handle("GET /api/v1/analytics/signals", s.withTimeout(s.handleAnalyticsSignals))
+	configureHumaErrors()
+	s.api = humago.New(s.mux, s.humaConfig())
+	s.registerTypedAPIRoutes()
 
-	s.mux.Handle("GET /api/v1/usage/summary",
-		s.withTimeout(s.handleUsageSummary))
-	s.mux.Handle("GET /api/v1/usage/top-sessions",
-		s.withTimeout(s.handleUsageTopSessions))
-
-	s.mux.Handle("GET /api/v1/insights", s.withTimeout(s.handleListInsights))
-	s.mux.Handle("GET /api/v1/insights/{id}", s.withTimeout(s.handleGetInsight))
-	s.mux.Handle("DELETE /api/v1/insights/{id}", s.withTimeout(s.handleDeleteInsight))
-	s.mux.HandleFunc("POST /api/v1/insights/generate", s.handleGenerateInsight)
-
-	s.mux.Handle("GET /api/v1/search", s.withTimeout(s.handleSearch))
-	s.mux.Handle("GET /api/v1/projects", s.withTimeout(s.handleListProjects))
-	s.mux.Handle("GET /api/v1/machines", s.withTimeout(s.handleListMachines))
-	s.mux.Handle("GET /api/v1/agents", s.withTimeout(s.handleListAgents))
-	s.mux.Handle("GET /api/v1/stats", s.withTimeout(s.handleGetStats))
-	s.mux.Handle("GET /api/v1/version", s.withTimeout(s.handleGetVersion))
-	s.mux.HandleFunc("POST /api/v1/sync", s.handleTriggerSync)
-	s.mux.HandleFunc("POST /api/v1/resync", s.handleTriggerResync)
-	s.mux.Handle("GET /api/v1/sync/status", s.withTimeout(s.handleSyncStatus))
-	s.mux.Handle("GET /api/v1/config/github", s.withTimeout(s.handleGetGithubConfig))
 	s.mux.Handle(
-		"POST /api/v1/config/github", s.withTimeout(s.handleSetGithubConfig),
+		"GET /api/v1/sessions/{id}/context",
+		s.withTimeout(
+			"GET /api/v1/sessions/{id}/context",
+			s.handleGetSessionContext,
+		),
 	)
-	s.mux.Handle("GET /api/v1/config/terminal", s.withTimeout(s.handleGetTerminalConfig))
 	s.mux.Handle(
-		"POST /api/v1/config/terminal", s.withTimeout(s.handleSetTerminalConfig),
+		"GET /api/v1/sessions/{id}/context/timeline",
+		s.withTimeout(
+			"GET /api/v1/sessions/{id}/context/timeline",
+			s.handleGetSessionContextTimeline,
+		),
 	)
-	s.mux.Handle("GET /api/v1/update/check", s.withTimeout(s.handleCheckUpdate))
-
-	s.mux.Handle("GET /api/v1/settings", s.withTimeout(s.handleGetSettings))
-	s.mux.Handle("PUT /api/v1/settings", s.withTimeout(s.handleUpdateSettings))
-
-	s.mux.Handle("GET /api/v1/starred", s.withTimeout(s.handleListStarred))
-	s.mux.Handle("PUT /api/v1/sessions/{id}/star", s.withTimeout(s.handleStarSession))
-	s.mux.Handle("DELETE /api/v1/sessions/{id}/star", s.withTimeout(s.handleUnstarSession))
-	s.mux.Handle("POST /api/v1/starred/bulk", s.withTimeout(s.handleBulkStar))
-
-	// Session management
-	s.mux.Handle("PATCH /api/v1/sessions/{id}/rename", s.withTimeout(s.handleRenameSession))
-	s.mux.Handle("DELETE /api/v1/sessions/{id}", s.withTimeout(s.handleDeleteSession))
-	s.mux.Handle("POST /api/v1/sessions/{id}/restore", s.withTimeout(s.handleRestoreSession))
-	s.mux.Handle("DELETE /api/v1/sessions/{id}/permanent", s.withTimeout(s.handlePermanentDeleteSession))
-	s.mux.Handle("GET /api/v1/trash", s.withTimeout(s.handleListTrash))
-	s.mux.Handle("DELETE /api/v1/trash", s.withTimeout(s.handleEmptyTrash))
-
-	// Pinned messages
-	s.mux.Handle("GET /api/v1/pins", s.withTimeout(s.handleListPins))
-	s.mux.Handle("GET /api/v1/sessions/{id}/pins", s.withTimeout(s.handleListSessionPins))
-	s.mux.Handle("POST /api/v1/sessions/{id}/messages/{messageId}/pin", s.withTimeout(s.handlePinMessage))
-	s.mux.Handle("DELETE /api/v1/sessions/{id}/messages/{messageId}/pin", s.withTimeout(s.handleUnpinMessage))
-	// Import: no timeout wrapper (large files may take longer).
-	s.mux.HandleFunc(
-		"POST /api/v1/import/claude-ai",
-		s.handleImportClaudeAI,
+	s.mux.Handle(
+		"POST /api/v1/sessions/{id}/summarize",
+		s.withTimeout(
+			"POST /api/v1/sessions/{id}/summarize",
+			s.handleEnqueueSummarize,
+		),
 	)
-	// ChatGPT import: no timeout wrapper.
-	s.mux.HandleFunc(
-		"POST /api/v1/import/chatgpt",
-		s.handleImportChatGPT,
-	)
-	// Assets: no timeout wrapper (static files).
-	s.mux.HandleFunc(
-		"GET /api/v1/assets/{filename}",
-		s.handleGetAsset,
-	)
+
+	if s.pprofEnabled {
+		s.mux.HandleFunc("/debug/pprof/", httppprof.Index)
+		s.mux.HandleFunc("/debug/pprof/cmdline", httppprof.Cmdline)
+		s.mux.HandleFunc("/debug/pprof/profile", httppprof.Profile)
+		s.mux.HandleFunc("/debug/pprof/symbol", httppprof.Symbol)
+		s.mux.HandleFunc("/debug/pprof/trace", httppprof.Trace)
+	}
+
+	s.mux.Handle("GET /api/v1/recall/entries", s.withTimeout(
+		"GET /api/v1/recall/entries",
+		s.handleListRecallEntries,
+	))
+	s.mux.Handle("GET /api/v1/recall/entries/{id}", s.withTimeout(
+		"GET /api/v1/recall/entries/{id}",
+		s.handleGetRecallEntry,
+	))
+	s.mux.Handle("POST /api/v1/recall/query", s.withTimeout(
+		"POST /api/v1/recall/query",
+		s.handleQueryRecallEntries,
+	))
+	s.mux.Handle("POST /api/v1/recall/import", s.withTimeout(
+		"POST /api/v1/recall/import",
+		s.handleImportRecallEntries,
+	))
+	s.registerEvalIngestRoutes()
 
 	// SPA fallback: serve embedded frontend
 	// Do not use timeout handler for static assets to avoid buffering.
 	s.mux.Handle("/", http.HandlerFunc(s.handleSPA))
-}
-
-func (s *Server) handleGetVersion(
-	w http.ResponseWriter, _ *http.Request,
-) {
-	writeJSON(w, http.StatusOK, s.version)
 }
 
 func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
@@ -342,6 +511,13 @@ func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 	f, err := s.spaFS.Open(path)
 	if err == nil {
 		f.Close()
+		if path == "index.html" {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+		if strings.HasPrefix(path, "assets/") {
+			w.Header().Set("Cache-Control",
+				"public, max-age=31536000, immutable")
+		}
 		// For index.html with a base path, inject <base href>.
 		if s.basePath != "" && path == "index.html" {
 			s.serveIndexWithBase(w, r)
@@ -351,7 +527,16 @@ func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fingerprinted frontend assets are files, not client-side routes.
+	// Returning index.html here disguises stale asset URLs as successful
+	// JavaScript or CSS responses after an upgrade.
+	if strings.HasPrefix(path, "assets/") {
+		http.NotFound(w, r)
+		return
+	}
+
 	// SPA fallback: serve index.html for all routes
+	w.Header().Set("Cache-Control", "no-cache")
 	if s.basePath != "" {
 		s.serveIndexWithBase(w, r)
 		return
@@ -415,11 +600,12 @@ func (s *Server) SetGithubToken(token string) {
 	s.cfg.GithubToken = token
 }
 
-// githubToken returns the current GitHub token (thread-safe).
-func (s *Server) githubToken() string {
+// githubToken returns the configured GitHub token or a fallback token
+// from the process environment / GitHub CLI (thread-safe).
+func (s *Server) githubToken(ctx context.Context) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.cfg.GithubToken
+	return resolveGitHubToken(ctx, s.cfg.GithubToken)
 }
 
 // Handler returns the http.Handler with middleware applied.
@@ -436,12 +622,16 @@ func (s *Server) Handler() http.Handler {
 	if bindAll {
 		bindAllIPs = localInterfaceIPs()
 	}
-	h := cspMiddleware(s.cfg.Host, s.cfg.Port, s.cfg.PublicOrigins, bindAllIPs, s.basePath,
+	h := cspMiddleware(
+		s.cfg.Host, s.cfg.Port, s.basePath,
+		s.cfg.PublicURL, s.cfg.PublicOrigins,
 		s.authMiddleware(
 			hostCheckMiddleware(
 				allowedHosts, bindAll, s.cfg.Port, bindAllIPs,
+				s.protectedPath,
 				corsMiddleware(
-					allowedOrigins, bindAll, s.cfg.Port, bindAllIPs, logMiddleware(s.mux),
+					allowedOrigins, bindAll, s.cfg.Port, bindAllIPs,
+					gzipMiddleware(logMiddleware(s.mux)),
 				),
 			),
 		),
@@ -469,6 +659,7 @@ func (s *Server) Handler() http.Handler {
 				ServeHTTP(w, r)
 		})
 	}
+	h = s.idle.Wrap(h)
 	return h
 }
 
@@ -476,8 +667,15 @@ func (s *Server) Handler() http.Handler {
 // responses. The policy pins the exact host:port origin so that
 // even if Tauri's compile-time CSP uses a wildcard port, the
 // intersection narrows to the actual runtime port.
-func cspMiddleware(host string, port int, publicOrigins []string, bindAllIPs map[string]bool, basePath string, next http.Handler) http.Handler {
-	policy := buildCSPPolicy(host, port, publicOrigins, bindAllIPs, basePath)
+func cspMiddleware(
+	host string,
+	port int,
+	basePath string,
+	publicURL string,
+	publicOrigins []string,
+	next http.Handler,
+) http.Handler {
+	policy := buildCSPPolicy(host, port, basePath, publicURL, publicOrigins)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/") {
 			w.Header().Set("Content-Security-Policy", policy)
@@ -488,77 +686,37 @@ func cspMiddleware(host string, port int, publicOrigins []string, bindAllIPs map
 }
 
 // buildCSPPolicy constructs the Content-Security-Policy string.
-// It uses the same loopback/bind-all logic as buildAllowedOrigins
-// to handle IPv6 bracketing, 0.0.0.0/:: normalization, and
-// public origins (proxy/TLS).
 //
-// The server's own origin (host:port) is included explicitly in
-// all directives because WebKitGTK in a Tauri webview may not
-// resolve 'self' to the Go server origin after navigating from
-// tauri://localhost. Public origins and LAN IPs are restricted
-// to connect-src only to limit the script execution surface.
-func buildCSPPolicy(host string, port int, publicOrigins []string, bindAllIPs map[string]bool, basePath string) string {
-	// serverOrigin is the pinned http origin for the configured
-	// host:port, used in all directives so resources load
-	// correctly regardless of how the webview resolves 'self'.
-	serverOrigin := "http://" + net.JoinHostPort(host, strconv.Itoa(port))
-
-	// connectSrcs collects additional origins for connect-src
-	// (fetch, SSE, WebSocket) — loopback variants, LAN IPs,
-	// and public/proxy origins.
-	connectHTTP := []string{}
-	connectWS := []string{}
-
-	addConnectOrigin := func(h string) {
-		for _, o := range httpOrigin(h, port) {
-			connectHTTP = append(connectHTTP, o)
-			connectWS = append(connectWS, strings.Replace(o, "http://", "ws://", 1))
-		}
-	}
-
-	// Mirror buildAllowedOrigins: when binding to loopback,
-	// include the other loopback variant. When binding to all
-	// interfaces, include all loopback origins plus every
-	// concrete interface IP.
-	switch host {
-	case "127.0.0.1":
-		addConnectOrigin("localhost")
-	case "localhost":
-		addConnectOrigin("127.0.0.1")
-	case "0.0.0.0", "::":
-		addConnectOrigin("127.0.0.1")
-		addConnectOrigin("localhost")
-		addConnectOrigin("::1")
-		for ip := range bindAllIPs {
-			if ip != "127.0.0.1" && ip != "::1" {
-				addConnectOrigin(ip)
-			}
-		}
-	case "::1":
-		addConnectOrigin("127.0.0.1")
-		addConnectOrigin("localhost")
-	}
-
-	for _, origin := range publicOrigins {
-		connectHTTP = append(connectHTTP, origin)
-		connectWS = append(connectWS,
-			strings.NewReplacer(
-				"https://", "wss://",
-				"http://", "ws://",
-			).Replace(origin),
-		)
-	}
-
-	// resource-src: 'self' + pinned server origin (for all resource types)
-	resourceSrc := "'self' " + serverOrigin
-
-	// connect-src: resource-src + loopback/LAN/public origins + ws variants
-	connectParts := []string{resourceSrc}
-	wsOrigin := "ws://" + net.JoinHostPort(host, strconv.Itoa(port))
-	connectParts = append(connectParts, wsOrigin)
-	connectParts = append(connectParts, connectHTTP...)
-	connectParts = append(connectParts, connectWS...)
-	connectSrc := strings.Join(connectParts, " ")
+// The server's own origin (host:port) is pinned in the resource
+// directives (default/script/img/style/font) because WebKitGTK in a
+// Tauri webview may not resolve 'self' to the Go server origin after
+// navigating from tauri://localhost.
+//
+// connect-src is intentionally widened to any http/https/ws/wss
+// origin. The "Connect to Remote Server" feature (see
+// frontend/src/lib/api/client.ts) lets the user point the SPA at an
+// arbitrary remote agentsview API origin stored client-side, which
+// this server cannot know when the policy is built. This mirrors the
+// backend, where authenticated remote requests already bypass the
+// host-check and CORS restrictions (see isRemoteAuth in auth.go and
+// corsMiddleware). Security tradeoff: a broad connect-src means that
+// if an XSS ever executed in the app, exfiltration would be easier;
+// the other directives stay pinned so script execution remains gated
+// to 'self'.
+func buildCSPPolicy(
+	host string,
+	port int,
+	basePath string,
+	publicURL string,
+	publicOrigins []string,
+) string {
+	// serverOrigins are the pinned origins used in the resource
+	// directives so resources load correctly regardless of how the
+	// webview resolves 'self'. Public origins are included for
+	// reverse-proxy deployments; concrete local origins are preserved
+	// for desktop webviews that need the backend socket pinned.
+	serverOrigins := cspPinnedOrigins(host, port, publicURL, publicOrigins)
+	resourceSrc := "'self' " + strings.Join(serverOrigins, " ")
 
 	baseURI := "'none'"
 	if basePath != "" {
@@ -568,15 +726,62 @@ func buildCSPPolicy(host string, port int, publicOrigins []string, bindAllIPs ma
 	return fmt.Sprintf(
 		"default-src %[1]s; "+
 			"script-src %[1]s; "+
-			"connect-src %[2]s; "+
+			"connect-src 'self' http: https: ws: wss:; "+
 			"img-src %[1]s data:; "+
 			"style-src %[1]s 'unsafe-inline' https://fonts.googleapis.com; "+
 			"font-src %[1]s data: https://fonts.gstatic.com; "+
 			"object-src 'none'; "+
-			"base-uri %[3]s; "+
+			"base-uri %[2]s; "+
 			"frame-ancestors 'none'",
-		resourceSrc, connectSrc, baseURI,
+		resourceSrc, baseURI,
 	)
+}
+
+func cspPinnedOrigins(
+	host string,
+	port int,
+	publicURL string,
+	publicOrigins []string,
+) []string {
+	origins := make([]string, 0, 1+len(publicOrigins)+1)
+	seen := make(map[string]bool)
+	add := func(origin string) {
+		if origin == "" || seen[origin] {
+			return
+		}
+		seen[origin] = true
+		origins = append(origins, origin)
+	}
+	for _, raw := range append([]string{publicURL}, publicOrigins...) {
+		add(normalizedOrigin(raw))
+	}
+	if !isUnspecifiedHost(host) {
+		add("http://" + net.JoinHostPort(host, strconv.Itoa(port)))
+	}
+	if len(origins) == 0 {
+		add("http://" + net.JoinHostPort(host, strconv.Itoa(port)))
+	}
+	return origins
+}
+
+func isUnspecifiedHost(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsUnspecified()
+}
+
+func normalizedOrigin(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // buildAllowedHosts returns the set of Host header values that
@@ -625,13 +830,15 @@ func buildAllowedHosts(
 }
 
 // hostCheckMiddleware validates the Host header against expected
-// values to prevent DNS rebinding attacks. Only applied to /api/
-// routes — the SPA fallback is left accessible for flexibility.
+// values to prevent DNS rebinding attacks. Only applied to paths the
+// protected predicate matches (API routes, and pprof when enabled) —
+// the SPA fallback is left accessible for flexibility.
 func hostCheckMiddleware(
-	allowedHosts map[string]bool, bindAll bool, port int, allowedIPs map[string]bool, next http.Handler,
+	allowedHosts map[string]bool, bindAll bool, port int, allowedIPs map[string]bool,
+	protected func(path string) bool, next http.Handler,
 ) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
+		if protected(r.URL.Path) {
 			// Authenticated remote requests bypass host checks.
 			if isRemoteAuth(r) {
 				next.ServeHTTP(w, r)
@@ -646,14 +853,50 @@ func hostCheckMiddleware(
 				hostAllowed = isAllowedBindAllHost(r.Host, port, allowedIPs)
 			}
 			if !hostAllowed {
+				allowed := sortedHosts(allowedHosts)
+				log.Printf(
+					"host check rejected %s %s: Host %q not in allowed "+
+						"set %v; if reaching Periscope through a forwarded "+
+						"port or remote host, restart with --public-url "+
+						"<origin> matching your browser URL",
+					r.Method, r.URL.Path, r.Host, allowed,
+				)
 				http.Error(
-					w, "Forbidden", http.StatusForbidden,
+					w, hostRejectionMessage(r.Host, allowed),
+					http.StatusForbidden,
 				)
 				return
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// sortedHosts returns the allowed Host header values as a sorted
+// slice for deterministic log and error output.
+func sortedHosts(hosts map[string]bool) []string {
+	out := make([]string, 0, len(hosts))
+	for h := range hosts {
+		out = append(out, h)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// hostRejectionMessage builds a self-explaining 403 body for a
+// rejected Host header. It names the offending Host, lists the
+// allowed values, and points at --public-url so users behind SSH
+// port-forwarding, reverse proxies, or remote dev environments
+// (exe.dev, Codespaces, Coder, WSL2) can diagnose without devtools.
+func hostRejectionMessage(host string, allowed []string) string {
+	return fmt.Sprintf(
+		"Forbidden: request Host %q is not in the allowed set %v. "+
+			"If you are reaching Periscope through SSH port-forwarding, "+
+			"a reverse proxy, or a remote dev environment, restart the "+
+			"server with --public-url <origin> matching the URL in your "+
+			"browser (for example --public-url http://%s).",
+		host, allowed, host,
+	)
 }
 
 // httpOrigin formats an HTTP origin string. It uses
@@ -815,6 +1058,27 @@ func localInterfaceIPs() map[string]bool {
 // ListenAndServe starts the HTTP server.
 func (s *Server) ListenAndServe() error {
 	addr := fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port)
+	listenCtx := context.Background()
+	if s.baseCtx != nil {
+		listenCtx = s.baseCtx
+	}
+	ln, err := daemon.Listen(
+		listenCtx,
+		daemon.Endpoint{
+			Network: daemon.NetworkTCP,
+			Address: addr,
+		},
+		daemon.WithRuntimeStore(daemon.RuntimeStore{Dir: s.dataDir}),
+	)
+	if err != nil {
+		return err
+	}
+	return s.Serve(ln)
+}
+
+// Serve starts the HTTP server on an existing listener.
+func (s *Server) Serve(ln net.Listener) error {
+	addr := ln.Addr().String()
 	srv := &http.Server{
 		Addr:        addr,
 		Handler:     s.Handler(),
@@ -831,18 +1095,29 @@ func (s *Server) ListenAndServe() error {
 	s.httpSrv = srv
 	s.mu.Unlock()
 	log.Printf("Starting server at http://%s", addr)
-	return srv.ListenAndServe()
+	return srv.Serve(ln)
 }
 
-// Shutdown gracefully shuts down the HTTP server.
+// Shutdown gracefully shuts down the HTTP server, then closes the
+// server-owned on-demand sync engine (if one was lazily created) so
+// its pending debounced signal recomputes flush while the DB is
+// still open. Injected engines are closed by their owner.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.RLock()
 	srv := s.httpSrv
 	s.mu.RUnlock()
-	if srv == nil {
-		return nil
+	var err error
+	if srv != nil {
+		err = srv.Shutdown(ctx)
 	}
-	return srv.Shutdown(ctx)
+	s.mu.Lock()
+	engine := s.onDemandEngine
+	s.onDemandEngine = nil
+	s.mu.Unlock()
+	if engine != nil {
+		engine.Close()
+	}
+	return err
 }
 
 // FindAvailablePort finds an available port starting from the
@@ -900,7 +1175,7 @@ func corsMiddleware(
 				)
 				w.Header().Set(
 					"Access-Control-Allow-Headers",
-					"Content-Type, Authorization",
+					"Content-Type, Authorization, "+service.SemanticSearchIntentHeader,
 				)
 				if r.Method == http.MethodOptions {
 					w.WriteHeader(http.StatusNoContent)
@@ -937,7 +1212,7 @@ func corsMiddleware(
 			)
 			w.Header().Set(
 				"Access-Control-Allow-Headers",
-				"Content-Type, Authorization",
+				"Content-Type, Authorization, "+service.SemanticSearchIntentHeader,
 			)
 			if r.Method == http.MethodOptions {
 				if !safeForReads {

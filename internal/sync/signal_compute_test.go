@@ -1,11 +1,12 @@
 package sync
 
 import (
-	"reflect"
 	"testing"
 
-	"github.com/wesm/agentsview/internal/db"
-	"github.com/wesm/agentsview/internal/signals"
+	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/signals"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestExtractToolCallRows(t *testing.T) {
@@ -78,9 +79,7 @@ func TestExtractToolCallRows(t *testing.T) {
 			CallIndex:      0,
 		},
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("extractToolCallRows mismatch\n got = %+v\nwant = %+v", got, want)
-	}
+	assert.Equal(t, want, got)
 }
 
 func TestExtractContextTokens(t *testing.T) {
@@ -104,9 +103,7 @@ func TestExtractContextTokens(t *testing.T) {
 		{ContextTokens: 2000, HasContextTokens: true},
 		{ContextTokens: 0, HasContextTokens: false},
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("extractContextTokens mismatch\n got = %+v\nwant = %+v", got, want)
-	}
+	assert.Equal(t, want, got)
 }
 
 func TestExtractCompactBoundaryOrdinals(t *testing.T) {
@@ -119,13 +116,9 @@ func TestExtractCompactBoundaryOrdinals(t *testing.T) {
 	}
 	got := extractCompactBoundaryOrdinals(msgs)
 	want := []int{2, 4}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("extractCompactBoundaryOrdinals = %v, want %v", got, want)
-	}
+	assert.Equal(t, want, got)
 
-	if extractCompactBoundaryOrdinals(nil) != nil {
-		t.Error("extractCompactBoundaryOrdinals(nil) should return nil")
-	}
+	assert.Nil(t, extractCompactBoundaryOrdinals(nil), "extractCompactBoundaryOrdinals(nil) should return nil")
 }
 
 func TestExtractMostCommonModel(t *testing.T) {
@@ -136,22 +129,16 @@ func TestExtractMostCommonModel(t *testing.T) {
 		{Role: "assistant", Model: "claude-opus-4-6"},
 		{Role: "assistant", Model: ""}, // ignored
 	}
-	if got := extractMostCommonModel(msgs); got != "claude-sonnet-4-5" {
-		t.Errorf("extractMostCommonModel = %q, want claude-sonnet-4-5", got)
-	}
+	assert.Equal(t, "claude-sonnet-4-5", extractMostCommonModel(msgs))
 
 	// Tie broken by chronological-first.
 	tied := []db.Message{
 		{Role: "assistant", Model: "claude-sonnet-4-5"},
 		{Role: "assistant", Model: "claude-opus-4-6"},
 	}
-	if got := extractMostCommonModel(tied); got != "claude-sonnet-4-5" {
-		t.Errorf("tied: extractMostCommonModel = %q, want claude-sonnet-4-5", got)
-	}
+	assert.Equal(t, "claude-sonnet-4-5", extractMostCommonModel(tied), "tied")
 
-	if got := extractMostCommonModel(nil); got != "" {
-		t.Errorf("empty: extractMostCommonModel = %q, want empty", got)
-	}
+	assert.Empty(t, extractMostCommonModel(nil), "empty")
 }
 
 func TestExtractLastMessageRole(t *testing.T) {
@@ -162,14 +149,12 @@ func TestExtractLastMessageRole(t *testing.T) {
 		{Ordinal: 3, Role: "user", Content: "system noise", IsSystem: true},
 	}
 	role, content := extractLastMessageRole(msgs)
-	if role != "user" || content != "thanks" {
-		t.Errorf("extractLastMessageRole = (%q, %q), want (user, thanks)", role, content)
-	}
+	assert.Equal(t, "user", role)
+	assert.Equal(t, "thanks", content)
 
 	role, content = extractLastMessageRole(nil)
-	if role != "" || content != "" {
-		t.Errorf("nil case: got (%q, %q), want empty", role, content)
-	}
+	assert.Empty(t, role, "nil case role")
+	assert.Empty(t, content, "nil case content")
 }
 
 func TestComputeSignalsFromMessages_Errors(t *testing.T) {
@@ -210,30 +195,15 @@ func TestComputeSignalsFromMessages_Errors(t *testing.T) {
 
 	got := computeSignalsFromMessages(sess, msgs)
 
-	if !got.HasToolCalls {
-		t.Error("HasToolCalls = false, want true")
-	}
-	if !got.HasContextData {
-		t.Error("HasContextData = false, want true")
-	}
-	if got.ToolFailureSignalCount == 0 {
-		t.Error("ToolFailureSignalCount = 0, want > 0")
-	}
-	if got.FinalFailureStreak == 0 {
-		t.Errorf("FinalFailureStreak = 0, want > 0")
-	}
-	if got.HealthScore == nil {
-		t.Fatal("HealthScore is nil; want a value")
-	}
-	if *got.HealthScore >= 100 {
-		t.Errorf("HealthScore = %d, want < 100", *got.HealthScore)
-	}
-	if got.HealthGrade == nil || *got.HealthGrade == "" {
-		t.Errorf("HealthGrade = %v, want non-empty", got.HealthGrade)
-	}
-	if got.EndedWithRole != "assistant" {
-		t.Errorf("EndedWithRole = %q, want assistant", got.EndedWithRole)
-	}
+	assert.True(t, got.HasToolCalls, "HasToolCalls = false, want true")
+	assert.True(t, got.HasContextData, "HasContextData = false, want true")
+	assert.NotZero(t, got.ToolFailureSignalCount, "ToolFailureSignalCount = 0, want > 0")
+	assert.NotZero(t, got.FinalFailureStreak, "FinalFailureStreak = 0, want > 0")
+	require.NotNil(t, got.HealthScore, "HealthScore is nil; want a value")
+	assert.Less(t, *got.HealthScore, 100, "HealthScore = %d, want < 100", *got.HealthScore)
+	require.NotNil(t, got.HealthGrade, "HealthGrade = nil, want non-empty")
+	assert.NotEmpty(t, *got.HealthGrade, "HealthGrade = %v, want non-empty", got.HealthGrade)
+	assert.Equal(t, "assistant", got.EndedWithRole)
 }
 
 func TestComputeSignalsFromMessages_ExplicitBoundariesOverrideHeuristic(t *testing.T) {
@@ -247,7 +217,5 @@ func TestComputeSignalsFromMessages_ExplicitBoundariesOverrideHeuristic(t *testi
 		{Ordinal: 4, Role: "user", IsCompactBoundary: true},
 	}
 	got := computeSignalsFromMessages(sess, msgs)
-	if got.CompactionCount != 2 {
-		t.Errorf("CompactionCount = %d, want 2", got.CompactionCount)
-	}
+	assert.Equal(t, 2, got.CompactionCount)
 }

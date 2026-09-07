@@ -4,7 +4,7 @@ import {
   expect,
   vi,
   beforeEach,
-} from "vitest";
+} from "vite-plus/test";
 import { tick } from "svelte";
 import {
   SIDEBAR_WIDTH_DEFAULT,
@@ -17,8 +17,12 @@ import { ui } from "./ui.svelte.js";
 describe("UIStore", () => {
   beforeEach(() => {
     ui.activeModal = null;
+    ui.clearPublishTarget();
+    ui.publishSecret = false;
     ui.selectedOrdinal = null;
     ui.pendingScrollOrdinal = null;
+    ui.followLatest = false;
+    ui.followLatestRequest = 0;
   });
 
   describe("activeModal", () => {
@@ -40,6 +44,39 @@ describe("UIStore", () => {
 
       ui.activeModal = "publish";
       expect(ui.activeModal).toBe("publish");
+    });
+  });
+
+  describe("publishTarget", () => {
+    it("defaults to null", () => {
+      expect(ui.publishTarget).toBeNull();
+    });
+
+    it("stores the selected publish target", () => {
+      ui.setPublishTarget({ kind: "insight", id: 42 });
+      expect(ui.publishTarget).toEqual({
+        kind: "insight",
+        id: 42,
+      });
+    });
+
+    it("stores a selected session publish target", () => {
+      ui.setPublishTarget({ kind: "session", id: "sess-123" });
+      expect(ui.publishTarget).toEqual({
+        kind: "session",
+        id: "sess-123",
+      });
+    });
+
+    it("clears the publish target when publish modal closes", async () => {
+      ui.setPublishTarget({ kind: "insight", id: 42 });
+      ui.activeModal = "publish";
+      await tick();
+
+      ui.activeModal = null;
+      await tick();
+
+      expect(ui.publishTarget).toBeNull();
     });
   });
 
@@ -115,10 +152,187 @@ describe("UIStore", () => {
     });
   });
 
+  describe("followLatest", () => {
+    it("defaults to disabled", () => {
+      expect(ui.followLatest).toBe(false);
+    });
+
+    it("can be enabled and disabled", () => {
+      ui.setFollowLatest(true);
+      expect(ui.followLatest).toBe(true);
+
+      ui.setFollowLatest(false);
+      expect(ui.followLatest).toBe(false);
+    });
+
+    it("records a new request when already enabled", () => {
+      ui.setFollowLatest(true);
+      const first = ui.followLatestRequest;
+
+      ui.setFollowLatest(true);
+
+      expect(ui.followLatest).toBe(true);
+      expect(ui.followLatestRequest).toBe(first + 1);
+    });
+
+    it("toggles follow latest mode", () => {
+      ui.toggleFollowLatest();
+      expect(ui.followLatest).toBe(true);
+      expect(ui.followLatestRequest).toBe(1);
+
+      ui.toggleFollowLatest();
+      expect(ui.followLatest).toBe(false);
+      expect(ui.followLatestRequest).toBe(1);
+    });
+
+    it("is disabled when jumping to a specific ordinal", () => {
+      ui.setFollowLatest(true);
+      ui.scrollToOrdinal(10);
+
+      expect(ui.followLatest).toBe(false);
+      expect(ui.pendingScrollOrdinal).toBe(10);
+    });
+  });
+
+  describe("desktop zoom bridge", () => {
+    it("routes desktop zoom steps through the native webview bridge", async () => {
+      const tauriWindow = window as Window & {
+        __TAURI__?: unknown;
+      };
+      const originalUrl = window.location.href;
+      const hadTauri = Object.prototype.hasOwnProperty.call(
+        tauriWindow,
+        "__TAURI__",
+      );
+      const originalTauri = tauriWindow.__TAURI__;
+      const setZoom = vi.fn(() => Promise.resolve());
+      const getCurrentWebviewWindow = vi.fn(() => ({
+        setZoom,
+      }));
+
+      Object.defineProperty(tauriWindow, "__TAURI__", {
+        value: {
+          webviewWindow: {
+            getCurrentWebviewWindow,
+          },
+        },
+        writable: true,
+        configurable: true,
+      });
+      window.history.replaceState({}, "", "?desktop");
+
+      try {
+        // @ts-expect-error -- cache bust for fresh UIStore
+        const mod = await import("./ui.svelte.js?desktopZoomBridge");
+        await tick();
+        setZoom.mockClear();
+
+        mod.ui.zoomIn();
+        await tick();
+
+        expect(mod.ui.zoomLevel).toBe(110);
+        expect(getCurrentWebviewWindow).toHaveBeenCalled();
+        expect(setZoom).toHaveBeenLastCalledWith(1.1);
+
+        mod.ui.zoomOut();
+        await tick();
+
+        expect(mod.ui.zoomLevel).toBe(100);
+        expect(setZoom).toHaveBeenLastCalledWith(1);
+
+        mod.ui.zoomIn();
+        await tick();
+        mod.ui.resetZoom();
+        await tick();
+
+        expect(mod.ui.zoomLevel).toBe(100);
+        expect(setZoom).toHaveBeenLastCalledWith(1);
+      } finally {
+        window.history.replaceState({}, "", originalUrl);
+        if (hadTauri) {
+          Object.defineProperty(tauriWindow, "__TAURI__", {
+            value: originalTauri,
+            writable: true,
+            configurable: true,
+          });
+        } else {
+          delete tauriWindow.__TAURI__;
+        }
+      }
+    });
+
+    it("falls back to CSS zoom on desktop pages without the Tauri bridge", async () => {
+      const tauriWindow = window as Window & {
+        __TAURI__?: unknown;
+      };
+      const originalUrl = window.location.href;
+      const hadTauri = Object.prototype.hasOwnProperty.call(
+        tauriWindow,
+        "__TAURI__",
+      );
+      const originalTauri = tauriWindow.__TAURI__;
+      delete tauriWindow.__TAURI__;
+      window.history.replaceState({}, "", "?desktop");
+
+      try {
+        // @ts-expect-error -- cache bust for fresh UIStore
+        const mod = await import("./ui.svelte.js?desktopCssFallback");
+        mod.ui.zoomLevel = 200;
+        mod.ui.setFontScale(110);
+        await tick();
+
+        expect(
+          document.documentElement.style.getPropertyValue("zoom"),
+        ).toBe("2.2");
+      } finally {
+        window.history.replaceState({}, "", originalUrl);
+        if (hadTauri) {
+          Object.defineProperty(tauriWindow, "__TAURI__", {
+            value: originalTauri,
+            writable: true,
+            configurable: true,
+          });
+        }
+      }
+    });
+  });
+
   describe("theme initialization", () => {
     it("should fall back to light when stored theme is absent", () => {
       expect(ui.theme).toBeDefined();
       expect(["light", "dark"]).toContain(ui.theme);
+    });
+
+    it("migrates the legacy high-contrast key on module init", async () => {
+      const original = globalThis.localStorage;
+      const store = new Map<string, string>([
+        ["agentsview-high-contrast", "true"],
+      ]);
+      Object.defineProperty(globalThis, "localStorage", {
+        value: {
+          getItem: (key: string) => store.get(key) ?? null,
+          setItem: (key: string, value: string) => {
+            store.set(key, value);
+          },
+        },
+        writable: true,
+        configurable: true,
+      });
+      try {
+        // @ts-expect-error -- query string busts module cache
+        const mod = await import("./ui.svelte.js?hcMigration");
+        expect(store.get("theme-high-contrast")).toBe("true");
+        expect(mod.ui.highContrast).toBe(true);
+        // Reset the kit-ui singleton so later tests start from default state.
+        mod.ui.highContrast = false;
+      } finally {
+        document.documentElement.classList.remove("high-contrast");
+        Object.defineProperty(globalThis, "localStorage", {
+          value: original,
+          writable: true,
+          configurable: true,
+        });
+      }
     });
 
     it("should survive when localStorage.getItem is unavailable", async () => {
@@ -415,6 +629,92 @@ describe("UIStore", () => {
     });
   });
 
+  describe("Calls detail preference", () => {
+    it("defaults the Calls detail to expanded", async () => {
+      const original = globalThis.localStorage;
+      Object.defineProperty(globalThis, "localStorage", {
+        value: {
+          getItem: vi.fn(() => null),
+          setItem: vi.fn(),
+        },
+        writable: true,
+        configurable: true,
+      });
+
+      try {
+        // @ts-expect-error -- query string busts module cache
+        const mod = await import("./ui.svelte.js?vitalsCallsDefault");
+        expect(mod.ui.vitalsCallsExpanded).toBe(true);
+      } finally {
+        Object.defineProperty(globalThis, "localStorage", {
+          value: original,
+          writable: true,
+          configurable: true,
+        });
+      }
+    });
+
+    it("restores a collapsed Calls detail preference", async () => {
+      const original = globalThis.localStorage;
+      const setItem = vi.fn();
+      Object.defineProperty(globalThis, "localStorage", {
+        value: {
+          getItem: vi.fn((key: string) =>
+            key === "agentsview-session-vitals-calls-expanded"
+              ? "false"
+              : null,
+          ),
+          setItem,
+        },
+        writable: true,
+        configurable: true,
+      });
+
+      try {
+        // @ts-expect-error -- query string busts module cache
+        const mod = await import("./ui.svelte.js?vitalsCallsCollapsed");
+        expect(mod.ui.vitalsCallsExpanded).toBe(false);
+      } finally {
+        Object.defineProperty(globalThis, "localStorage", {
+          value: original,
+          writable: true,
+          configurable: true,
+        });
+      }
+    });
+
+    it("persists Calls detail changes", async () => {
+      const original = globalThis.localStorage;
+      const setItem = vi.fn();
+      Object.defineProperty(globalThis, "localStorage", {
+        value: { getItem: vi.fn(() => null), setItem },
+        writable: true,
+        configurable: true,
+      });
+
+      try {
+        // @ts-expect-error -- query string busts module cache
+        const mod = await import("./ui.svelte.js?vitalsCallsPersist");
+        setItem.mockClear();
+
+        mod.ui.toggleVitalsCalls();
+        await tick();
+
+        expect(mod.ui.vitalsCallsExpanded).toBe(false);
+        expect(setItem).toHaveBeenCalledWith(
+          "periscope-session-vitals-calls-expanded",
+          "false",
+        );
+      } finally {
+        Object.defineProperty(globalThis, "localStorage", {
+          value: original,
+          writable: true,
+          configurable: true,
+        });
+      }
+    });
+  });
+
   describe("postMessage theme control", () => {
     it("should change theme on valid theme:set message", () => {
       ui.theme = "light";
@@ -537,8 +837,10 @@ describe("UIStore", () => {
 
     it("should initialize sidebar closed on narrow viewport", async () => {
       const originalMatchMedia = window.matchMedia;
+      // The store watches kit-ui's MEDIA.medium (max-width: 760px), so a
+      // matching query means a narrow viewport.
       window.matchMedia = vi.fn().mockReturnValue({
-        matches: false,
+        matches: true,
         addEventListener: vi.fn(),
         removeEventListener: vi.fn(),
       }) as unknown as typeof window.matchMedia;
@@ -554,8 +856,9 @@ describe("UIStore", () => {
 
     it("should initialize sidebar open on wide viewport", async () => {
       const originalMatchMedia = window.matchMedia;
+      // max-width: 760px does not match on a wide viewport.
       window.matchMedia = vi.fn().mockReturnValue({
-        matches: true,
+        matches: false,
         addEventListener: vi.fn(),
         removeEventListener: vi.fn(),
       }) as unknown as typeof window.matchMedia;
@@ -596,6 +899,9 @@ describe("UIStore", () => {
       expect(ui.messageLayout).toBe("stream");
 
       ui.cycleLayout();
+      expect(ui.messageLayout).toBe("skim");
+
+      ui.cycleLayout();
       expect(ui.messageLayout).toBe("default");
     });
   });
@@ -632,7 +938,7 @@ describe("UIStore", () => {
         mod.ui.setTranscriptMode("focused");
         await Promise.resolve();
         expect(setItem).toHaveBeenLastCalledWith(
-          "agentsview-transcript-mode",
+          "periscope-transcript-mode",
           "focused",
         );
       } finally {
@@ -664,6 +970,217 @@ describe("UIStore", () => {
         const mod = await import("./ui.svelte.js?badTranscriptMode");
         expect(mod.ui.transcriptMode).toBe("normal");
       } finally {
+        Object.defineProperty(globalThis, "localStorage", {
+          value: original,
+          writable: true,
+          configurable: true,
+        });
+      }
+    });
+  });
+
+  describe("fontScale", () => {
+    beforeEach(() => {
+      ui.setFontScale(100);
+    });
+
+    it("defaults to 100", () => {
+      expect(ui.fontScale).toBe(100);
+    });
+
+    it("sets a valid step", () => {
+      ui.setFontScale(130);
+      expect(ui.fontScale).toBe(130);
+    });
+
+    it("ignores values outside the allowed steps", () => {
+      ui.setFontScale(120);
+      ui.setFontScale(145);
+      expect(ui.fontScale).toBe(120);
+      ui.setFontScale(0);
+      expect(ui.fontScale).toBe(120);
+    });
+
+    it("applies font scale as root zoom on web", async () => {
+      const original = globalThis.localStorage;
+      Object.defineProperty(globalThis, "localStorage", {
+        value: { getItem: vi.fn(() => null), setItem: vi.fn() },
+        writable: true,
+        configurable: true,
+      });
+      try {
+        // @ts-expect-error -- query string busts module cache
+        const mod = await import("./ui.svelte.js?webFontScale");
+        mod.ui.setFontScale(110);
+        await tick();
+        expect(
+          document.documentElement.style.getPropertyValue("zoom"),
+        ).toBe("1.1");
+      } finally {
+        Object.defineProperty(globalThis, "localStorage", {
+          value: original,
+          writable: true,
+          configurable: true,
+        });
+      }
+    });
+
+    it("composes desktop window zoom with font scale", async () => {
+      const original = globalThis.localStorage;
+      const tauriWindow = window as Window & {
+        __TAURI__?: unknown;
+      };
+      const hadTauri = Object.prototype.hasOwnProperty.call(
+        tauriWindow,
+        "__TAURI__",
+      );
+      const originalTauri = tauriWindow.__TAURI__;
+      const setZoom = vi.fn(() => Promise.resolve());
+      Object.defineProperty(globalThis, "localStorage", {
+        value: { getItem: vi.fn(() => null), setItem: vi.fn() },
+        writable: true,
+        configurable: true,
+      });
+      Object.defineProperty(tauriWindow, "__TAURI__", {
+        value: {
+          webviewWindow: {
+            getCurrentWebviewWindow: () => ({
+              setZoom,
+            }),
+          },
+        },
+        writable: true,
+        configurable: true,
+      });
+      window.history.replaceState({}, "", "/?desktop");
+      try {
+        // @ts-expect-error -- query string busts module cache
+        const mod = await import("./ui.svelte.js?desktopCompose");
+        mod.ui.zoomLevel = 200;
+        mod.ui.setFontScale(110);
+        await tick();
+        expect(
+          document.documentElement.style.getPropertyValue("zoom"),
+        ).toBe("1.1");
+        expect(setZoom).toHaveBeenLastCalledWith(2);
+      } finally {
+        window.history.replaceState({}, "", "/");
+        Object.defineProperty(globalThis, "localStorage", {
+          value: original,
+          writable: true,
+          configurable: true,
+        });
+        if (hadTauri) {
+          Object.defineProperty(tauriWindow, "__TAURI__", {
+            value: originalTauri,
+            writable: true,
+            configurable: true,
+          });
+        } else {
+          delete tauriWindow.__TAURI__;
+        }
+      }
+    });
+
+    it("persists font scale changes", async () => {
+      const original = globalThis.localStorage;
+      const setItem = vi.fn();
+      Object.defineProperty(globalThis, "localStorage", {
+        value: { getItem: vi.fn(() => null), setItem },
+        writable: true,
+        configurable: true,
+      });
+      try {
+        // @ts-expect-error -- query string busts module cache
+        const mod = await import("./ui.svelte.js?persistFontScale");
+        setItem.mockClear();
+        mod.ui.setFontScale(120);
+        await tick();
+        expect(setItem).toHaveBeenCalledWith(
+          "periscope-font-scale",
+          "120",
+        );
+      } finally {
+        Object.defineProperty(globalThis, "localStorage", {
+          value: original,
+          writable: true,
+          configurable: true,
+        });
+      }
+    });
+
+    it("falls back to 100 for an invalid stored font scale", async () => {
+      const original = globalThis.localStorage;
+      Object.defineProperty(globalThis, "localStorage", {
+        value: {
+          getItem: vi.fn((key: string) =>
+            key === "agentsview-font-scale" ? "145" : null,
+          ),
+          setItem: vi.fn(),
+        },
+        writable: true,
+        configurable: true,
+      });
+      try {
+        // @ts-expect-error -- query string busts module cache
+        const mod = await import("./ui.svelte.js?badFontScale");
+        expect(mod.ui.fontScale).toBe(100);
+      } finally {
+        Object.defineProperty(globalThis, "localStorage", {
+          value: original,
+          writable: true,
+          configurable: true,
+        });
+      }
+    });
+  });
+
+  describe("highContrast", () => {
+    beforeEach(() => {
+      if (ui.highContrast) ui.toggleHighContrast();
+    });
+
+    it("defaults to false", () => {
+      expect(ui.highContrast).toBe(false);
+    });
+
+    it("toggles the value", () => {
+      ui.toggleHighContrast();
+      expect(ui.highContrast).toBe(true);
+      ui.toggleHighContrast();
+      expect(ui.highContrast).toBe(false);
+    });
+
+    it("toggles the root class and persists", async () => {
+      const original = globalThis.localStorage;
+      const setItem = vi.fn();
+      Object.defineProperty(globalThis, "localStorage", {
+        value: { getItem: vi.fn(() => null), setItem },
+        writable: true,
+        configurable: true,
+      });
+      try {
+        // @ts-expect-error -- query string busts module cache
+        const mod = await import("./ui.svelte.js?highContrastToggle");
+        setItem.mockClear();
+        mod.ui.toggleHighContrast();
+        await tick();
+        expect(
+          document.documentElement.classList.contains("high-contrast"),
+        ).toBe(true);
+        // kit-ui's theme store persists high contrast under the key derived
+        // from the app's "theme" storage key.
+        expect(setItem).toHaveBeenCalledWith(
+          "theme-high-contrast",
+          "true",
+        );
+        mod.ui.toggleHighContrast();
+        await tick();
+        expect(
+          document.documentElement.classList.contains("high-contrast"),
+        ).toBe(false);
+      } finally {
+        document.documentElement.classList.remove("high-contrast");
         Object.defineProperty(globalThis, "localStorage", {
           value: original,
           writable: true,

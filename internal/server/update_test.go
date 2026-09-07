@@ -4,9 +4,11 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wesm/agentsview/internal/config"
-	"github.com/wesm/agentsview/internal/server"
-	"github.com/wesm/agentsview/internal/update"
+	"github.com/stretchr/testify/assert"
+
+	"go.kenn.io/agentsview/internal/config"
+	"go.kenn.io/agentsview/internal/server"
+	"go.kenn.io/agentsview/internal/update"
 )
 
 func stubChecker(
@@ -33,15 +35,8 @@ func TestCheckUpdateUpToDate(t *testing.T) {
 	assertStatus(t, w, 200)
 
 	resp := decode[updateCheckResp](t, w)
-	if resp.CurrentVersion != "v1.0.0" {
-		t.Errorf(
-			"current_version = %q, want %q",
-			resp.CurrentVersion, "v1.0.0",
-		)
-	}
-	if resp.UpdateAvailable {
-		t.Error("expected update_available=false when up to date")
-	}
+	assert.Equal(t, "v1.0.0", resp.CurrentVersion)
+	assert.False(t, resp.UpdateAvailable, "expected update_available=false when up to date")
 }
 
 func TestCheckUpdateAvailable(t *testing.T) {
@@ -66,21 +61,9 @@ func TestCheckUpdateAvailable(t *testing.T) {
 	assertStatus(t, w, 200)
 
 	resp := decode[updateCheckResp](t, w)
-	if !resp.UpdateAvailable {
-		t.Error("expected update_available=true")
-	}
-	if resp.LatestVersion != "v1.0.0" {
-		t.Errorf(
-			"latest_version = %q, want %q",
-			resp.LatestVersion, "v1.0.0",
-		)
-	}
-	if resp.CurrentVersion != "v0.9.0" {
-		t.Errorf(
-			"current_version = %q, want %q",
-			resp.CurrentVersion, "v0.9.0",
-		)
-	}
+	assert.True(t, resp.UpdateAvailable)
+	assert.Equal(t, "v1.0.0", resp.LatestVersion)
+	assert.Equal(t, "v0.9.0", resp.CurrentVersion)
 }
 
 func TestCheckUpdateDevBuild(t *testing.T) {
@@ -106,20 +89,9 @@ func TestCheckUpdateDevBuild(t *testing.T) {
 	assertStatus(t, w, 200)
 
 	resp := decode[updateCheckResp](t, w)
-	if resp.UpdateAvailable {
-		t.Error(
-			"expected update_available=false for dev build",
-		)
-	}
-	if !resp.IsDevBuild {
-		t.Error("expected is_dev_build=true")
-	}
-	if resp.CurrentVersion != "dev" {
-		t.Errorf(
-			"current_version = %q, want %q",
-			resp.CurrentVersion, "dev",
-		)
-	}
+	assert.False(t, resp.UpdateAvailable, "expected update_available=false for dev build")
+	assert.True(t, resp.IsDevBuild)
+	assert.Equal(t, "dev", resp.CurrentVersion)
 }
 
 func TestCheckUpdateError(t *testing.T) {
@@ -140,17 +112,8 @@ func TestCheckUpdateError(t *testing.T) {
 	assertStatus(t, w, 200)
 
 	resp := decode[updateCheckResp](t, w)
-	if resp.CurrentVersion != "v1.0.0" {
-		t.Errorf(
-			"current_version = %q, want %q",
-			resp.CurrentVersion, "v1.0.0",
-		)
-	}
-	if resp.UpdateAvailable {
-		t.Error(
-			"expected update_available=false on error",
-		)
-	}
+	assert.Equal(t, "v1.0.0", resp.CurrentVersion)
+	assert.False(t, resp.UpdateAvailable, "expected update_available=false on error")
 }
 
 func TestCheckUpdateDisabled(t *testing.T) {
@@ -177,17 +140,8 @@ func TestCheckUpdateDisabled(t *testing.T) {
 	assertStatus(t, w, 200)
 
 	resp := decode[updateCheckResp](t, w)
-	if resp.UpdateAvailable {
-		t.Error(
-			"expected update_available=false when disabled",
-		)
-	}
-	if resp.CurrentVersion != "v1.0.0" {
-		t.Errorf(
-			"current_version = %q, want %q",
-			resp.CurrentVersion, "v1.0.0",
-		)
-	}
+	assert.False(t, resp.UpdateAvailable, "expected update_available=false when disabled")
+	assert.Equal(t, "v1.0.0", resp.CurrentVersion)
 }
 
 type updateCheckResp struct {

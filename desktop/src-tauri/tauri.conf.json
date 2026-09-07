@@ -2,11 +2,12 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Periscope",
   "version": "0.12.1",
-  "identifier": "io.agentsview.desktop",
+  "identifier": "io.latentsignal.periscope",
   "build": {
     "frontendDist": "../ui"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",
@@ -16,22 +17,23 @@
         "minWidth": 1024,
         "minHeight": 700,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "zoomHotkeysEnabled": false
       }
     ],
     "security": {
-      "csp": "default-src 'self' http://127.0.0.1:* http://localhost:*; script-src 'self' http://127.0.0.1:* http://localhost:*; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; img-src 'self' data: http://127.0.0.1:* http://localhost:*; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com http://127.0.0.1:* http://localhost:*; font-src 'self' data: https://fonts.gstatic.com http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+      "csp": "default-src 'self' http://127.0.0.1:* http://localhost:*; script-src 'self' http://127.0.0.1:* http://localhost:*; connect-src 'self' http: https: ws: wss:; img-src 'self' data: http://127.0.0.1:* http://localhost:*; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com http://127.0.0.1:* http://localhost:*; font-src 'self' data: https://fonts.gstatic.com http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "copyright": "Copyright 2026 Wes McKinney",
+    "copyright": "Copyright 2026 Kenn Software LLC",
     "shortDescription": "Local viewer for AI agent sessions",
     "longDescription": "Periscope is a local web viewer for AI agent coding sessions.",
     "createUpdaterArtifacts": "v1Compatible",
     "externalBin": [
-      "binaries/agentsview"
+      "binaries/periscope"
     ],
     "icon": [
       "icons/32x32.png",
@@ -49,7 +51,7 @@
     "updater": {
       "pubkey": "NOT_SET",
       "endpoints": [
-        "https://github.com/wesm/agentsview/releases/download/updater/latest.json"
+        "https://github.com/diazMelgarejo/periscope/releases/download/updater/latest.json"
       ]
     }
   }

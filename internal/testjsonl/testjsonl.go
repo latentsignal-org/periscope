@@ -98,6 +98,24 @@ func ClaudeAssistantJSON(content any, timestamp string) string {
 	return mustMarshal(m)
 }
 
+// ClaudeQueuedCommandJSON returns a Claude attachment entry of
+// type queued_command — a user message typed and submitted while
+// Claude Code was mid-tool-call.
+func ClaudeQueuedCommandJSON(
+	prompt, timestamp string,
+) string {
+	m := map[string]any{
+		"type":      "attachment",
+		"timestamp": timestamp,
+		"attachment": map[string]any{
+			"type":        "queued_command",
+			"commandMode": "prompt",
+			"prompt":      prompt,
+		},
+	}
+	return mustMarshal(m)
+}
+
 // ClaudeSnapshotJSON returns a Claude snapshot message as a
 // JSON string.
 func ClaudeSnapshotJSON(timestamp string) string {
@@ -125,6 +143,117 @@ func CodexSessionMetaJSON(
 			"id":         id,
 			"cwd":        cwd,
 			"originator": originator,
+		},
+	}
+	return mustMarshal(m)
+}
+
+// CodexSubagentSessionMetaJSON returns the session_meta shape written by
+// current Codex multi-agent rollouts.
+func CodexSubagentSessionMetaJSON(
+	id, parentID, cwd, originator, timestamp string,
+) string {
+	m := map[string]any{
+		"type":      "session_meta",
+		"timestamp": timestamp,
+		"payload": map[string]any{
+			"id":               id,
+			"cwd":              cwd,
+			"originator":       originator,
+			"agent_nickname":   "worker",
+			"agent_path":       "/root/worker",
+			"parent_thread_id": parentID,
+			"session_id":       parentID,
+			"thread_source":    "subagent",
+			"source": map[string]any{
+				"subagent": map[string]any{
+					"thread_spawn": map[string]any{
+						"parent_thread_id": parentID,
+						"depth":            1,
+						"agent_nickname":   "worker",
+						"agent_path":       "/root/worker",
+					},
+				},
+			},
+		},
+	}
+	return mustMarshal(m)
+}
+
+// CodexAgentMessageJSON returns a current Codex inter-agent message. Codex
+// stores the delivered task in the encrypted_content field even when its
+// value is plaintext.
+func CodexAgentMessageJSON(
+	author, recipient, visibleContent, deliveredContent, timestamp string,
+) string {
+	m := map[string]any{
+		"type":      "response_item",
+		"timestamp": timestamp,
+		"payload": map[string]any{
+			"type":      "agent_message",
+			"author":    author,
+			"recipient": recipient,
+			"content": []map[string]any{
+				{
+					"type": "input_text",
+					"text": visibleContent,
+				},
+				{
+					"type":              "encrypted_content",
+					"encrypted_content": deliveredContent,
+				},
+			},
+		},
+	}
+	return mustMarshal(m)
+}
+
+// CodexSubagentActivityJSON returns a current Codex sub-agent lifecycle event.
+func CodexSubagentActivityJSON(
+	kind, eventID, agentThreadID, agentPath, timestamp string,
+) string {
+	m := map[string]any{
+		"type":      "event_msg",
+		"timestamp": timestamp,
+		"payload": map[string]any{
+			"type":            "sub_agent_activity",
+			"kind":            kind,
+			"event_id":        eventID,
+			"agent_thread_id": agentThreadID,
+			"agent_path":      agentPath,
+		},
+	}
+	return mustMarshal(m)
+}
+
+// CodexForkedSessionMetaJSON returns the session_meta of a forked
+// Codex session (payload carries forked_from_id).
+func CodexForkedSessionMetaJSON(
+	id, forkedFromID, cwd, originator, timestamp string,
+) string {
+	m := map[string]any{
+		"type":      "session_meta",
+		"timestamp": timestamp,
+		"payload": map[string]any{
+			"id":             id,
+			"forked_from_id": forkedFromID,
+			"cwd":            cwd,
+			"originator":     originator,
+		},
+	}
+	return mustMarshal(m)
+}
+
+// CodexTurnContextWithIDJSON returns a Codex turn_context entry
+// carrying a turn_id, as newer CLI versions write.
+func CodexTurnContextWithIDJSON(model, turnID, timestamp string) string {
+	m := map[string]any{
+		"type":      "turn_context",
+		"timestamp": timestamp,
+		"payload": map[string]any{
+			"model":   model,
+			"cwd":     "/tmp",
+			"turn_id": turnID,
 		},
 	}
 	return mustMarshal(m)

@@ -5,6 +5,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLaunchResumeDarwinGhosttyDirectCli(t *testing.T) {
@@ -19,17 +22,12 @@ func TestLaunchResumeDarwinGhosttyDirectCli(t *testing.T) {
 		"cursor agent --resume chat-1",
 		cwd,
 	)
-	if proc == nil {
-		t.Fatal("launchResumeDarwin returned nil")
-	}
-	if strings.HasSuffix(proc.Args[0], "osascript") {
-		t.Fatalf("expected direct CLI, got osascript: %v",
-			proc.Args)
-	}
+	require.NotNil(t, proc, "launchResumeDarwin returned nil")
+	assert.False(t, strings.HasSuffix(proc.Args[0], "osascript"),
+		"expected direct CLI, got osascript: %v", proc.Args)
 	wantWD := "--working-directory=" + cwd
-	if !sliceContains(proc.Args, wantWD) {
-		t.Fatalf("missing %q in args: %v", wantWD, proc.Args)
-	}
+	assert.True(t, sliceContains(proc.Args, wantWD),
+		"missing %q in args: %v", wantWD, proc.Args)
 }
 
 func TestLaunchResumeDarwinGhosttyAppBundle(t *testing.T) {
@@ -44,21 +42,15 @@ func TestLaunchResumeDarwinGhosttyAppBundle(t *testing.T) {
 		"cursor agent --resume chat-1",
 		cwd,
 	)
-	if proc == nil {
-		t.Fatal("launchResumeDarwin returned nil")
-	}
+	require.NotNil(t, proc, "launchResumeDarwin returned nil")
 	// App bundle wraps with `open -na`.
-	if !strings.HasSuffix(proc.Args[0], "open") {
-		t.Fatalf("expected open for app bundle, got %q",
-			proc.Args[0])
-	}
-	if !sliceContains(proc.Args, "-na") {
-		t.Fatalf("missing -na flag: %v", proc.Args)
-	}
+	assert.True(t, strings.HasSuffix(proc.Args[0], "open"),
+		"expected open for app bundle, got %q", proc.Args[0])
+	assert.True(t, sliceContains(proc.Args, "-na"),
+		"missing -na flag: %v", proc.Args)
 	wantWD := "--working-directory=" + cwd
-	if !sliceContains(proc.Args, wantWD) {
-		t.Fatalf("missing %q in args: %v", wantWD, proc.Args)
-	}
+	assert.True(t, sliceContains(proc.Args, wantWD),
+		"missing %q in args: %v", wantWD, proc.Args)
 }
 
 func TestLaunchResumeDarwinGhosttyNoCwd(t *testing.T) {
@@ -72,14 +64,10 @@ func TestLaunchResumeDarwinGhosttyNoCwd(t *testing.T) {
 		"cursor agent --resume chat-1",
 		"",
 	)
-	if proc == nil {
-		t.Fatal("launchResumeDarwin returned nil")
-	}
+	require.NotNil(t, proc, "launchResumeDarwin returned nil")
 	for _, arg := range proc.Args {
-		if strings.HasPrefix(arg, "--working-directory") {
-			t.Fatalf("unexpected --working-directory with empty cwd: %v",
-				proc.Args)
-		}
+		assert.False(t, strings.HasPrefix(arg, "--working-directory"),
+			"unexpected --working-directory with empty cwd: %v", proc.Args)
 	}
 }
 
@@ -97,17 +85,12 @@ func TestLaunchTerminalInDirGhosttyDirectCliOnDarwin(t *testing.T) {
 		},
 		dir,
 	)
-	if proc == nil {
-		t.Fatal("launchTerminalInDir returned nil")
-	}
-	if strings.HasSuffix(proc.Args[0], "osascript") {
-		t.Fatalf("expected direct launch, got osascript: %v",
-			proc.Args)
-	}
+	require.NotNil(t, proc, "launchTerminalInDir returned nil")
+	assert.False(t, strings.HasSuffix(proc.Args[0], "osascript"),
+		"expected direct launch, got osascript: %v", proc.Args)
 	wantWD := "--working-directory=" + dir
-	if !sliceContains(proc.Args, wantWD) {
-		t.Fatalf("missing %q in args: %v", wantWD, proc.Args)
-	}
+	assert.True(t, sliceContains(proc.Args, wantWD),
+		"missing %q in args: %v", wantWD, proc.Args)
 }
 
 func sliceContains(ss []string, s string) bool {

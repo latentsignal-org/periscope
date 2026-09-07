@@ -85,8 +85,8 @@ Key assumptions reviewers MUST account for:
     depends on it.
 
 16. INSIGHT AGENT SANDBOXING: Not all agent CLIs offer equal
-    sandboxing. Claude (--tools ""), Codex (--sandbox read-only), and
-    Gemini (--sandbox) have verified no-tools/read-only modes.
+   sandboxing. Claude (--tools "") and Codex (--sandbox read-only)
+   have verified no-tools/read-only modes. Gemini currently does not.
     Copilot only supports --disable-builtin-mcps (blocks MCP tools
     but not all tool use). Kiro CLI uses --trust-tools= and
     --no-interactive (disables tool trust prompts but does not
@@ -96,6 +96,35 @@ Key assumptions reviewers MUST account for:
     run insight generation with agents they trust — the same trust
     model as running agents on codebases. Do not flag Copilot's or
     Kiro's sandboxing as insufficient.
+
+17. POSTGRES PARITY: agentsview supports both SQLite (default) and
+    PostgreSQL (via `pg push` / `pg serve`) as the session store.
+    Any schema or read/write change to the SQLite session model
+    must be mirrored on the PG side. Reviewers should check that
+    new sessions columns are added to:
+      - internal/postgres/schema.go (CREATE TABLE + idempotent
+        ALTER TABLE migration in EnsureSchema)
+      - internal/postgres/sessions.go (pgSessionCols, scanPGSession)
+      - internal/postgres/push.go (INSERT column list + placeholders,
+        ON CONFLICT DO UPDATE SET, the IS DISTINCT FROM predicate,
+        the args slice, AND sessionPushFingerprint — a column missing
+        from the fingerprint will silently skip pushes when only that
+        column changed)
+      - CheckSchemaCompat probe (any column required for reads)
+    Filter logic that runs against both backends (e.g. activity-
+    window predicates) must use the same constants/semantics in
+    both internal/db/ and internal/postgres/. DO flag SQLite-only
+    changes to the session model that don't have a matching PG
+    update, and DO flag new session columns missing from
+    sessionPushFingerprint.
+
+18. GO VERSION: This project pins Go 1.26+ in go.mod. Go 1.26
+    added value-form `new(v)` which returns `*T` pointing to v —
+    e.g. `new("clean")` is valid and yields a `*string`
+    initialized to "clean". DO NOT flag value-form `new` calls as
+    "new requires a type" compile errors; that was true through
+    1.25 only. Verify the go.mod toolchain version before
+    flagging unfamiliar-looking language features.
 
 Do NOT flag issues that only apply to public-facing, multi-tenant,
 or internet-exposed services. Focus on bugs, logic errors, data

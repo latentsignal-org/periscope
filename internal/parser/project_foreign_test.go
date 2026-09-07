@@ -3,12 +3,14 @@ package parser
 import (
 	"errors"
 	"os"
-	"reflect"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // autofsTestsSupported reports whether the running OS uses POSIX
@@ -44,16 +46,12 @@ func TestExtractProjectFromCwd_AutofsUnresolved_SkipsWalk(t *testing.T) {
 	}
 
 	cwd := "/home/wes/code/example-project"
-	want := "example_project"
 	got := ExtractProjectFromCwdWithBranch(cwd, "")
-	if got != want {
-		t.Errorf("ExtractProjectFromCwdWithBranch(%q) = %q, want %q",
-			cwd, got, want)
-	}
-	if n := count.Load(); n != 1 {
-		t.Errorf("osStat called %d times for unresolved autofs cwd "+
-			"%q; expected 1 (probe only, walk skipped)", n, cwd)
-	}
+	assert.Equal(t, "example_project", got,
+		"ExtractProjectFromCwdWithBranch(%q)", cwd)
+	assert.Equal(t, int64(1), count.Load(),
+		"osStat call count for unresolved autofs cwd "+
+			"%q; expected 1 (probe only, walk skipped)", cwd)
 }
 
 // TestExtractProjectFromCwd_AutofsUnresolved_ProbeCached checks
@@ -83,10 +81,8 @@ func TestExtractProjectFromCwd_AutofsUnresolved_ProbeCached(t *testing.T) {
 	} {
 		_ = ExtractProjectFromCwdWithBranch(cwd, "")
 	}
-	if n := count.Load(); n != 1 {
-		t.Errorf("osStat called %d times across 3 cwds sharing "+
-			"/home/wes; expected 1 (cached probe)", n)
-	}
+	assert.Equal(t, int64(1), count.Load(),
+		"osStat calls across 3 cwds sharing /home/wes; expected 1 (cached probe)")
 }
 
 // TestExtractProjectFromCwd_AutofsResolved_Walks is the regression
@@ -107,9 +103,7 @@ func TestExtractProjectFromCwd_AutofsResolved_Walks(t *testing.T) {
 	// when the probe "resolves".
 	realDir := t.TempDir()
 	realInfo, err := os.Stat(realDir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	orig := osStat
 	defer func() { osStat = orig }()
@@ -124,10 +118,9 @@ func TestExtractProjectFromCwd_AutofsResolved_Walks(t *testing.T) {
 
 	cwd := "/home/wes/code/example"
 	_ = ExtractProjectFromCwdWithBranch(cwd, "")
-	if n := count.Load(); n < 2 {
-		t.Errorf("with resolving autofs probe, expected the walk "+
-			"to stat multiple paths (probe + walk); got %d", n)
-	}
+	assert.GreaterOrEqual(t, count.Load(), int64(2),
+		"with resolving autofs probe, expected the walk "+
+			"to stat multiple paths (probe + walk)")
 }
 
 // TestExtractProjectFromCwd_NativePath_StillWalks confirms that
@@ -152,10 +145,9 @@ func TestExtractProjectFromCwd_NativePath_StillWalks(t *testing.T) {
 
 	cwd := "/Users/nobody-agentsview-test/code/example"
 	_ = ExtractProjectFromCwdWithBranch(cwd, "")
-	if count.Load() == 0 {
-		t.Errorf("osStat never called for %q; "+
+	assert.NotZero(t, count.Load(),
+		"osStat never called for %q; "+
 			"git-root walk should run for non-autofs paths", cwd)
-	}
 }
 
 // TestExtractProjectFromCwd_HomePathWithoutAutofs_StillWalks covers
@@ -181,10 +173,9 @@ func TestExtractProjectFromCwd_HomePathWithoutAutofs_StillWalks(t *testing.T) {
 
 	cwd := "/home/nobody-agentsview-test/code/example"
 	_ = ExtractProjectFromCwdWithBranch(cwd, "")
-	if count.Load() == 0 {
-		t.Errorf("osStat never called for /home path with empty " +
+	assert.NotZero(t, count.Load(),
+		"osStat never called for /home path with empty "+
 			"autofs config; walk must proceed for a real mount")
-	}
 }
 
 // TestParseMountOutputForAutofs exercises the pure mount-output
@@ -209,10 +200,7 @@ server.example:/export on /corp/home (autofs, nobrowse)
 		"/Network/Servers/",
 		"/corp/home/",
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("parseMountOutputForAutofs() = %v, want %v",
-			got, want)
-	}
+	assert.Equal(t, want, got, "parseMountOutputForAutofs()")
 }
 
 // TestDetectAutofsPrefixes uses the injectable mount source so the
@@ -231,16 +219,11 @@ func TestDetectAutofsPrefixes(t *testing.T) {
 
 	got := detectAutofsPrefixes()
 	if runtime.GOOS != "darwin" {
-		if got != nil {
-			t.Errorf("detectAutofsPrefixes() = %v on %s, want nil",
-				got, runtime.GOOS)
-		}
+		assert.Nil(t, got, "detectAutofsPrefixes() on %s", runtime.GOOS)
 		return
 	}
 	want := []string{"/home/", "/Network/Servers/"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("detectAutofsPrefixes() = %v, want %v", got, want)
-	}
+	assert.Equal(t, want, got, "detectAutofsPrefixes()")
 }
 
 // TestExtractProjectFromCwd_AutofsConcurrent_SingleProbe exercises
@@ -288,11 +271,9 @@ func TestExtractProjectFromCwd_AutofsConcurrent_SingleProbe(t *testing.T) {
 	close(release)
 	done.Wait()
 
-	if n := count.Load(); n != 1 {
-		t.Errorf("concurrent probes issued %d osStat calls; "+
-			"expected exactly 1 under %d-way concurrency",
-			n, workers)
-	}
+	assert.Equal(t, int64(1), count.Load(),
+		"concurrent probes issued osStat calls; "+
+			"expected exactly 1 under %d-way concurrency", workers)
 }
 
 // TestExtractProjectFromCwd_AutofsProbe_TTLExpires guards against
@@ -325,23 +306,17 @@ func TestExtractProjectFromCwd_AutofsProbe_TTLExpires(t *testing.T) {
 
 	cwd := "/home/wes/code/proj"
 	_ = ExtractProjectFromCwdWithBranch(cwd, "")
-	if n := count.Load(); n != 1 {
-		t.Fatalf("first call: expected 1 osStat, got %d", n)
-	}
+	require.Equal(t, int64(1), count.Load(), "first call")
 
 	// Within TTL — cached, no new probe.
 	current = current.Add(autofsProbeTTL / 2)
 	_ = ExtractProjectFromCwdWithBranch(cwd, "")
-	if n := count.Load(); n != 1 {
-		t.Fatalf("within TTL: expected still 1 osStat, got %d", n)
-	}
+	require.Equal(t, int64(1), count.Load(), "within TTL")
 
 	// Past TTL — re-probe.
 	current = current.Add(autofsProbeTTL + time.Second)
 	_ = ExtractProjectFromCwdWithBranch(cwd, "")
-	if n := count.Load(); n != 2 {
-		t.Errorf("past TTL: expected 2 osStat calls, got %d", n)
-	}
+	assert.Equal(t, int64(2), count.Load(), "past TTL")
 }
 
 // TestDetectAutofsPrefixes_MountFails confirms that a mount(8)
@@ -353,8 +328,5 @@ func TestDetectAutofsPrefixes_MountFails(t *testing.T) {
 	autofsMountSource = func() ([]byte, error) {
 		return nil, errors.New("mock mount failure")
 	}
-	if got := detectAutofsPrefixes(); got != nil {
-		t.Errorf("detectAutofsPrefixes() with mount failure = %v, "+
-			"want nil", got)
-	}
+	assert.Nil(t, detectAutofsPrefixes(), "detectAutofsPrefixes() with mount failure")
 }

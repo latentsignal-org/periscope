@@ -2,10 +2,15 @@ import { test, expect } from "@playwright/test";
 import {
   createMockSessions,
   handleSessionsRoute,
+  sessionsRoutePattern,
 } from "./helpers/mock-sessions";
+import {
+  ITEM_HEIGHT,
+} from "../src/lib/components/sidebar/session-list-utils";
 import {
   getScrollTop,
   scrollListTo,
+  waitForScrollHeight,
 } from "./helpers/virtual-list-helpers";
 import { SessionsPage } from "./pages/sessions-page";
 
@@ -13,6 +18,7 @@ const TOTAL_SESSIONS = 500;
 const DEEP_SESSIONS = 2000;
 const MIDDLE_INDEX = Math.floor(DEEP_SESSIONS / 2);
 const LAST_INDEX = DEEP_SESSIONS - 1;
+const DEEP_SCROLL_HEIGHT = DEEP_SESSIONS * ITEM_HEIGHT;
 
 /** Expected header text after all deep sessions load (en-US). */
 const DEEP_COUNT_TEXT = `${DEEP_SESSIONS.toLocaleString("en-US")} sessions`;
@@ -36,7 +42,7 @@ test.describe("Virtual list behavior", () => {
 
   test.beforeEach(async ({ page }) => {
     await page.route(
-      "**/api/v1/sessions*",
+      sessionsRoutePattern,
       handleSessionsRoute([
         { sessions, project: null },
         { sessions: deepSessions, project: "deep" },
@@ -58,8 +64,7 @@ test.describe("Virtual list behavior", () => {
     });
 
     sp = new SessionsPage(page);
-    await page.goto("/");
-    await expect(sp.sessionItems.first()).toBeVisible();
+    await sp.goto();
   });
 
   test("renders end of list when scrolling down", async () => {
@@ -79,14 +84,24 @@ test.describe("Virtual list behavior", () => {
       .poll(() => getScrollTop(sp.sessionListScroll))
       .toBeGreaterThan(0);
 
+    // Scrolling starts best-effort hydration for the newly visible rows.
+    // Wait for those observable labels to settle before opening the
+    // typeahead so late row updates cannot steal focus in WebKit.
+    await expect
+      .poll(async () => {
+        const labels = await sp.sessionItems.allTextContents();
+        return labels.length > 0 &&
+          labels.every((label) => label.includes("Hello from session"));
+      }, { timeout: 15_000 })
+      .toBe(true);
+
     await sp.filterByProject("tiny");
 
     // Wait for filtered results to render before checking
     // scroll position — on CI the re-render can be slow.
-    await expect(sp.sessionListHeader).toContainText(
-      "1 sessions",
-      { timeout: 5_000 },
-    );
+    await expect(sp.sessionCount).toHaveText("1 session", {
+      timeout: 5_000,
+    });
 
     await expect
       .poll(() => getScrollTop(sp.sessionListScroll), {
@@ -105,6 +120,10 @@ test.describe("Virtual list behavior", () => {
     await expect(sp.sessionListHeader).toContainText(
       DEEP_COUNT_TEXT,
       { timeout: 15_000 },
+    );
+    await waitForScrollHeight(
+      sp.sessionListScroll,
+      DEEP_SCROLL_HEIGHT,
     );
 
     await scrollListTo(sp.sessionListScroll, "middle");
@@ -125,6 +144,10 @@ test.describe("Virtual list behavior", () => {
     await expect(sp.sessionListHeader).toContainText(
       DEEP_COUNT_TEXT,
       { timeout: 15_000 },
+    );
+    await waitForScrollHeight(
+      sp.sessionListScroll,
+      DEEP_SCROLL_HEIGHT,
     );
 
     await scrollListTo(sp.sessionListScroll, "bottom");

@@ -68,9 +68,24 @@ type chatGPTMeta struct {
 	ModelSlug string `json:"model_slug"`
 }
 
+// ChatGPTExportParser is implemented by the ChatGPT import-only provider to
+// stream a ChatGPT data export. ChatGPT sessions are never discovered or
+// synced from disk; they only enter the archive through a one-shot import, so
+// this entry point lives on the provider rather than the Discover/Parse path.
+// Callers obtain it via NewProvider(AgentChatGPT, ...) and a type assertion.
+type ChatGPTExportParser interface {
+	// ParseChatGPTExport reads all conversations-*.json files from dir and
+	// calls onConversation for each non-empty conversation.
+	ParseChatGPTExport(
+		dir string,
+		assets AssetResolver,
+		onConversation func(ParseResult) error,
+	) error
+}
+
 // ParseChatGPTExport reads all conversations-*.json files from dir
 // and calls onConversation for each non-empty conversation.
-func ParseChatGPTExport(
+func (p *chatGPTImportOnlyProvider) ParseChatGPTExport(
 	dir string,
 	assets AssetResolver,
 	onConversation func(ParseResult) error,
@@ -192,7 +207,7 @@ func convertChatGPTConversation(
 		Machine:          "local",
 		Agent:            AgentChatGPT,
 		FirstMessage:     firstMsg,
-		DisplayName:      conv.Title,
+		SessionName:      conv.Title,
 		StartedAt:        unixFloatToTime(conv.CreateTime),
 		EndedAt:          unixFloatToTime(conv.UpdateTime),
 		MessageCount:     len(msgs),
@@ -212,7 +227,7 @@ func linearizeDAG(
 		return nil
 	}
 
-	var chain []chatGPTNode
+	chain := make([]chatGPTNode, 0)
 	nodeID := currentNode
 	for {
 		node, ok := mapping[nodeID]

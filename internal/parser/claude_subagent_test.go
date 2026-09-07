@@ -5,6 +5,8 @@ package parser
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // parseAndGetToolCalls is a helper function that takes test lines, runs the parser,
@@ -13,13 +15,9 @@ func parseAndGetToolCalls(t *testing.T, filename string, lines []string) []Parse
 	t.Helper()
 	content := strings.Join(lines, "\n")
 	path := createTestFile(t, filename, content)
-	results, err := ParseClaudeSession(path, "proj", "local")
-	if err != nil {
-		t.Fatalf("ParseClaudeSession: %v", err)
-	}
-	if len(results) == 0 {
-		t.Fatal("no results")
-	}
+	results, err := parseClaudeSession(path, "proj", "local")
+	require.NoError(t, err, "ParseClaudeSession")
+	require.NotEmpty(t, results, "no results")
 
 	var toolCalls []ParsedToolCall
 	for _, msg := range results[0].Messages {
@@ -29,6 +27,7 @@ func parseAndGetToolCalls(t *testing.T, filename string, lines []string) []Parse
 }
 
 func TestSubagentSessionIDMapping(t *testing.T) {
+
 	tests := []struct {
 		name      string
 		lines     []string
@@ -72,6 +71,92 @@ func TestSubagentSessionIDMapping(t *testing.T) {
 			},
 			wantTools: []ParsedToolCall{
 				{ToolUseID: "toolu_agent1", ToolName: "Agent", Category: "Task", SubagentSessionID: "agent-agent789"},
+			},
+		},
+		{
+			name: "Agent Tool Result Agent ID",
+			lines: []string{
+				`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"hello"},"cwd":"/tmp"}`,
+				`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"u2","parentUuid":"u1","message":{"content":[{"type":"tool_use","id":"toolu_agent_result","name":"Agent","input":{"description":"inspect schema","subagent_type":"Explore","prompt":"inspect the schema"}}]}}`,
+				`{"type":"user","timestamp":"2024-01-01T10:00:05Z","uuid":"u3","parentUuid":"u2","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_agent_result","content":"done"}]},"toolUseResult":{"status":"completed","agentId":"abc123def4567890"}}`,
+			},
+			wantTools: []ParsedToolCall{
+				{ToolUseID: "toolu_agent_result", ToolName: "Agent", Category: "Task", SubagentSessionID: "agent-abc123def4567890"},
+			},
+		},
+		{
+			name: "Same Message ID Additive Agent Tool Uses",
+			lines: []string{
+				`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"summarize with subagents"},"cwd":"/tmp"}`,
+				`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"a1","parentUuid":"u1","message":{"id":"msg_same","content":[{"type":"text","text":"Launching agents."}],"usage":{"input_tokens":1,"output_tokens":1},"stop_reason":"tool_use"}}`,
+				`{"type":"assistant","timestamp":"2024-01-01T10:00:02Z","uuid":"a2","parentUuid":"a1","message":{"id":"msg_same","content":[{"type":"tool_use","id":"toolu_first","name":"Agent","input":{"description":"first","subagent_type":"Explore","prompt":"first"}}],"usage":{"input_tokens":1,"output_tokens":2},"stop_reason":"tool_use"}}`,
+				`{"type":"assistant","timestamp":"2024-01-01T10:00:03Z","uuid":"a3","parentUuid":"a2","message":{"id":"msg_same","content":[{"type":"tool_use","id":"toolu_second","name":"Agent","input":{"description":"second","subagent_type":"Explore","prompt":"second"}}],"usage":{"input_tokens":1,"output_tokens":3},"stop_reason":"tool_use"}}`,
+				`{"type":"assistant","timestamp":"2024-01-01T10:00:04Z","uuid":"a4","parentUuid":"a3","message":{"id":"msg_same","content":[{"type":"tool_use","id":"toolu_third","name":"Agent","input":{"description":"third","subagent_type":"Explore","prompt":"third"}}],"usage":{"input_tokens":1,"output_tokens":4},"stop_reason":"tool_use"}}`,
+				`{"type":"user","timestamp":"2024-01-01T10:00:05Z","uuid":"r1","parentUuid":"a2","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_first","content":"done first"}]},"toolUseResult":{"status":"completed","agentId":"childfirst"}}`,
+				`{"type":"user","timestamp":"2024-01-01T10:00:06Z","uuid":"r2","parentUuid":"a3","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_second","content":"done second"}]},"toolUseResult":{"status":"completed","agentId":"childsecond"}}`,
+				`{"type":"user","timestamp":"2024-01-01T10:00:07Z","uuid":"r3","parentUuid":"a4","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_third","content":"done third"}]},"toolUseResult":{"status":"completed","agentId":"childthird"}}`,
+			},
+			wantTools: []ParsedToolCall{
+				{ToolUseID: "toolu_first", ToolName: "Agent", Category: "Task", SubagentSessionID: "agent-childfirst"},
+				{ToolUseID: "toolu_second", ToolName: "Agent", Category: "Task", SubagentSessionID: "agent-childsecond"},
+				{ToolUseID: "toolu_third", ToolName: "Agent", Category: "Task", SubagentSessionID: "agent-childthird"},
+			},
+		},
+		{
+			name: "Queue Mapping Beats Tool Result Agent ID",
+			lines: []string{
+				`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"hello"},"cwd":"/tmp"}`,
+				`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"u2","parentUuid":"u1","message":{"content":[{"type":"tool_use","id":"toolu_agent_result","name":"Agent","input":{"description":"inspect schema","subagent_type":"Explore","prompt":"inspect the schema"}}]}}`,
+				`{"type":"queue-operation","operation":"enqueue","timestamp":"2024-01-01T10:00:02Z","sessionId":"test-session","content":"{\"task_id\":\"queuefirst\",\"tool_use_id\":\"toolu_agent_result\",\"description\":\"inspect schema\",\"task_type\":\"local_agent\"}"}`,
+				`{"type":"user","timestamp":"2024-01-01T10:00:05Z","uuid":"u3","parentUuid":"u2","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_agent_result","content":"done"}]},"toolUseResult":{"status":"completed","agentId":"resultfallback"}}`,
+			},
+			wantTools: []ParsedToolCall{
+				{ToolUseID: "toolu_agent_result", ToolName: "Agent", Category: "Task", SubagentSessionID: "agent-queuefirst"},
+			},
+		},
+		{
+			name: "Tool Result Agent ID Non-Task Tool Unchanged",
+			lines: []string{
+				`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"hello"},"cwd":"/tmp"}`,
+				`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"u2","parentUuid":"u1","message":{"content":[{"type":"tool_use","id":"toolu_read_result","name":"Read","input":{"file_path":"/tmp/foo.txt"}}]}}`,
+				`{"type":"user","timestamp":"2024-01-01T10:00:05Z","uuid":"u3","parentUuid":"u2","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_read_result","content":"file contents"}]},"toolUseResult":{"status":"completed","agentId":"notasubagent"}}`,
+			},
+			wantTools: []ParsedToolCall{
+				{ToolUseID: "toolu_read_result", ToolName: "Read", Category: "Read", SubagentSessionID: ""},
+			},
+		},
+		{
+			name: "Tool Result Agent ID Multiple Results Ignored",
+			lines: []string{
+				`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"hello"},"cwd":"/tmp"}`,
+				`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"u2","parentUuid":"u1","message":{"content":[{"type":"tool_use","id":"toolu_first_result","name":"Agent","input":{"description":"first","subagent_type":"Explore","prompt":"first"}},{"type":"tool_use","id":"toolu_second_result","name":"Agent","input":{"description":"second","subagent_type":"Explore","prompt":"second"}}]}}`,
+				`{"type":"user","timestamp":"2024-01-01T10:00:05Z","uuid":"u3","parentUuid":"u2","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_first_result","content":"first done"},{"type":"tool_result","tool_use_id":"toolu_second_result","content":"second done"}]},"toolUseResult":{"status":"completed","agentId":"ambiguousagent"}}`,
+			},
+			wantTools: []ParsedToolCall{
+				{ToolUseID: "toolu_first_result", ToolName: "Agent", Category: "Task", SubagentSessionID: ""},
+				{ToolUseID: "toolu_second_result", ToolName: "Agent", Category: "Task", SubagentSessionID: ""},
+			},
+		},
+		{
+			name: "Tool Result Agent ID String Content Skipped",
+			lines: []string{
+				`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"hello"},"cwd":"/tmp"}`,
+				`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"u2","parentUuid":"u1","message":{"content":[{"type":"tool_use","id":"toolu_string_content","name":"Agent","input":{"description":"x","subagent_type":"Explore","prompt":"x"}}]}}`,
+				`{"type":"user","timestamp":"2024-01-01T10:00:05Z","uuid":"u3","parentUuid":"u2","message":{"content":"plain string"},"toolUseResult":{"status":"completed","agentId":"strayagent"}}`,
+			},
+			wantTools: []ParsedToolCall{
+				{ToolUseID: "toolu_string_content", ToolName: "Agent", Category: "Task", SubagentSessionID: ""},
+			},
+		},
+		{
+			name: "Tool Result Agent ID No Tool Result Blocks Skipped",
+			lines: []string{
+				`{"type":"user","timestamp":"2024-01-01T10:00:00Z","uuid":"u1","message":{"content":"hello"},"cwd":"/tmp"}`,
+				`{"type":"assistant","timestamp":"2024-01-01T10:00:01Z","uuid":"u2","parentUuid":"u1","message":{"content":[{"type":"tool_use","id":"toolu_no_result","name":"Agent","input":{"description":"x","subagent_type":"Explore","prompt":"x"}}]}}`,
+				`{"type":"user","timestamp":"2024-01-01T10:00:05Z","uuid":"u3","parentUuid":"u2","message":{"content":[{"type":"text","text":"acknowledged"}]},"toolUseResult":{"status":"completed","agentId":"strayagent"}}`,
+			},
+			wantTools: []ParsedToolCall{
+				{ToolUseID: "toolu_no_result", ToolName: "Agent", Category: "Task", SubagentSessionID: ""},
 			},
 		},
 		{

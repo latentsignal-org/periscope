@@ -8,160 +8,15 @@ import (
 	"html/template"
 	"io"
 	"net/http"
-	"net/url"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/wesm/agentsview/internal/db"
-	"github.com/wesm/agentsview/internal/parser"
+	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/parser"
 )
-
-// getSessionWithMessages fetches a session and its messages by ID,
-// writing appropriate HTTP errors on failure. Returns false if the
-// response has already been written.
-func (s *Server) getSessionWithMessages(
-	w http.ResponseWriter, r *http.Request,
-) (*db.Session, []db.Message, bool) {
-	id := r.PathValue("id")
-	session, err := s.db.GetSession(r.Context(), id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return nil, nil, false
-	}
-	if session == nil {
-		writeError(w, http.StatusNotFound, "session not found")
-		return nil, nil, false
-	}
-
-	msgs, err := s.db.GetAllMessages(r.Context(), id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return nil, nil, false
-	}
-	return session, msgs, true
-}
-
-func (s *Server) handleExportSession(
-	w http.ResponseWriter, r *http.Request,
-) {
-	session, msgs, ok := s.getSessionWithMessages(w, r)
-	if !ok {
-		return
-	}
-
-	htmlContent := generateExportHTML(session, msgs)
-	filename := sanitizeFilename(
-		session.Project + "-" + formatDateShort(session.StartedAt) + ".html",
-	)
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set(
-		"Content-Disposition",
-		fmt.Sprintf(`attachment; filename="%s"`, filename),
-	)
-	_, _ = io.WriteString(w, htmlContent)
-}
-
-func (s *Server) handlePublishSession(
-	w http.ResponseWriter, r *http.Request,
-) {
-	token := s.githubToken()
-	if token == "" {
-		writeError(w, http.StatusUnauthorized,
-			"GitHub token not configured")
-		return
-	}
-
-	session, msgs, ok := s.getSessionWithMessages(w, r)
-	if !ok {
-		return
-	}
-
-	htmlContent := generateExportHTML(session, msgs)
-	filename := session.Project + "-" +
-		formatDateShort(session.StartedAt) + ".html"
-
-	first := ""
-	if session.FirstMessage != nil {
-		first = truncateStr(*session.FirstMessage, 100)
-	}
-	description := fmt.Sprintf("Agent session: %s - %s",
-		session.Project, first)
-
-	gist, err := createGist(
-		r.Context(), token, filename, description, htmlContent,
-	)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-
-	if gist.ID == "" || gist.HTMLURL == "" {
-		writeError(w, http.StatusBadGateway,
-			"GitHub API returned incomplete gist data")
-		return
-	}
-	encoded := url.PathEscape(filename)
-	rawURL := fmt.Sprintf(
-		"https://gist.githubusercontent.com/%s/%s/raw/%s",
-		gist.Owner.Login, gist.ID, encoded,
-	)
-	viewURL := "https://htmlpreview.github.io/?" + rawURL
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"gist_id":  gist.ID,
-		"gist_url": gist.HTMLURL,
-		"view_url": viewURL,
-		"raw_url":  rawURL,
-	})
-}
-
-func (s *Server) handleGetGithubConfig(
-	w http.ResponseWriter, r *http.Request,
-) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"configured": s.githubToken() != "",
-	})
-}
-
-func (s *Server) handleSetGithubConfig(
-	w http.ResponseWriter, r *http.Request,
-) {
-	var req struct {
-		Token string `json:"token"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	token := strings.TrimSpace(req.Token)
-	if token == "" {
-		writeError(w, http.StatusBadRequest, "token required")
-		return
-	}
-
-	// Validate token
-	username, err := validateGithubToken(r.Context(), token)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, err.Error())
-		return
-	}
-
-	s.mu.Lock()
-	err = s.cfg.SaveGithubToken(token)
-	s.mu.Unlock()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError,
-			"failed to save token")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"success":  true,
-		"username": username,
-	})
-}
 
 // gistResponse represents the relevant fields from GitHub's
 // Create Gist API response.
@@ -173,24 +28,43 @@ type gistResponse struct {
 	} `json:"owner"`
 }
 
+var ghAuthTokenOutput = func(ctx context.Context) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "gh", "auth", "token")
+	cmd.Stderr = io.Discard
+	return cmd.Output()
+}
+
+func githubHTTPClient(timeout time.Duration) *http.Client {
+	transport := http.DefaultTransport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = base.Clone()
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+	}
+}
+
 func createGist(
 	ctx context.Context,
 	token, filename, description, content string,
+	public bool,
 ) (*gistResponse, error) {
 	return createGistWithURL(
 		ctx,
 		"https://api.github.com/gists",
-		token, filename, description, content,
+		token, filename, description, content, public,
 	)
 }
 
 func createGistWithURL(
 	ctx context.Context,
 	apiURL, token, filename, description, content string,
+	public bool,
 ) (*gistResponse, error) {
 	payload, err := json.Marshal(map[string]any{
 		"description": description,
-		"public":      true,
+		"public":      public,
 		"files": map[string]any{
 			filename: map[string]string{"content": content},
 		},
@@ -208,9 +82,9 @@ func createGistWithURL(
 	req.Header.Set("Authorization", "token "+token)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "agentsview")
+	req.Header.Set("User-Agent", "periscope")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := githubHTTPClient(30 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("github request failed: %w", err)
@@ -233,6 +107,29 @@ func createGistWithURL(
 	return &result, nil
 }
 
+func resolveGitHubToken(ctx context.Context, configured string) string {
+	if token := strings.TrimSpace(configured); token != "" {
+		return token
+	}
+	if !isLocalhostContext(ctx) {
+		return ""
+	}
+	if token := strings.TrimSpace(os.Getenv("PERISCOPE_GITHUB_TOKEN")); token != "" {
+		return token
+	}
+	if token := strings.TrimSpace(os.Getenv("AGENTSVIEW_GITHUB_TOKEN")); token != "" {
+		return token
+	}
+
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := ghAuthTokenOutput(cctx)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func validateGithubToken(ctx context.Context, token string) (string, error) {
 	return validateGithubTokenWithURL(
 		ctx, "https://api.github.com/user", token,
@@ -249,9 +146,9 @@ func validateGithubTokenWithURL(
 	}
 	req.Header.Set("Authorization", "token "+token)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	req.Header.Set("User-Agent", "agentsview")
+	req.Header.Set("User-Agent", "periscope")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := githubHTTPClient(10 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("validating token: %w", err)
@@ -283,15 +180,31 @@ type exportData struct {
 }
 
 type exportMessage struct {
-	RoleClass   string
-	ExtraClass  string
-	Role        string
-	Timestamp   string
+	Ordinal       int
+	RoleClass     string
+	ExtraClass    string
+	Role          string
+	Timestamp     string
+	ContentHTML   template.HTML
+	FocusedHidden bool
+}
+
+type insightExportData struct {
+	Title       string
+	Type        string
+	Project     string
+	DateRange   string
+	Agent       string
+	Model       string
+	CreatedAt   string
 	ContentHTML template.HTML
 }
 
 var exportTmpl = template.Must(
 	template.New("export").Parse(exportTemplateStr))
+
+var insightExportTmpl = template.Must(
+	template.New("insight-export").Parse(insightExportTemplateStr))
 
 const exportTemplateStr = `<!DOCTYPE html>
 <html lang="en">
@@ -464,6 +377,9 @@ main { max-width: 900px; margin: 0 auto; padding: 16px; }
 #thinking-toggle:checked ~ main .message.thinking-only {
   display: block;
 }
+#transcript-focused:checked ~ main .message.focused-hidden {
+  display: none;
+}
 .tool-block {
   border-left: 2px solid var(--accent-amber);
   background: var(--tool-bg);
@@ -487,6 +403,8 @@ main { max-width: 900px; margin: 0 auto; padding: 16px; }
   color: var(--text-primary);
   cursor: pointer; font-size: 11px;
 }
+#transcript-normal:checked ~ header label[for="transcript-normal"],
+#transcript-focused:checked ~ header label[for="transcript-focused"],
 #thinking-toggle:checked ~ header label[for="thinking-toggle"],
 #sort-toggle:checked ~ header label[for="sort-toggle"] {
   background: var(--accent-blue); color: #fff;
@@ -515,6 +433,8 @@ footer a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
+<input type="radio" id="transcript-normal" name="transcript-mode" class="toggle-input" checked>
+<input type="radio" id="transcript-focused" name="transcript-mode" class="toggle-input">
 <input type="checkbox" id="thinking-toggle" class="toggle-input">
 <input type="checkbox" id="sort-toggle" class="toggle-input">
 <header>
@@ -528,6 +448,8 @@ footer a:hover { text-decoration: underline; }
   </div>
 </div>
 <div class="controls">
+  <label for="transcript-normal" class="toggle-label">Normal</label>
+  <label for="transcript-focused" class="toggle-label">Focused</label>
   <label for="thinking-toggle" class="toggle-label">Thinking</label>
   <label for="sort-toggle" class="toggle-label">Newest first</label>
   <button class="theme-btn" onclick="document.documentElement.classList.toggle('dark');this.textContent=document.documentElement.classList.contains('dark')?'Light':'Dark'">Dark</button>
@@ -536,21 +458,180 @@ footer a:hover { text-decoration: underline; }
 </header>
 <main><div class="messages">
 {{- range .Messages}}
-<div class="message {{.RoleClass}}{{.ExtraClass}}"><div class="message-header"><span class="message-role">{{.Role}}</span><span class="message-time">{{.Timestamp}}</span></div><div class="message-content">{{.ContentHTML}}</div></div>
+<div class="message {{.RoleClass}}{{.ExtraClass}}{{if .FocusedHidden}} focused-hidden{{end}}" data-ordinal="{{.Ordinal}}"><div class="message-header"><span class="message-role">{{.Role}}</span><span class="message-time">{{.Timestamp}}</span></div><div class="message-content">{{.ContentHTML}}</div></div>
 {{- end}}
 </div></main>
-<footer>Exported from <a href="https://github.com/wesm/agentsview">agentsview</a></footer>
+<footer>Exported from <a href="https://go.kenn.io/agentsview">periscope</a></footer>
 </body></html>`
+
+const insightExportTemplateStr = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{.Title}}</title>
+<style>
+:root {
+  --bg-primary: #f7f7fa;
+  --bg-surface: #ffffff;
+  --bg-inset: #edeef3;
+  --border-default: #dfe1e8;
+  --border-muted: #e8eaf0;
+  --text-primary: #1a1d26;
+  --text-secondary: #5a6070;
+  --text-muted: #8b92a0;
+  --accent-blue: #2563eb;
+  --accent-purple: #7c3aed;
+  --accent-amber: #d97706;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Noto Sans", Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Fira Code",
+    "Fira Mono", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+main {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 32px 20px 48px;
+}
+header {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 20px 24px;
+  margin-bottom: 20px;
+}
+h1 {
+  font-size: 24px;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.chip {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--bg-inset);
+}
+.content {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 24px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.content h1,
+.content h2,
+.content h3,
+.content h4,
+.content p,
+.content ul,
+.content ol,
+.content blockquote,
+.content pre {
+  margin-bottom: 12px;
+}
+.content code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-sm);
+  padding: 0.15em 0.4em;
+}
+.content pre {
+  background: #1e1e2e;
+  color: #cdd6f4;
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  overflow-x: auto;
+}
+.content pre code {
+  background: none;
+  border: none;
+  color: inherit;
+  padding: 0;
+}
+.thinking-block {
+  border-left: 2px solid var(--accent-purple);
+  background: #f5f3ff;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 8px 14px 12px;
+  margin: 8px 0;
+  font-style: italic;
+  color: var(--text-secondary);
+}
+.thinking-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-purple);
+  margin-bottom: 4px;
+  font-style: normal;
+}
+.tool-block {
+  border-left: 2px solid var(--accent-amber);
+  background: #fffbf0;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 6px 10px;
+  margin: 8px 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+footer {
+  max-width: 860px;
+  margin: 0 auto 32px;
+  padding: 0 20px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+footer a {
+  color: var(--accent-blue);
+  text-decoration: none;
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>{{.Title}}</h1>
+    <div class="meta">
+      <span class="chip">{{.Type}}</span>
+      <span class="chip">{{.Project}}</span>
+      <span class="chip">{{.DateRange}}</span>
+      <span class="chip">{{.Agent}}</span>
+      {{if .Model}}<span class="chip">{{.Model}}</span>{{end}}
+      {{if .CreatedAt}}<span class="chip">{{.CreatedAt}}</span>{{end}}
+    </div>
+  </header>
+  <article class="content">{{.ContentHTML}}</article>
+</main>
+<footer>Exported from <a href="https://go.kenn.io/agentsview">periscope</a></footer>
+</body>
+</html>`
 
 func generateExportHTML(
 	session *db.Session, msgs []db.Message,
 ) string {
-	agentDisplay := string(session.Agent)
-	if def, ok := parser.AgentByType(
-		parser.AgentType(session.Agent),
-	); ok {
-		agentDisplay = def.DisplayName
-	}
+	msgs = filterExportHTMLMessages(msgs)
 
 	startedAt := ""
 	if session.StartedAt != nil {
@@ -559,12 +640,13 @@ func generateExportHTML(
 
 	data := exportData{
 		Project:      session.Project,
-		Agent:        agentDisplay,
-		MessageCount: session.MessageCount,
+		Agent:        agentDisplayName(session.Agent),
+		MessageCount: len(msgs),
 		StartedAt:    startedAt,
 		Messages:     make([]exportMessage, len(msgs)),
 	}
 
+	focusedVisible := focusedExportOrdinals(msgs)
 	for i, m := range msgs {
 		roleClass := "unknown"
 		if m.Role == "user" || m.Role == "assistant" {
@@ -576,11 +658,13 @@ func generateExportHTML(
 		}
 
 		data.Messages[i] = exportMessage{
-			RoleClass:   roleClass,
-			ExtraClass:  extraClass,
-			Role:        m.Role,
-			Timestamp:   formatTimestamp(m.Timestamp),
-			ContentHTML: template.HTML(formatContentForExport(m.Content)),
+			Ordinal:       m.Ordinal,
+			RoleClass:     roleClass,
+			ExtraClass:    extraClass,
+			Role:          m.Role,
+			Timestamp:     formatTimestamp(m.Timestamp),
+			ContentHTML:   template.HTML(formatContentForExport(m.Content)),
+			FocusedHidden: !focusedVisible[m.Ordinal],
 		}
 	}
 
@@ -591,6 +675,43 @@ func generateExportHTML(
 	return b.String()
 }
 
+func filterExportHTMLMessages(msgs []db.Message) []db.Message {
+	filtered := make([]db.Message, 0, len(msgs))
+	for _, m := range msgs {
+		if db.IsGoalContextPrefixed(m.Content, m.Role) {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	return filtered
+}
+
+func generateInsightExportHTML(insight *db.Insight) string {
+	data := insightExportData{
+		Title:       insightExportTitle(insight),
+		Type:        insightTypeLabel(insight.Type),
+		Project:     insightProjectLabel(insight.Project),
+		DateRange:   insightDateRangeLabel(insight.DateFrom, insight.DateTo),
+		Agent:       agentDisplayName(insight.Agent),
+		Model:       strings.TrimSpace(derefString(insight.Model)),
+		CreatedAt:   formatTimestamp(insight.CreatedAt),
+		ContentHTML: template.HTML(formatContentForExport(insight.Content)),
+	}
+
+	var b strings.Builder
+	if err := insightExportTmpl.Execute(&b, data); err != nil {
+		return fmt.Sprintf("template error: %s", err)
+	}
+	return b.String()
+}
+
+func agentDisplayName(agent string) string {
+	if def, ok := parser.AgentByType(parser.AgentType(agent)); ok {
+		return def.DisplayName
+	}
+	return agent
+}
+
 var (
 	codeBlockRe      = regexp.MustCompile("(?s)```(\\w*)\\n(.*?)```")
 	inlineCodeRe     = regexp.MustCompile("`([^`]+)`")
@@ -599,11 +720,7 @@ var (
 	thinkingLegacyRe = regexp.MustCompile(
 		`(?s)\[Thinking\]\n?(.*?)(?:\n\[|\n\n|$)`)
 	toolBlockRe = regexp.MustCompile(
-		`(?s)\[(Tool|Read|Write|Edit|Bash|Glob|Grep|Task|Agent|` +
-			`Question|Todo List|Entering Plan Mode|` +
-			`Exiting Plan Mode|exec_command|shell_command|` +
-			`write_stdin|apply_patch|shell|parallel|` +
-			`view_image|request_user_input|update_plan` +
+		`(?s)\[(` + exportToolNames +
 			`)([^\]]*)\](.*?)(?:\n\[|\n\n|$)`)
 )
 
@@ -628,6 +745,76 @@ func isThinkingOnly(content string) bool {
 	without := thinkingMarkedRe.ReplaceAllString(content, "")
 	without = thinkingLegacyRe.ReplaceAllString(without, "")
 	return strings.TrimSpace(without) == ""
+}
+
+func focusedExportOrdinals(msgs []db.Message) map[int]bool {
+	visible := make(map[int]bool, len(msgs))
+	pendingOrdinal := 0
+	hasPendingAssistant := false
+	toolAfterPendingAssistant := false
+
+	flushPending := func() {
+		if hasPendingAssistant && !toolAfterPendingAssistant {
+			visible[pendingOrdinal] = true
+		}
+		hasPendingAssistant = false
+		toolAfterPendingAssistant = false
+	}
+
+	for _, m := range msgs {
+		if m.IsCompactBoundary {
+			flushPending()
+			visible[m.Ordinal] = true
+			continue
+		}
+
+		if m.IsSystem || db.IsGoalContextPrefixed(m.Content, m.Role) ||
+			isThinkingOnly(m.Content) {
+			continue
+		}
+
+		if isExportToolOnly(m) {
+			if hasPendingAssistant {
+				toolAfterPendingAssistant = true
+			}
+			continue
+		}
+
+		if m.Role == "user" {
+			flushPending()
+			visible[m.Ordinal] = true
+			continue
+		}
+
+		// Match the app's focused transcript mode: consecutive
+		// assistant-like messages collapse to the last visible answer.
+		pendingOrdinal = m.Ordinal
+		hasPendingAssistant = true
+		toolAfterPendingAssistant = false
+	}
+
+	flushPending()
+	return visible
+}
+
+func isExportToolOnly(m db.Message) bool {
+	if m.Role != "assistant" || !m.HasToolUse {
+		return false
+	}
+	for _, segment := range parseMarkdownSegments(m) {
+		switch segment.Type {
+		case markdownSegmentThinking, markdownSegmentTool:
+			continue
+		case markdownSegmentText:
+			if strings.TrimSpace(segment.Content) == "" {
+				continue
+			}
+			return false
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // parseTimestamp tries RFC3339Nano then RFC3339.
@@ -664,6 +851,101 @@ func formatDateShort(ts *string) string {
 func sanitizeFilename(name string) string {
 	re := regexp.MustCompile(`[^\w.\-]`)
 	return re.ReplaceAllString(name, "_")
+}
+
+func insightExportStem(insight *db.Insight) string {
+	dateRange := strings.ReplaceAll(insight.DateFrom, "-", "")
+	if insight.DateTo != "" && insight.DateTo != insight.DateFrom {
+		dateRange += "-" + strings.ReplaceAll(insight.DateTo, "-", "")
+	}
+	return sanitizeFilename(fmt.Sprintf(
+		"insight-%s-%s-%s",
+		insight.Type,
+		insightProjectLabel(insight.Project),
+		dateRange,
+	))
+}
+
+func insightExportHTMLFilename(insight *db.Insight) string {
+	return insightExportStem(insight) + ".html"
+}
+
+func insightExportMarkdownFilename(insight *db.Insight) string {
+	return insightExportStem(insight) + ".md"
+}
+
+func insightExportTitle(insight *db.Insight) string {
+	return fmt.Sprintf(
+		"%s Insight",
+		insightTypeLabel(insight.Type),
+	)
+}
+
+func insightPublishDescription(insight *db.Insight) string {
+	return fmt.Sprintf(
+		"Insight: %s - %s - %s",
+		insightTypeLabel(insight.Type),
+		insightProjectLabel(insight.Project),
+		insightDateRangeLabel(insight.DateFrom, insight.DateTo),
+	)
+}
+
+func insightTypeLabel(insightType string) string {
+	switch insightType {
+	case "daily_activity":
+		return "Daily Activity"
+	case "agent_analysis":
+		return "Agent Analysis"
+	default:
+		return strings.ReplaceAll(insightType, "_", " ")
+	}
+}
+
+func insightProjectLabel(project *string) string {
+	value := strings.TrimSpace(derefString(project))
+	if value == "" {
+		return "global"
+	}
+	return value
+}
+
+func insightDateRangeLabel(dateFrom, dateTo string) string {
+	if dateTo == "" || dateTo == dateFrom {
+		return dateFrom
+	}
+	return dateFrom + " to " + dateTo
+}
+
+func publishExportHTML(
+	ctx context.Context,
+	token, filename, description, htmlContent string,
+	public bool,
+) (*publishResponse, error) {
+	gist, err := createGist(ctx, token, filename, description, htmlContent, public)
+	if err != nil {
+		return nil, err
+	}
+	if gist.ID == "" || gist.HTMLURL == "" {
+		return nil, fmt.Errorf("GitHub API returned incomplete gist data")
+	}
+	encoded := urlPathEscape(filename)
+	rawURL := fmt.Sprintf(
+		"https://gist.githubusercontent.com/%s/%s/raw/%s",
+		gist.Owner.Login, gist.ID, encoded,
+	)
+	return &publishResponse{
+		GistID:  gist.ID,
+		GistURL: gist.HTMLURL,
+		ViewURL: "https://htmlpreview.github.io/?" + rawURL,
+		RawURL:  rawURL,
+	}, nil
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func truncateStr(s string, max int) string {

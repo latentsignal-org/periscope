@@ -5,20 +5,26 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"os"
 	"path/filepath"
+	stdsync "sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	"github.com/wesm/agentsview/internal/db"
-	"github.com/wesm/agentsview/internal/sync"
+	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/sync"
 )
 
 // Timestamp constants for test data.
 const (
 	tsZero    = "2024-01-01T00:00:00Z"
+	tsZeroS1  = "2024-01-01T00:00:01Z"
 	tsZeroS5  = "2024-01-01T00:00:05Z"
 	tsEarly   = "2024-01-01T10:00:00Z"
 	tsEarlyS1 = "2024-01-01T10:00:01Z"
@@ -30,13 +36,8 @@ const (
 func assertSessionState(t *testing.T, database *db.DB, sessionID string, check func(*db.Session)) {
 	t.Helper()
 	sess, err := database.GetSession(context.Background(), sessionID)
-	if err != nil {
-		t.Fatalf("GetSession(%q): %v", sessionID, err)
-	}
-	if sess == nil {
-		t.Fatalf("Session %q not found", sessionID)
-		return
-	}
+	require.NoError(t, err, "GetSession(%q)", sessionID)
+	require.NotNil(t, sess, "Session %q not found", sessionID)
 	if check != nil {
 		check(sess)
 	}
@@ -45,29 +46,24 @@ func assertSessionState(t *testing.T, database *db.DB, sessionID string, check f
 func assertSessionMessageCount(t *testing.T, database *db.DB, sessionID string, want int) {
 	t.Helper()
 	assertSessionState(t, database, sessionID, func(sess *db.Session) {
-		if sess.MessageCount != want {
-			t.Errorf("session %q message_count = %d, want %d", sessionID, sess.MessageCount, want)
-		}
+		assert.Equal(t, want, sess.MessageCount, "session %q message_count", sessionID)
 	})
 }
 
 func assertSessionProject(t *testing.T, database *db.DB, sessionID string, want string) {
 	t.Helper()
 	assertSessionState(t, database, sessionID, func(sess *db.Session) {
-		if sess.Project != want {
-			t.Errorf("session %q project = %q, want %q", sessionID, sess.Project, want)
-		}
+		assert.Equal(t, want, sess.Project, "session %q project", sessionID)
 	})
 }
 
 func runSyncAndAssert(t *testing.T, engine *sync.Engine, want sync.SyncStats) sync.SyncStats {
 	t.Helper()
 	stats := engine.SyncAll(context.Background(), nil)
-	if diff := cmp.Diff(want, stats,
+	diff := cmp.Diff(want, stats,
 		cmpopts.IgnoreUnexported(sync.SyncStats{}),
-	); diff != "" {
-		t.Fatalf("SyncAll() mismatch (-want +got):\n%s", diff)
-	}
+	)
+	require.Empty(t, diff, "SyncAll() mismatch (-want +got):\n%s", diff)
 	return stats
 }
 
@@ -88,23 +84,13 @@ func (e *testEnv) assertResyncRoundTrip(
 		)
 		return err
 	})
-	if err != nil {
-		t.Fatalf(
-			"clear mtime for %s: %v", sessionID, err,
-		)
-	}
+	require.NoError(t, err, "clear mtime for %s", sessionID)
 
-	if err := e.engine.SyncSingleSession(sessionID); err != nil {
-		t.Fatalf("SyncSingleSession: %v", err)
-	}
+	require.NoError(t, e.engine.SyncSingleSession(sessionID))
 
 	_, mtime, ok := e.db.GetSessionFileInfo(sessionID)
-	if !ok {
-		t.Fatal("session file info not found")
-	}
-	if mtime == 0 {
-		t.Error("SyncSingleSession did not store mtime")
-	}
+	require.True(t, ok, "session file info not found")
+	assert.NotZero(t, mtime, "SyncSingleSession did not store mtime")
 
 	runSyncAndAssert(t, e.engine, sync.SyncStats{TotalSessions: 0 + 1, Synced: 0, Skipped: 1})
 }
@@ -112,9 +98,7 @@ func (e *testEnv) assertResyncRoundTrip(
 func fetchMessages(t *testing.T, database *db.DB, sessionID string) []db.Message {
 	t.Helper()
 	msgs, err := database.GetAllMessages(context.Background(), sessionID)
-	if err != nil {
-		t.Fatalf("GetAllMessages(%q): %v", sessionID, err)
-	}
+	require.NoError(t, err, "GetAllMessages(%q)", sessionID)
 	return msgs
 }
 
@@ -126,15 +110,9 @@ func assertMessageRoles(
 ) {
 	t.Helper()
 	msgs := fetchMessages(t, database, sessionID)
-	if len(msgs) != len(wantRoles) {
-		t.Fatalf("got %d messages, want %d",
-			len(msgs), len(wantRoles))
-	}
+	require.Len(t, msgs, len(wantRoles))
 	for i, want := range wantRoles {
-		if msgs[i].Role != want {
-			t.Errorf("msgs[%d].Role = %q, want %q",
-				i, msgs[i].Role, want)
-		}
+		assert.Equal(t, want, msgs[i].Role, "msgs[%d].Role", i)
 	}
 }
 
@@ -146,15 +124,9 @@ func assertMessageContent(
 ) {
 	t.Helper()
 	msgs := fetchMessages(t, database, sessionID)
-	if len(msgs) != len(wantContent) {
-		t.Fatalf("got %d messages, want %d",
-			len(msgs), len(wantContent))
-	}
+	require.Len(t, msgs, len(wantContent))
 	for i, want := range wantContent {
-		if msgs[i].Content != want {
-			t.Errorf("msgs[%d].Content = %q, want %q",
-				i, msgs[i].Content, want)
-		}
+		assert.Equal(t, want, msgs[i].Content, "msgs[%d].Content", i)
 	}
 }
 
@@ -171,14 +143,8 @@ func assertToolCallCount(
 			" WHERE session_id = ?",
 		sessionID,
 	).Scan(&got)
-	if err != nil {
-		t.Fatalf("count tool_calls for %q: %v",
-			sessionID, err)
-	}
-	if got != want {
-		t.Errorf("tool_calls count for %q = %d, want %d",
-			sessionID, got, want)
-	}
+	require.NoError(t, err, "count tool_calls for %q", sessionID)
+	assert.Equal(t, want, got, "tool_calls count for %q", sessionID)
 }
 
 // updateSessionProject fetches the session, updates its
@@ -191,17 +157,10 @@ func (e *testEnv) updateSessionProject(
 	sess, err := e.db.GetSessionFull(
 		context.Background(), sessionID,
 	)
-	if err != nil {
-		t.Fatalf("GetSessionFull: %v", err)
-	}
-	if sess == nil {
-		t.Fatalf("session %q not found", sessionID)
-		return
-	}
+	require.NoError(t, err, "GetSessionFull")
+	require.NotNil(t, sess, "session %q not found", sessionID)
 	sess.Project = project
-	if err := e.db.UpsertSession(*sess); err != nil {
-		t.Fatalf("UpsertSession: %v", err)
-	}
+	require.NoError(t, e.db.UpsertSession(*sess), "UpsertSession")
 }
 
 // openCodeTestDB manages an OpenCode SQLite database for tests.
@@ -210,56 +169,260 @@ type openCodeTestDB struct {
 	db   *sql.DB
 }
 
+type kiroSQLiteTestDB struct {
+	path string
+	db   *sql.DB
+}
+
+var (
+	openCodeLikeSchemaOnce  stdsync.Once
+	openCodeLikeSchemaBytes []byte
+	openCodeLikeSchemaErr   error
+
+	kiroSQLiteSchemaOnce  stdsync.Once
+	kiroSQLiteSchemaBytes []byte
+	kiroSQLiteSchemaErr   error
+
+	antigravityCLISchemaOnce  stdsync.Once
+	antigravityCLISchemaBytes []byte
+	antigravityCLISchemaErr   error
+
+	piebaldSchemaOnce  stdsync.Once
+	piebaldSchemaBytes []byte
+	piebaldSchemaErr   error
+
+	shelleySchemaOnce  stdsync.Once
+	shelleySchemaBytes []byte
+	shelleySchemaErr   error
+
+	zedSchemaOnce  stdsync.Once
+	zedSchemaBytes []byte
+	zedSchemaErr   error
+
+	kiroSQLiteFixtureCache stdsync.Map
+)
+
+const openCodeLikeSchema = `
+	CREATE TABLE project (
+		id TEXT PRIMARY KEY,
+		worktree TEXT NOT NULL
+	);
+	CREATE TABLE session (
+		id TEXT PRIMARY KEY,
+		project_id TEXT NOT NULL,
+		parent_id TEXT,
+		title TEXT,
+		time_created INTEGER NOT NULL,
+		time_updated INTEGER NOT NULL
+	);
+	CREATE TABLE message (
+		id TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		data TEXT NOT NULL,
+		time_created INTEGER NOT NULL
+	);
+	CREATE TABLE part (
+		id TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		message_id TEXT NOT NULL,
+		data TEXT NOT NULL,
+		time_created INTEGER NOT NULL
+	);
+`
+
+const kiroSQLiteSchema = `
+	CREATE TABLE conversations_v2 (
+		key TEXT NOT NULL,
+		conversation_id TEXT NOT NULL,
+		value TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY (key, conversation_id)
+	);
+`
+
 // createOpenCodeDB creates a minimal OpenCode SQLite database
 // with the required schema (project, session, message, part
 // tables). Returns a handle for inserting test data.
 func createOpenCodeDB(t *testing.T, dir string) *openCodeTestDB {
 	t.Helper()
-	path := filepath.Join(dir, "opencode.db")
-	d, err := sql.Open("sqlite3", path)
-	if err != nil {
-		t.Fatalf("opening opencode test db: %v", err)
-	}
-	t.Cleanup(func() { d.Close() })
+	return createOpenCodeLikeDB(
+		t, filepath.Join(dir, "opencode.db"), "opencode",
+	)
+}
 
-	schema := `
-		CREATE TABLE project (
-			id TEXT PRIMARY KEY,
-			worktree TEXT NOT NULL
-		);
-		CREATE TABLE session (
-			id TEXT PRIMARY KEY,
-			project_id TEXT NOT NULL,
-			parent_id TEXT,
-			title TEXT,
-			time_created INTEGER NOT NULL,
-			time_updated INTEGER NOT NULL
-		);
-		CREATE TABLE message (
-			id TEXT PRIMARY KEY,
-			session_id TEXT NOT NULL,
-			data TEXT NOT NULL,
-			time_created INTEGER NOT NULL
-		);
-		CREATE TABLE part (
-			id TEXT PRIMARY KEY,
-			session_id TEXT NOT NULL,
-			message_id TEXT NOT NULL,
-			data TEXT NOT NULL,
-			time_created INTEGER NOT NULL
-		);
-	`
-	if _, err := d.Exec(schema); err != nil {
-		t.Fatalf("creating opencode schema: %v", err)
-	}
+func createKiloDB(t *testing.T, dir string) *openCodeTestDB {
+	t.Helper()
+	return createOpenCodeLikeDB(
+		t, filepath.Join(dir, "kilo.db"), "kilo",
+	)
+}
+
+func createOpenCodeLikeDB(
+	t *testing.T, path, label string,
+) *openCodeTestDB {
+	t.Helper()
+	copySQLiteSchemaTemplate(
+		t, path, label, &openCodeLikeSchemaOnce,
+		&openCodeLikeSchemaBytes, &openCodeLikeSchemaErr,
+		openCodeLikeSchema,
+	)
+	d, err := sql.Open("sqlite3", path)
+	require.NoError(t, err, "opening %s test db", label)
+	t.Cleanup(func() { d.Close() })
 	return &openCodeTestDB{path: path, db: d}
+}
+
+func createKiroSQLiteDB(t *testing.T, dir string) *kiroSQLiteTestDB {
+	t.Helper()
+	path := filepath.Join(dir, "data.sqlite3")
+	copySQLiteSchemaTemplate(
+		t, path, "kiro sqlite", &kiroSQLiteSchemaOnce,
+		&kiroSQLiteSchemaBytes, &kiroSQLiteSchemaErr,
+		kiroSQLiteSchema,
+	)
+	d, err := sql.Open("sqlite3", path)
+	require.NoError(t, err, "opening kiro sqlite test db")
+	fixture := &kiroSQLiteTestDB{path: path, db: d}
+	t.Cleanup(func() {
+		if fixture.db != nil {
+			_ = fixture.db.Close()
+		}
+	})
+	return fixture
+}
+
+func (k *kiroSQLiteTestDB) close(t *testing.T) {
+	t.Helper()
+	require.NoError(t, k.db.Close())
+	k.db = nil
+}
+
+func copySQLiteSchemaTemplate(
+	t *testing.T,
+	path, label string,
+	once *stdsync.Once,
+	templateBytes *[]byte,
+	templateErr *error,
+	schema string,
+) {
+	t.Helper()
+	bytes := sqliteSchemaTemplateBytes(
+		t, label, once, templateBytes, templateErr, schema,
+	)
+	require.NoError(t, os.WriteFile(path, bytes, 0o644),
+		"copy %s schema template", label)
+}
+
+func sqliteSchemaTemplateBytes(
+	t *testing.T,
+	label string,
+	once *stdsync.Once,
+	templateBytes *[]byte,
+	templateErr *error,
+	schema string,
+) []byte {
+	t.Helper()
+	once.Do(func() {
+		dir, err := os.MkdirTemp("", "agentsview-"+label+"-schema-*")
+		if err != nil {
+			*templateErr = fmt.Errorf("create %s schema template dir: %w", label, err)
+			return
+		}
+		defer os.RemoveAll(dir)
+
+		path := filepath.Join(dir, "template.db")
+		d, err := sql.Open("sqlite3", path)
+		if err != nil {
+			*templateErr = fmt.Errorf("open %s schema template: %w", label, err)
+			return
+		}
+		if _, err = d.Exec(schema); err != nil {
+			_ = d.Close()
+			*templateErr = fmt.Errorf("create %s schema template: %w", label, err)
+			return
+		}
+		if err = d.Close(); err != nil {
+			*templateErr = fmt.Errorf("close %s schema template: %w", label, err)
+			return
+		}
+		*templateBytes, err = os.ReadFile(path)
+		if err != nil {
+			*templateErr = fmt.Errorf("read %s schema template: %w", label, err)
+		}
+	})
+	require.NoError(t, *templateErr, "prepare %s schema template", label)
+	require.NotEmpty(t, *templateBytes, "prepare %s schema template", label)
+	return *templateBytes
+}
+
+func readKiroSQLiteFixture(t *testing.T, name string) string {
+	t.Helper()
+	if v, ok := kiroSQLiteFixtureCache.Load(name); ok {
+		return v.(string)
+	}
+	path := filepath.Join(
+		"..", "parser", "testdata", "kiro_sqlite", name,
+	)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err, "read kiro sqlite fixture %s", name)
+	value := string(data)
+	v, _ := kiroSQLiteFixtureCache.LoadOrStore(name, value)
+	return v.(string)
+}
+
+func (ks *kiroSQLiteTestDB) addSession(
+	t *testing.T, key, id, payload string,
+	createdAt, updatedAt int64,
+) {
+	t.Helper()
+	_, err := ks.db.Exec(
+		`INSERT INTO conversations_v2
+			(key, conversation_id, value, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		key, id, payload, createdAt, updatedAt,
+	)
+	require.NoError(t, err, "insert kiro sqlite session")
+}
+
+func (ks *kiroSQLiteTestDB) updateSession(
+	t *testing.T, id, payload string, updatedAt int64,
+) {
+	t.Helper()
+	_, err := ks.db.Exec(
+		`UPDATE conversations_v2
+		    SET value = ?, updated_at = ?
+		  WHERE conversation_id = ?`,
+		payload, updatedAt, id,
+	)
+	require.NoError(t, err, "update kiro sqlite session")
+}
+
+func writeLegacyKiroSession(
+	t *testing.T, dir, id, prompt string,
+) {
+	t.Helper()
+	jsonlPath := filepath.Join(dir, id+".jsonl")
+	metaPath := filepath.Join(dir, id+".json")
+	require.NoError(t, os.WriteFile(
+		jsonlPath,
+		[]byte(`{"kind":"Prompt","data":{"content":[{"kind":"text","data":"`+
+			prompt+`"}]}}`+"\n"+
+			`{"kind":"AssistantMessage","data":{"content":[{"kind":"text","data":"legacy assistant"}]}}`+
+			"\n"),
+		0o644,
+	), "write legacy kiro jsonl")
+	require.NoError(t, os.WriteFile(
+		metaPath,
+		[]byte(`{"session_id":"`+id+`","cwd":"/home/user/code/legacy-kiro","created_at":"2026-05-17T09:00:00Z","updated_at":"2026-05-17T09:01:00Z"}`),
+		0o644,
+	), "write legacy kiro metadata")
 }
 
 func (oc *openCodeTestDB) mustExec(t *testing.T, msg, query string, args ...any) {
 	t.Helper()
-	if _, err := oc.db.Exec(query, args...); err != nil {
-		t.Fatalf("%s: %v", msg, err)
-	}
+	_, err := oc.db.Exec(query, args...)
+	require.NoError(t, err, msg)
 }
 
 func (oc *openCodeTestDB) addProject(
@@ -305,14 +468,24 @@ func (oc *openCodeTestDB) addMessage(
 	data, err := json.Marshal(map[string]string{
 		"role": role,
 	})
-	if err != nil {
-		t.Fatalf("marshal message: %v", err)
-	}
+	require.NoError(t, err, "marshal message")
 	oc.mustExec(t, "insert message",
 		`INSERT INTO message
 			(id, session_id, data, time_created)
 		 VALUES (?, ?, ?, ?)`,
 		id, sessionID, string(data), timeCreated,
+	)
+}
+
+func (oc *openCodeTestDB) updateMessageData(
+	t *testing.T, id string, data map[string]any,
+) {
+	t.Helper()
+	raw, err := json.Marshal(data)
+	require.NoError(t, err, "marshal message update")
+	oc.mustExec(t, "update message data",
+		"UPDATE message SET data = ? WHERE id = ?",
+		string(raw), id,
 	)
 }
 
@@ -326,9 +499,7 @@ func (oc *openCodeTestDB) addTextPart(
 		"type":    "text",
 		"content": content,
 	})
-	if err != nil {
-		t.Fatalf("marshal text part: %v", err)
-	}
+	require.NoError(t, err, "marshal text part")
 	oc.mustExec(t, "insert part",
 		`INSERT INTO part
 			(id, session_id, message_id, data, time_created)
@@ -349,9 +520,7 @@ func (oc *openCodeTestDB) addToolPart(
 		"tool":   toolName,
 		"callID": callID,
 	})
-	if err != nil {
-		t.Fatalf("marshal tool part: %v", err)
-	}
+	require.NoError(t, err, "marshal tool part")
 	oc.mustExec(t, "insert tool part",
 		`INSERT INTO part
 			(id, session_id, message_id, data, time_created)
@@ -407,4 +576,101 @@ func (oc *openCodeTestDB) replaceTextContent(
 		t, amID+"-p", sessionID, amID,
 		assistantContent, timeCreated+1,
 	)
+}
+
+type openCodeStorageFixture struct {
+	root          string
+	sessionSubdir string
+}
+
+func createOpenCodeStorageFixture(
+	t *testing.T, root string,
+) *openCodeStorageFixture {
+	t.Helper()
+	return &openCodeStorageFixture{root: root, sessionSubdir: "session"}
+}
+
+// createMiMoCodeStorageFixture builds a fixture for MiMoCode, which
+// stores session JSON under storage/session_diff instead of
+// storage/session while sharing the message/part layout.
+func createMiMoCodeStorageFixture(
+	t *testing.T, root string,
+) *openCodeStorageFixture {
+	t.Helper()
+	return &openCodeStorageFixture{root: root, sessionSubdir: "session_diff"}
+}
+
+func (oc *openCodeStorageFixture) writeJSON(
+	t *testing.T, path string, data any,
+) string {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755), "mkdir %s", filepath.Dir(path))
+	raw, err := json.Marshal(data)
+	require.NoError(t, err, "marshal %s", path)
+	require.NoError(t, os.WriteFile(path, raw, 0o644), "write %s", path)
+	return path
+}
+
+func (oc *openCodeStorageFixture) addSession(
+	t *testing.T,
+	projectID, sessionID, directory, title string,
+	timeCreated, timeUpdated int64,
+) string {
+	t.Helper()
+	return oc.writeJSON(t, filepath.Join(
+		oc.root, "storage", oc.sessionSubdir, projectID,
+		sessionID+".json",
+	), map[string]any{
+		"id":        sessionID,
+		"projectID": projectID,
+		"directory": directory,
+		"title":     title,
+		"time": map[string]any{
+			"created": timeCreated,
+			"updated": timeUpdated,
+		},
+	})
+}
+
+func (oc *openCodeStorageFixture) addMessage(
+	t *testing.T,
+	sessionID, messageID, role string,
+	timeCreated int64,
+	extra map[string]any,
+) string {
+	t.Helper()
+	data := map[string]any{
+		"id":        messageID,
+		"sessionID": sessionID,
+		"role":      role,
+		"time": map[string]any{
+			"created": timeCreated,
+		},
+	}
+	maps.Copy(data, extra)
+	return oc.writeJSON(t, filepath.Join(
+		oc.root, "storage", "message", sessionID,
+		messageID+".json",
+	), data)
+}
+
+func (oc *openCodeStorageFixture) addTextPart(
+	t *testing.T,
+	sessionID, messageID, partID, text string,
+	timeCreated int64,
+) string {
+	t.Helper()
+	return oc.writeJSON(t, filepath.Join(
+		oc.root, "storage", "part", messageID,
+		partID+".json",
+	), map[string]any{
+		"id":        partID,
+		"sessionID": sessionID,
+		"messageID": messageID,
+		"type":      "text",
+		"text":      text,
+		"time": map[string]any{
+			"created": timeCreated,
+		},
+	})
 }

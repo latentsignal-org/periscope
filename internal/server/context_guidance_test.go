@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/wesm/agentsview/internal/db"
-	"github.com/wesm/agentsview/internal/llm"
-	"github.com/wesm/agentsview/internal/signals"
+	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/llm"
+	"go.kenn.io/agentsview/internal/signals"
 )
 
 type stubGuidanceClient struct {

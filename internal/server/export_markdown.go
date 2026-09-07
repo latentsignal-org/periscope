@@ -5,14 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
-	"io"
-	"net/http"
 	"regexp"
 	"sort"
 	"strings"
 
-	"github.com/wesm/agentsview/internal/db"
-	"github.com/wesm/agentsview/internal/parser"
+	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/parser"
 )
 
 type exportMarkdownOptions struct {
@@ -48,38 +46,6 @@ type markdownMatch struct {
 	Start   int
 	End     int
 	Segment markdownSegment
-}
-
-func (s *Server) handleMarkdownSession(
-	w http.ResponseWriter, r *http.Request,
-) {
-	depth := strings.TrimSpace(r.URL.Query().Get("depth"))
-	if depth != "" && depth != "1" && depth != "all" {
-		writeError(w, http.StatusBadRequest, "invalid depth")
-		return
-	}
-	tree, err := s.loadExportSessionTree(r.Context(), r.PathValue("id"), depth, map[string]bool{}, 0)
-	if err != nil {
-		if handleContextError(w, err) {
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if tree == nil || tree.Session == nil {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	md := generateExportMarkdownTree(tree, exportMarkdownOptions{Depth: depth})
-	filename := sanitizeFilename(
-		tree.Session.Project + "-" + formatDateShort(tree.Session.StartedAt) + ".md",
-	)
-	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-	w.Header().Set(
-		"Content-Disposition",
-		fmt.Sprintf(`inline; filename="%s"`, filename),
-	)
-	_, _ = io.WriteString(w, md)
 }
 
 func (s *Server) loadExportSessionTree(
@@ -164,11 +130,13 @@ var (
 	mdCodeBlockRe      = regexp.MustCompile("(?s)```(\\w*)\\n(.*?)```")
 )
 
-const markdownToolNames = "Tool|Read|Write|Edit|Bash|Glob|Grep|Other|TaskCreate|TaskUpdate|TaskGet|TaskList|Task|Agent|Skill|" +
+const exportToolNames = "Tool|Read|Write|Edit|Patch|Bash|Glob|Grep|Other|TaskCreate|TaskUpdate|TaskGet|TaskList|Task|Agent|" +
 	"SendMessage|Question|Todo List|Entering Plan Mode|" +
 	"Exiting Plan Mode|exec_command|shell_command|" +
-	"write_stdin|apply_patch|shell|parallel|view_image|" +
+	"write_stdin|apply_patch|ApplyPatch|shell|parallel|view_image|" +
 	"request_user_input|update_plan"
+
+const markdownToolNames = exportToolNames + "|Skill"
 
 var (
 	mdToolAliases = map[string]string{
@@ -178,6 +146,8 @@ var (
 		"write_stdin":   "Bash",
 		"shell":         "Bash",
 		"apply_patch":   "Edit",
+		"ApplyPatch":    "Edit",
+		"Patch":         "Edit",
 		"str_replace":   "Edit",
 		"run_command":   "Bash",
 		"create_file":   "Write",
@@ -510,6 +480,9 @@ func markdownToolFallback(tc *db.ToolCall) string {
 	if isEdit {
 		if diff := stringValue(params["diff"]); diff != "" {
 			return capLines(diff, 200)
+		}
+		if patch := firstString(params, "patch", "patch_text", "patchText"); patch != "" {
+			return capLines(patch, 200)
 		}
 		oldText := firstString(params, "old_string", "old_str", "oldString", "oldStr")
 		newText := firstString(params, "new_string", "new_str", "newString", "newStr")

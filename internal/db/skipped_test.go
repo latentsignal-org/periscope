@@ -4,7 +4,10 @@ import (
 	"maps"
 	"testing"
 
-	"github.com/wesm/agentsview/internal/dbtest"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.kenn.io/agentsview/internal/dbtest"
 )
 
 func TestSkippedFiles_RoundTrip(t *testing.T) {
@@ -12,12 +15,8 @@ func TestSkippedFiles_RoundTrip(t *testing.T) {
 
 	// Initially empty.
 	loaded, err := d.LoadSkippedFiles()
-	if err != nil {
-		t.Fatalf("LoadSkippedFiles: %v", err)
-	}
-	if len(loaded) != 0 {
-		t.Fatalf("expected empty, got %d entries", len(loaded))
-	}
+	require.NoError(t, err, "LoadSkippedFiles")
+	require.Empty(t, loaded)
 
 	// Persist some entries.
 	entries := map[string]int64{
@@ -25,18 +24,13 @@ func TestSkippedFiles_RoundTrip(t *testing.T) {
 		"/d/e/f.jsonl": 200,
 		"/g/h/i.jsonl": 300,
 	}
-	if err := d.ReplaceSkippedFiles(entries); err != nil {
-		t.Fatalf("ReplaceSkippedFiles: %v", err)
-	}
+	require.NoError(t, d.ReplaceSkippedFiles(entries))
 
 	// Load them back.
 	loaded, err = d.LoadSkippedFiles()
-	if err != nil {
-		t.Fatalf("LoadSkippedFiles: %v", err)
-	}
-	if !maps.Equal(loaded, entries) {
-		t.Errorf("loaded map %v, want %v", loaded, entries)
-	}
+	require.NoError(t, err, "LoadSkippedFiles")
+	assert.True(t, maps.Equal(loaded, entries),
+		"loaded map %v, want %v", loaded, entries)
 }
 
 func TestSkippedFiles_ReplaceOverwrites(t *testing.T) {
@@ -46,28 +40,18 @@ func TestSkippedFiles_ReplaceOverwrites(t *testing.T) {
 		"/a.jsonl": 100,
 		"/b.jsonl": 200,
 	}
-	if err := d.ReplaceSkippedFiles(first); err != nil {
-		t.Fatalf("ReplaceSkippedFiles: %v", err)
-	}
+	require.NoError(t, d.ReplaceSkippedFiles(first))
 
 	// Replace with different entries.
 	second := map[string]int64{
 		"/c.jsonl": 300,
 	}
-	if err := d.ReplaceSkippedFiles(second); err != nil {
-		t.Fatalf("ReplaceSkippedFiles: %v", err)
-	}
+	require.NoError(t, d.ReplaceSkippedFiles(second))
 
 	loaded, err := d.LoadSkippedFiles()
-	if err != nil {
-		t.Fatalf("LoadSkippedFiles: %v", err)
-	}
-	if len(loaded) != 1 {
-		t.Fatalf("got %d entries, want 1", len(loaded))
-	}
-	if loaded["/c.jsonl"] != 300 {
-		t.Errorf("loaded[/c.jsonl] = %d, want 300", loaded["/c.jsonl"])
-	}
+	require.NoError(t, err, "LoadSkippedFiles")
+	require.Len(t, loaded, 1)
+	assert.Equal(t, int64(300), loaded["/c.jsonl"])
 }
 
 func TestSkippedFiles_DeleteSingle(t *testing.T) {
@@ -77,56 +61,35 @@ func TestSkippedFiles_DeleteSingle(t *testing.T) {
 		"/a.jsonl": 100,
 		"/b.jsonl": 200,
 	}
-	if err := d.ReplaceSkippedFiles(entries); err != nil {
-		t.Fatalf("ReplaceSkippedFiles: %v", err)
-	}
+	require.NoError(t, d.ReplaceSkippedFiles(entries))
 
-	if err := d.DeleteSkippedFile("/a.jsonl"); err != nil {
-		t.Fatalf("DeleteSkippedFile: %v", err)
-	}
+	require.NoError(t, d.DeleteSkippedFile("/a.jsonl"))
 
 	loaded, err := d.LoadSkippedFiles()
-	if err != nil {
-		t.Fatalf("LoadSkippedFiles: %v", err)
-	}
-	if len(loaded) != 1 {
-		t.Fatalf("got %d entries, want 1", len(loaded))
-	}
-	if _, ok := loaded["/a.jsonl"]; ok {
-		t.Error("/a.jsonl should have been deleted")
-	}
-	if loaded["/b.jsonl"] != 200 {
-		t.Errorf("loaded[/b.jsonl] = %d, want 200", loaded["/b.jsonl"])
-	}
+	require.NoError(t, err, "LoadSkippedFiles")
+	require.Len(t, loaded, 1)
+	_, ok := loaded["/a.jsonl"]
+	assert.False(t, ok, "/a.jsonl should have been deleted")
+	assert.Equal(t, int64(200), loaded["/b.jsonl"])
 }
 
 func TestSkippedFiles_DeleteNonexistent(t *testing.T) {
 	d := dbtest.OpenTestDB(t)
 
 	// Should not error.
-	if err := d.DeleteSkippedFile("/nope"); err != nil {
-		t.Fatalf("DeleteSkippedFile: %v", err)
-	}
+	require.NoError(t, d.DeleteSkippedFile("/nope"))
 }
 
 func TestSkippedFiles_EmptyReplace(t *testing.T) {
 	d := dbtest.OpenTestDB(t)
 
 	entries := map[string]int64{"/a.jsonl": 100}
-	if err := d.ReplaceSkippedFiles(entries); err != nil {
-		t.Fatalf("ReplaceSkippedFiles: %v", err)
-	}
+	require.NoError(t, d.ReplaceSkippedFiles(entries))
 
 	// Replace with empty map clears the table.
-	if err := d.ReplaceSkippedFiles(map[string]int64{}); err != nil {
-		t.Fatalf("ReplaceSkippedFiles empty: %v", err)
-	}
+	require.NoError(t, d.ReplaceSkippedFiles(map[string]int64{}))
 
 	loaded, err := d.LoadSkippedFiles()
-	if err != nil {
-		t.Fatalf("LoadSkippedFiles: %v", err)
-	}
-	if len(loaded) != 0 {
-		t.Fatalf("got %d entries, want 0", len(loaded))
-	}
+	require.NoError(t, err, "LoadSkippedFiles")
+	require.Empty(t, loaded)
 }

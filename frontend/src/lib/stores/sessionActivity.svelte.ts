@@ -1,8 +1,14 @@
-import { getSessionActivity } from "../api/client.js";
+import { SessionsService } from "../api/generated/index";
+import {
+  callGenerated,
+  configureGeneratedClient,
+  isAbortError,
+} from "../api/runtime.js";
 import type {
   SessionActivityBucket,
   SessionActivityResponse,
 } from "../api/types/session-activity.js";
+import { LatestRead } from "../utils/latest-read.js";
 
 export function findActiveBucketIndex(
   buckets: SessionActivityBucket[],
@@ -29,6 +35,7 @@ class SessionActivityStore {
 
   private cachedSessionId: string | null = null;
   private loadVersion = 0;
+  private activityRead = new LatestRead();
 
   /** True when buckets are loaded for the given session. */
   isForSession(sessionId: string): boolean {
@@ -45,7 +52,7 @@ class SessionActivityStore {
   async load(sessionId: string) {
     if (
       this.cachedSessionId === sessionId &&
-      (this.buckets.length > 0 || this.loaded)
+      this.loaded
     ) {
       return;
     }
@@ -56,21 +63,32 @@ class SessionActivityStore {
       this.loaded = false;
     }
     const version = ++this.loadVersion;
+    const signal = this.activityRead.begin();
     this.loading = true;
     this.error = null;
     this.firstVisibleTimestamp = null;
     try {
-      const resp: SessionActivityResponse =
-        await getSessionActivity(sessionId);
+      configureGeneratedClient();
+      const resp = await callGenerated(
+        () => SessionsService.getApiV1SessionsIdActivity({ id: sessionId }),
+        signal,
+      ) as unknown as SessionActivityResponse;
       // Ignore stale responses from previous sessions.
-      if (version !== this.loadVersion) return;
+      if (
+        version !== this.loadVersion ||
+        !this.activityRead.isCurrent(signal)
+      ) return;
       this.buckets = resp.buckets;
       this.intervalSeconds = resp.interval_seconds;
       this.totalMessages = resp.total_messages;
       this.cachedSessionId = sessionId;
       this.loaded = true;
     } catch (e) {
-      if (version !== this.loadVersion) return;
+      if (
+        isAbortError(e) ||
+        version !== this.loadVersion ||
+        !this.activityRead.isCurrent(signal)
+      ) return;
       this.error =
         e instanceof Error
           ? e.message
@@ -79,26 +97,28 @@ class SessionActivityStore {
       this.cachedSessionId = sessionId;
       this.loaded = true;
     } finally {
-      if (version === this.loadVersion) {
+      if (this.activityRead.finish(signal)) {
         this.loading = false;
       }
     }
   }
 
   reload(sessionId: string) {
-    this.cachedSessionId = null;
+    this.loaded = false;
     return this.load(sessionId);
   }
 
   /** Mark cached data as stale so the next load() refetches.
    *  Also discards any in-flight response. */
   invalidate() {
+    this.activityRead.cancel();
     this.loadVersion++;
     this.cachedSessionId = null;
     this.loaded = false;
   }
 
   clear() {
+    this.activityRead.cancel();
     this.loadVersion++;
     this.buckets = [];
     this.intervalSeconds = 0;
@@ -108,6 +128,12 @@ class SessionActivityStore {
     this.error = null;
     this.cachedSessionId = null;
     this.firstVisibleTimestamp = null;
+  }
+
+  cancelInFlight(): void {
+    this.loadVersion++;
+    this.activityRead.cancel();
+    this.loading = false;
   }
 }
 

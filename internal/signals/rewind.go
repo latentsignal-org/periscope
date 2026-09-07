@@ -175,10 +175,7 @@ func findRewindTarget(
 	}
 
 	// Rewind to the turn just before the bad stretch
-	rewindTo = badFrom - 1
-	if rewindTo < 1 {
-		rewindTo = 1
-	}
+	rewindTo = max(1, badFrom-1)
 
 	badCount := badTo - badFrom + 1
 	if badCount == 1 {
@@ -412,13 +409,13 @@ func checkRetryOfPrevious(
 	// Build signature set for previous turn
 	prevSigs := map[string]struct{}{}
 	for _, tc := range previous.ToolCalls {
-		prevSigs[toolSignature(tc)] = struct{}{}
+		prevSigs[rewindToolSignature(tc)] = struct{}{}
 	}
 
 	// Count how many current tool calls match
 	matched := 0
 	for _, tc := range current.ToolCalls {
-		if _, ok := prevSigs[toolSignature(tc)]; ok {
+		if _, ok := prevSigs[rewindToolSignature(tc)]; ok {
 			matched++
 		}
 	}
@@ -487,7 +484,7 @@ func isRewindFailure(tc RewindToolCall) bool {
 // toolSignature produces a coarse identity for a tool call:
 // tool name + the first 200 chars of input. This is enough to
 // detect retries without exact-match sensitivity.
-func toolSignature(tc RewindToolCall) string {
+func rewindToolSignature(tc RewindToolCall) string {
 	input := tc.InputJSON
 	if len(input) > 200 {
 		input = input[:200]

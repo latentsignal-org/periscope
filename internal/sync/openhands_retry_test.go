@@ -1,14 +1,15 @@
 package sync
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"go.kenn.io/agentsview/internal/dbtest"
+	"go.kenn.io/agentsview/internal/parser"
 	"github.com/stretchr/testify/require"
-	"github.com/wesm/agentsview/internal/dbtest"
-	"github.com/wesm/agentsview/internal/parser"
 )
 
 func TestProcessFileOpenHandsUsesSnapshotMtimeForRetryCache(t *testing.T) {
@@ -38,8 +39,15 @@ func TestProcessFileOpenHandsUsesSnapshotMtimeForRetryCache(t *testing.T) {
 	oldDirMtime := dirInfo.ModTime()
 
 	engine := &Engine{
-		db:        dbtest.OpenTestDB(t),
-		machine:   "local",
+		db:      dbtest.OpenTestDB(t),
+		machine: "local",
+		agentDirs: map[parser.AgentType][]string{
+			parser.AgentOpenHands: {root},
+		},
+		providerFactories: providerFactoryMap(parser.ProviderFactories()),
+		providerMigrationModes: map[parser.AgentType]parser.ProviderMigrationMode{
+			parser.AgentOpenHands: parser.ProviderMigrationProviderAuthoritative,
+		},
 		skipCache: map[string]int64{sessionDir: oldDirMtime.UnixNano()},
 	}
 
@@ -57,7 +65,7 @@ func TestProcessFileOpenHandsUsesSnapshotMtimeForRetryCache(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, oldDirMtime.UnixNano(), snapshot.Mtime)
 
-	res := engine.processFile(parser.DiscoveredFile{
+	res := engine.processFile(context.Background(), parser.DiscoveredFile{
 		Path:  sessionDir,
 		Agent: parser.AgentOpenHands,
 	})

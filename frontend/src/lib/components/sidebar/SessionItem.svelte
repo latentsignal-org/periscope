@@ -1,14 +1,44 @@
 <script lang="ts">
-  import type { Session } from "../../api/types.js";
-  import { sessions, isRecentlyActive } from "../../stores/sessions.svelte.js";
+  import { m } from "../../i18n/index.js";
+  import {
+    getSessionStatus,
+    sessions,
+    type SessionGroupInput,
+  } from "../../stores/sessions.svelte.js";
+  import {
+    buildReadProgressToken,
+    readProgress,
+  } from "../../stores/read-progress.svelte.js";
   import { starred } from "../../stores/starred.svelte.js";
   import { formatRelativeTime, truncate } from "../../utils/format.js";
-  import { agentColor as getAgentColor, agentLabel } from "../../utils/agents.js";
+  import { agentColor as getAgentColor, agentLabel, entrypointBadge } from "../../utils/agents.js";
+  import {
+    normalizeMessagePreview,
+    previewMessage,
+  } from "../../utils/messages.js";
+  import {
+    ChevronDownIcon,
+    ChevronRightIcon,
+    StarIcon,
+    UserRoundIcon,
+    UsersRoundIcon,
+  } from "../../icons.js";
+  import { StatusDot } from "@kenn-io/kit-ui";
+  import { sessionStatusLabel } from "../../utils/sessionStatus.js";
+  import { router } from "../../stores/router.svelte.js";
 
   interface Props {
-    session: Session;
+    session: SessionGroupInput;
     continuationCount?: number;
     groupSessionIds?: string[];
+    /** Optional full session objects in this row's group. When
+     * provided, the status dot uses the group's freshest activity
+     * for the time-based tier — so a parent in tool_call_pending
+     * with a subagent currently writing stays green/working
+     * instead of decaying to stale. The parent's parser status
+     * still wins over freshness for awaiting_user (a fork running
+     * in parallel doesn't change that the parent is waiting). */
+    groupSessions?: SessionGroupInput[];
     hideAgent?: boolean;
     hideProject?: boolean;
     /** Render in compact mode (smaller, used for child sessions). */
@@ -25,12 +55,17 @@
     hasSubagents?: boolean;
     /** Whether the group contains teammate children. */
     hasTeammates?: boolean;
+    /** Whether multi-select mode is active in the sidebar. */
+    selectMode?: boolean;
+    /** Whether this item is currently selected in multi-select mode. */
+    selected?: boolean;
   }
 
   let {
     session,
     continuationCount = 1,
     groupSessionIds,
+    groupSessions,
     hideAgent = false,
     hideProject = false,
     compact = false,
@@ -40,7 +75,11 @@
     isLastChild = false,
     hasSubagents = false,
     hasTeammates = false,
+    selectMode = false,
+    selected = false,
   }: Props = $props();
+
+  let sessionStatus = $derived(getSessionStatus(session, groupSessions));
 
   let isActive = $derived.by(() => {
     const aid = sessions.activeSessionId;
@@ -55,8 +94,6 @@
     return false;
   });
 
-  let recentlyActive = $derived(isRecentlyActive(session));
-
   let agentColor = $derived(
     getAgentColor(session.agent),
   );
@@ -67,9 +104,22 @@
     session.machine !== "local",
   );
 
+  let hasUnread = $derived.by(() => {
+    const candidates = groupSessions && !expanded
+      ? groupSessions
+      : [session];
+    return candidates.some((candidate) => {
+      const token = buildReadProgressToken(candidate);
+      return token !== null &&
+        readProgress.hasUnread(candidate.id, token);
+    });
+  });
+
   /** Whether this session is a team member (received a <teammate-message>). */
   let isTeamSession = $derived(
-    session.first_message?.includes("<teammate-message") ?? false,
+    session.is_teammate
+      ?? session.first_message?.includes("<teammate-message")
+      ?? false,
   );
 
   /**
@@ -77,8 +127,11 @@
    * description (e.g. "Task #2: Align ROADMAP.md...") instead of the
    * repetitive "You are a teammate on..." boilerplate.
    */
-  let displayName = $derived.by(() => {
-    if (session.display_name) return truncate(session.display_name, 50);
+  let displayLabel = $derived.by((): { text: string; isShell: boolean } => {
+    const name = session.display_name ?? null;
+    if (name) {
+      return { text: name, isShell: false };
+    }
     let msg = session.first_message ?? "";
     if (msg.includes("<teammate-message")) {
       msg = msg
@@ -88,16 +141,18 @@
       // Extract "Task #N: description" from the boilerplate.
       const taskMatch = msg.match(/Task\s*#?\d+[:\s]+(.+?)(?:\s+\d+\.|$)/s);
       if (taskMatch) {
-        return truncate(taskMatch[1]!.trim(), 50);
+        return { text: taskMatch[1]!.trim(), isShell: false };
       }
       // Fallback: skip the "You are a teammate on ..." boilerplate.
       const afterTeam = msg.match(/team[."]\s*[^.]*?[.]\s+(.+)/s)
         ?? msg.match(/You are a teammate[^.]*\.\s+(.+)/s);
       if (afterTeam) {
-        return truncate(afterTeam[1]!.trim(), 50);
+        return { text: afterTeam[1]!.trim(), isShell: false };
       }
     }
-    return msg ? truncate(msg, 50) : truncate(session.project, 30);
+    const p = previewMessage(msg);
+    if (p.text) return { text: p.text, isShell: p.isShell };
+    return { text: session.project, isShell: false };
   });
 
   let timeStr = $derived(
@@ -111,6 +166,10 @@
   );
 
   let hasChildren = $derived(childCount > 0 && !!onToggleExpand);
+
+  const sessionHref = $derived.by(() =>
+    router.buildSessionHref(session.id),
+  );
 
   /** Whether this is an orphaned teammate showing at root level. */
   let isOrphanedTeammate = $derived(
@@ -154,7 +213,10 @@
   }
 
   function startRename() {
-    renameValue = session.display_name ?? session.first_message ?? "";
+    renameValue =
+      session.display_name
+      ?? normalizeMessagePreview(session.first_message)
+      ?? "";
     renaming = true;
     closeContextMenu();
     requestAnimationFrame(() => renameInput?.select());
@@ -183,6 +245,54 @@
   function handleDblClick(e: MouseEvent) {
     e.preventDefault();
     startRename();
+  }
+
+  function handleSessionClick(e: MouseEvent) {
+    if (
+      e.metaKey ||
+      e.ctrlKey ||
+      e.shiftKey ||
+      e.altKey ||
+      e.button !== 0
+    ) {
+      return;
+    }
+    e.preventDefault();
+    if (selectMode) {
+      sessions.toggleSelection(session.id);
+    } else {
+      sessions.selectSession(session.id);
+    }
+  }
+
+  function handleRowClick(e: MouseEvent) {
+    if (
+      e.metaKey ||
+      e.ctrlKey ||
+      e.shiftKey ||
+      e.altKey ||
+      e.button !== 0
+    ) {
+      return;
+    }
+    const target = e.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    if (target.closest("a, button, input")) {
+      return;
+    }
+    if (selectMode) {
+      sessions.toggleSelection(session.id);
+    } else {
+      sessions.selectSession(session.id);
+    }
+  }
+
+  function handleSelectClick(e: MouseEvent) {
+    e.stopPropagation();
+    e.preventDefault();
+    sessions.toggleSelection(session.id);
   }
 
   $effect(() => {
@@ -215,6 +325,7 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- svelte-ignore a11y_click_events_have_key_events -->
 <div
   class="session-item"
   class:active={isActive}
@@ -224,10 +335,23 @@
   class:orphaned-teammate={isOrphanedTeammate}
   data-session-id={session.id}
   role="button"
+  aria-current={isActive ? "page" : undefined}
   tabindex="0"
   style:padding-left="{8 + depth * 16}px"
-  onclick={() => sessions.selectSession(session.id)}
-  onkeydown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); sessions.selectSession(session.id); } }}
+  onclick={handleRowClick}
+  onkeydown={(e) => {
+    if (e.target !== e.currentTarget) {
+      return;
+    }
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      if (selectMode) {
+        sessions.toggleSelection(session.id);
+      } else {
+        sessions.selectSession(session.id);
+      }
+    }
+  }}
   oncontextmenu={handleContextMenu}
 >
   <!-- Tree expand/collapse or connector -->
@@ -237,18 +361,13 @@
       class="tree-toggle"
       onclick={handleToggle}
       tabindex="-1"
-      aria-label={expanded ? "Collapse" : "Expand"}
+      aria-label={expanded ? m.sidebar_row_collapse() : m.sidebar_row_expand()}
     >
-      <svg
-        class="tree-arrow"
-        class:expanded
-        width="10"
-        height="10"
-        viewBox="0 0 16 16"
-        fill="currentColor"
-      >
-        <path d="M6.22 3.22a.75.75 0 011.06 0l4.25 4.25a.75.75 0 010 1.06l-4.25 4.25a.75.75 0 01-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 010-1.06z"/>
-      </svg>
+      {#if expanded}
+        <ChevronDownIcon class="tree-arrow" size="10" strokeWidth="2.5" aria-hidden="true" />
+      {:else}
+        <ChevronRightIcon class="tree-arrow" size="10" strokeWidth="2.5" aria-hidden="true" />
+      {/if}
     </button>
   {:else if depth > 0}
     <span class="tree-dash"></span>
@@ -256,13 +375,27 @@
     <span class="tree-spacer"></span>
   {/if}
 
-  {#if !hideAgent || recentlyActive}
-    <span
-      class="agent-dot"
-      class:recently-active={recentlyActive}
-      style:background={agentColor}
-    ></span>
+  {#if selectMode}
+    <button
+      type="button"
+      class="select-checkbox"
+      class:checked={selected}
+      onclick={handleSelectClick}
+      tabindex="-1"
+      aria-label={selected
+        ? m.sidebar_row_deselect_session()
+        : m.sidebar_row_select_session()}
+    >
+      {#if selected}
+        <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+          <path d="M2.5 6L5 8.5L9.5 3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      {/if}
+    </button>
   {/if}
+
+  <StatusDot status={sessionStatus} label={sessionStatusLabel(sessionStatus)} size={6} />
+
 
   <div class="session-info">
     {#if renaming}
@@ -286,30 +419,48 @@
         }}
       />
     {:else}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="session-name" ondblclick={handleDblClick}>{displayName}</div>
+      <a
+        class="session-info-link"
+        href={sessionHref}
+        onclick={handleSessionClick}
+      >
+        <div
+          class="session-name"
+          class:shell={displayLabel.isShell}
+          ondblclick={handleDblClick}
+        >
+          {#if displayLabel.isShell}
+            <code>{displayLabel.text}</code>
+          {:else}
+            {displayLabel.text}
+          {/if}
+        </div>
+        <div class="session-meta">
+          {#if !hideProject}
+            <span class="session-project">{session.project}</span>
+          {/if}
+          <span class="session-time">{timeStr}</span>
+          {#if hasUnread}
+            <span
+              class="session-unread-indicator"
+              role="status"
+              aria-label={m.read_progress_unread_messages()}
+              title={m.read_progress_unread_messages()}
+            ></span>
+          {/if}
+          <span class="session-count">{session.user_message_count}</span>
+          {#if hasSubagents}
+            <UserRoundIcon class="group-hint-icon" size="9" strokeWidth="2" aria-hidden="true" />
+          {/if}
+          {#if hasTeammates}
+            <UsersRoundIcon class="group-hint-icon" size="11" strokeWidth="2" aria-hidden="true" />
+          {/if}
+          {#if childCount > 0 && !onToggleExpand}
+            <span class="continuation-badge">x{continuationCount}</span>
+          {/if}
+        </div>
+      </a>
     {/if}
-    <div class="session-meta">
-      {#if !hideProject}
-        <span class="session-project">{session.project}</span>
-      {/if}
-      <span class="session-time">{timeStr}</span>
-      <span class="session-count">{session.user_message_count}</span>
-      {#if hasSubagents}
-        <svg class="group-hint-icon" width="9" height="9" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-          <path d="M10.56 7.01A3.5 3.5 0 108 0a3.5 3.5 0 002.56 7.01zM8 8.5c-2.7 0-5 1.7-5 4v.75c0 .41.34.75.75.75h8.5c.41 0 .75-.34.75-.75v-.75c0-2.3-2.3-4-5-4z"/>
-        </svg>
-      {/if}
-      {#if hasTeammates}
-        <svg class="group-hint-icon" width="11" height="9" viewBox="0 0 20 16" fill="currentColor" aria-hidden="true">
-          <path d="M7.56 7.01A3.5 3.5 0 105 0a3.5 3.5 0 002.56 7.01zM5 8.5c-2.7 0-5 1.7-5 4v.75c0 .41.34.75.75.75h8.5c.41 0 .75-.34.75-.75v-.75c0-2.3-2.3-4-5-4z"/>
-          <path d="M17.56 7.01A3.5 3.5 0 1015 0a3.5 3.5 0 002.56 7.01zM15 8.5c-2.7 0-5 1.7-5 4v.75c0 .41.34.75.75.75h8.5c.41 0 .75-.34.75-.75v-.75c0-2.3-2.3-4-5-4z" opacity="0.6"/>
-        </svg>
-      {/if}
-      {#if childCount > 0 && !onToggleExpand}
-        <span class="continuation-badge">x{continuationCount}</span>
-      {/if}
-    </div>
   </div>
 
   {#if !compact}
@@ -317,24 +468,23 @@
       class="star-btn"
       class:starred={isStarred}
       onclick={handleStar}
-      title={isStarred ? "Unstar session" : "Star session"}
-      aria-label={isStarred ? "Unstar session" : "Star session"}
+      title={isStarred ? m.sidebar_row_unstar_session() : m.sidebar_row_star_session()}
+      aria-label={isStarred ? m.sidebar_row_unstar_session() : m.sidebar_row_star_session()}
     >
       {#if isStarred}
-        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-          <path d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z"/>
-        </svg>
+        <StarIcon size="12" fill="currentColor" strokeWidth="0" aria-hidden="true" />
       {:else}
-        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
-          <path d="M8 1.5l1.88 3.81 4.21.61-3.05 2.97.72 4.19L8 11.1l-3.77 1.98.72-4.19L1.9 5.92l4.21-.61L8 1.5z"/>
-        </svg>
+        <StarIcon size="12" strokeWidth="1.4" aria-hidden="true" />
       {/if}
     </button>
   {/if}
   {#if !compact && (!hideAgent || showMachine)}
     <div class="side-meta">
       {#if !hideAgent}
-        <span class="agent-tag" style:color={agentColor}>{agentLabel(session.agent)}</span>
+        <span class="agent-tag" style:color={agentColor}>{agentLabel(session.agent, session.agent_label)}</span>
+        {#if entrypointBadge(session.entrypoint)}
+          <span class="entrypoint-tag">{entrypointBadge(session.entrypoint)}</span>
+        {/if}
       {/if}
       {#if showMachine}
         <span class="machine-tag" title={session.machine}>
@@ -352,10 +502,19 @@
     style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
   >
     <button class="context-menu-item" onclick={startRename}>
-      Rename
+      {m.sidebar_row_rename()}
+    </button>
+    <button
+      class="context-menu-item"
+      onclick={() => {
+        window.open(sessionHref, "_blank", "noopener");
+        closeContextMenu();
+      }}
+    >
+      {m.sidebar_row_open_in_new_tab()}
     </button>
     <button class="context-menu-item danger" onclick={handleDelete}>
-      Delete
+      {m.sidebar_row_delete()}
     </button>
   </div>
 {/if}
@@ -364,13 +523,13 @@
   .session-item {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: var(--space-2);
     width: 100%;
     height: 42px;
     padding: 0 10px;
     padding-right: 10px;
     text-align: left;
-    transition: background 0.1s;
+    transition: background 0.1s, box-shadow 0.1s;
     user-select: none;
     -webkit-user-select: none;
     cursor: pointer;
@@ -392,7 +551,28 @@
   }
 
   .session-item.active {
-    background: var(--bg-surface-hover);
+    background: color-mix(in srgb, var(--accent-blue) 11%, var(--bg-surface-hover));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-blue) 28%, transparent);
+  }
+
+  .session-item.active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 5px;
+    bottom: 5px;
+    width: 3px;
+    border-radius: 0 2px 2px 0;
+    background: var(--accent-blue);
+  }
+
+  .session-item.active .session-name {
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+
+  .session-item.active .session-meta {
+    color: var(--text-secondary);
   }
 
   /* Orphaned teammate at root level — dim it slightly */
@@ -400,7 +580,7 @@
     opacity: 0.6;
   }
 
-  /* Tree toggle (▶/▼) */
+  /* Tree toggle */
   .tree-toggle {
     all: unset;
     display: flex;
@@ -418,12 +598,8 @@
     color: var(--text-primary);
   }
 
-  .tree-arrow {
-    transition: transform 150ms ease;
-  }
-
-  .tree-arrow.expanded {
-    transform: rotate(90deg);
+  :global(.tree-arrow) {
+    flex-shrink: 0;
   }
 
   /* Spacer for leaf nodes — same width as toggle to align text */
@@ -438,37 +614,11 @@
     flex-shrink: 0;
   }
 
-  .agent-dot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .agent-dot.recently-active {
-    animation: pulse-glow 3s ease-in-out infinite;
-    will-change: box-shadow;
-  }
-
-  @keyframes pulse-glow {
-    0%,
-    100% {
-      box-shadow: 0 0 0 0 transparent;
-    }
-    50% {
-      box-shadow: 0 0 6px 3px color-mix(
-        in srgb,
-        var(--accent-green) 40%,
-        transparent
-      );
-    }
-  }
-
   .side-meta {
     display: flex;
     flex-direction: column;
     align-items: flex-end;
-    gap: 3px;
+    gap: var(--space-1);
     min-width: 0;
     flex-shrink: 0;
     margin-left: 4px;
@@ -488,6 +638,11 @@
     text-overflow: ellipsis;
   }
 
+  .entrypoint-tag {
+    opacity: 0.75;
+    font-size: 0.9em;
+  }
+
   .machine-tag {
     font-size: 9px;
     line-height: 1;
@@ -504,6 +659,13 @@
     flex: 1;
   }
 
+  .session-info-link {
+    display: block;
+    color: inherit;
+    text-decoration: none;
+    min-width: 0;
+  }
+
   .session-name {
     font-size: 12px;
     font-weight: 450;
@@ -513,6 +675,16 @@
     text-overflow: ellipsis;
     line-height: 1.3;
     letter-spacing: -0.005em;
+  }
+
+  .session-name.shell > code {
+    font-family: var(--font-mono);
+    font-size: 0.95em;
+    background: transparent;
+    border: none;
+    padding: 0;
+    color: var(--text-secondary);
+    letter-spacing: 0;
   }
 
   .compact .session-name {
@@ -559,7 +731,7 @@
     flex-shrink: 0;
   }
 
-  .group-hint-icon {
+  :global(.group-hint-icon) {
     flex-shrink: 0;
     color: var(--text-muted);
     opacity: 0.5;
@@ -567,6 +739,17 @@
 
   .session-count {
     white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .session-unread-indicator {
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: var(--accent-blue);
+    box-shadow: 0 0 0 1px color-mix(
+      in srgb, var(--accent-blue) 24%, transparent
+    );
     flex-shrink: 0;
   }
 
@@ -618,11 +801,11 @@
 
   :global(.context-menu) {
     position: fixed;
-    z-index: 9999;
+    z-index: var(--z-popover);
     background: var(--bg-surface);
     border: 1px solid var(--border-default);
     border-radius: 6px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    box-shadow: var(--shadow-lg);
     padding: 4px 0;
     min-width: 120px;
   }
@@ -650,5 +833,29 @@
 
   :global(.context-menu .context-menu-item.danger:hover) {
     background: color-mix(in srgb, var(--accent-red, #e55) 10%, transparent);
+  }
+
+  .select-checkbox {
+    all: unset;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    border: 1.5px solid var(--border-default);
+    border-radius: 3px;
+    cursor: pointer;
+    color: white;
+    transition: background 0.1s, border-color 0.1s;
+  }
+
+  .select-checkbox:hover {
+    border-color: var(--accent-blue);
+  }
+
+  .select-checkbox.checked {
+    background: var(--accent-blue);
+    border-color: var(--accent-blue);
   }
 </style>

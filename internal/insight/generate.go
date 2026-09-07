@@ -71,6 +71,18 @@ type GenerateStreamFunc func(
 	ctx context.Context, agent, prompt string, onLog LogFunc,
 ) (Result, error)
 
+// AgentConfig holds insight generation overrides for one agent.
+type AgentConfig struct {
+	Binary      string
+	Sandbox     string
+	AllowUnsafe bool
+}
+
+// GenerateOptions holds optional insight generation overrides.
+type GenerateOptions struct {
+	Agents map[string]AgentConfig
+}
+
 // Generate invokes an AI agent CLI to generate an insight.
 // The agent parameter selects which CLI to use (claude,
 // codex, gemini). The prompt is passed via stdin.
@@ -85,13 +97,24 @@ func Generate(
 func GenerateStream(
 	ctx context.Context, agent, prompt string, onLog LogFunc,
 ) (Result, error) {
+	return GenerateStreamWithOptions(
+		ctx, agent, prompt, onLog, GenerateOptions{},
+	)
+}
+
+// GenerateStreamWithOptions invokes an AI agent CLI to generate an
+// insight, using configured binary paths before falling back to PATH.
+func GenerateStreamWithOptions(
+	ctx context.Context, agent, prompt string, onLog LogFunc,
+	opts GenerateOptions,
+) (Result, error) {
 	if !ValidAgents[agent] {
 		return Result{}, fmt.Errorf(
 			"unsupported agent: %s", agent,
 		)
 	}
 
-	path, err := exec.LookPath(agentBinary(agent))
+	path, err := resolveAgentBinary(agent, opts)
 	if err != nil {
 		return Result{}, fmt.Errorf(
 			"%s CLI not found: %w", agent, err,
@@ -104,12 +127,21 @@ func GenerateStream(
 	case "copilot":
 		return generateCopilot(ctx, path, prompt, onLog)
 	case "gemini":
-		return generateGemini(ctx, path, prompt, onLog)
+		return generateGemini(
+			ctx, path, prompt, onLog, opts.Agents[agent],
+		)
 	case "kiro":
 		return generateKiro(ctx, path, prompt, onLog)
 	default:
 		return generateClaude(ctx, path, prompt, onLog)
 	}
+}
+
+func resolveAgentBinary(agent string, opts GenerateOptions) (string, error) {
+	if cfg, ok := opts.Agents[agent]; ok && strings.TrimSpace(cfg.Binary) != "" {
+		return strings.TrimSpace(cfg.Binary), nil
+	}
+	return exec.LookPath(agentBinary(agent))
 }
 
 // agentEnv returns the current environment with
@@ -406,7 +438,7 @@ func parseCodexStream(
 	r io.Reader, onLog LogFunc,
 ) (string, error) {
 	br := bufio.NewReader(r)
-	var messages []string
+	messages := make([]string, 0)
 	indexByID := make(map[string]int)
 
 	for {
@@ -543,14 +575,22 @@ func generateCopilot(
 // and parses the JSONL stream for result/assistant messages.
 func generateGemini(
 	ctx context.Context, path, prompt string, onLog LogFunc,
+	cfg AgentConfig,
 ) (Result, error) {
+	if strings.TrimSpace(cfg.Sandbox) == "" && !cfg.AllowUnsafe {
+		return Result{}, fmt.Errorf(
+			"gemini insights require an explicit sandbox or unsafe opt-in; set [agent.gemini].sandbox to a Gemini sandbox provider or [agent.gemini].allow_unsafe = true",
+		)
+	}
 	cmd := exec.CommandContext(
 		ctx, path,
 		"--model", geminiInsightModel,
 		"--output-format", "stream-json",
-		"--sandbox",
 	)
 	cmd.Env = agentEnv()
+	if sandbox := strings.TrimSpace(cfg.Sandbox); sandbox != "" {
+		cmd.Env = append(cmd.Env, "GEMINI_SANDBOX="+sandbox)
+	}
 	cmd.Stdin = strings.NewReader(prompt)
 
 	stdoutPipe, err := cmd.StdoutPipe()

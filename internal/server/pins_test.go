@@ -6,7 +6,10 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/wesm/agentsview/internal/db"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.kenn.io/agentsview/internal/db"
 )
 
 // pinSessionMessage pins the first message of a session via the DB
@@ -14,13 +17,11 @@ import (
 func pinSessionMessage(t *testing.T, te *testEnv, sessionID string) {
 	t.Helper()
 	msgs, err := te.db.GetMessages(context.Background(), sessionID, 0, 1, true)
-	if err != nil || len(msgs) == 0 {
-		t.Fatalf("pinSessionMessage: no messages in session %s (err=%v)", sessionID, err)
-	}
+	require.NoError(t, err, "pinSessionMessage: GetMessages for session %s", sessionID)
+	require.NotEmpty(t, msgs, "pinSessionMessage: no messages in session %s", sessionID)
 	id, err := te.db.PinMessage(sessionID, msgs[0].ID, nil)
-	if err != nil || id == 0 {
-		t.Fatalf("pinSessionMessage: PinMessage failed for session %s (id=%d, err=%v)", sessionID, id, err)
-	}
+	require.NoError(t, err, "pinSessionMessage: PinMessage for session %s", sessionID)
+	require.NotZero(t, id, "pinSessionMessage: PinMessage returned 0 id for session %s", sessionID)
 }
 
 func TestHandleListPins_NoFilter(t *testing.T) {
@@ -33,18 +34,12 @@ func TestHandleListPins_NoFilter(t *testing.T) {
 	pinSessionMessage(t, te, "s2")
 
 	w := te.get(t, "/api/v1/pins")
-	if w.Code != http.StatusOK {
-		t.Fatalf("GET /api/v1/pins: status %d, want 200", w.Code)
-	}
+	require.Equal(t, http.StatusOK, w.Code)
 	var resp struct {
 		Pins []db.PinnedMessage `json:"pins"`
 	}
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decoding response: %v", err)
-	}
-	if len(resp.Pins) != 2 {
-		t.Errorf("got %d pins, want 2", len(resp.Pins))
-	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Len(t, resp.Pins, 2)
 }
 
 func TestHandleListPins_ProjectFilter(t *testing.T) {
@@ -71,19 +66,12 @@ func TestHandleListPins_ProjectFilter(t *testing.T) {
 	for _, tc := range tests {
 		t.Run("query="+tc.query, func(t *testing.T) {
 			w := te.get(t, "/api/v1/pins"+tc.query)
-			if w.Code != http.StatusOK {
-				t.Fatalf("GET /api/v1/pins%s: status %d, want 200", tc.query, w.Code)
-			}
+			require.Equal(t, http.StatusOK, w.Code, "GET /api/v1/pins%s", tc.query)
 			var resp struct {
 				Pins []db.PinnedMessage `json:"pins"`
 			}
-			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-				t.Fatalf("decoding response: %v", err)
-			}
-			if len(resp.Pins) != tc.wantCount {
-				t.Errorf("query %q: got %d pins, want %d",
-					tc.query, len(resp.Pins), tc.wantCount)
-			}
+			require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+			assert.Len(t, resp.Pins, tc.wantCount, "query %q", tc.query)
 		})
 	}
 }

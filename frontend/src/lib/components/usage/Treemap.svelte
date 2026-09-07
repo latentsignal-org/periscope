@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { m } from "../../i18n/index.js";
   import { squarify } from "../../utils/treemap.js";
+  import { formatMoney, moneyFromMicrodollars } from "../../money.js";
 
   interface TreemapItem {
     id: string;
@@ -13,9 +15,19 @@
     items: TreemapItem[];
     height?: number;
     onSelect?: (id: string) => void;
+    formatValue?: (value: number) => string;
   }
 
-  const { items, height = 260, onSelect }: Props = $props();
+  function formatCost(value: number): string {
+    return formatMoney(moneyFromMicrodollars(value));
+  }
+
+  const {
+    items,
+    height = 260,
+    onSelect,
+    formatValue = formatCost,
+  }: Props = $props();
 
   let containerEl: HTMLDivElement | undefined = $state();
   let width = $state(600);
@@ -31,11 +43,6 @@
     ro.observe(containerEl);
     return () => ro.disconnect();
   });
-
-  function formatCost(v: number): string {
-    if (v >= 100) return `$${v.toFixed(0)}`;
-    return `$${v.toFixed(2)}`;
-  }
 
   interface Tile {
     id: string;
@@ -108,12 +115,12 @@
       class="tile"
       tabindex="0"
       role="button"
-      aria-label="Hide {tile.label} from chart"
+      aria-label={m.usage_hide_from_chart({ label: tile.label })}
       onclick={() => onSelect?.(tile.id)}
       onkeydown={(e) => handleKey(e, tile.id)}
       clip-path="url(#{clipId})"
     >
-      <title>Click to hide {tile.label}</title>
+      <title>{m.usage_click_to_hide({ label: tile.label })}</title>
       <rect
         x={tile.x}
         y={tile.y}
@@ -135,7 +142,7 @@
           y={tile.y + 30}
           class="tile-value"
         >
-          {formatCost(tile.value)}
+          {formatValue(tile.value)}
         </text>
         {#if tile.meta}
           <text
@@ -196,7 +203,9 @@
   }
 
   .tile-value {
-    fill: rgba(255, 255, 255, 0.85);
+    /* White regardless of theme: drawn over saturated per-agent tile fills */
+    fill: white;
+    fill-opacity: 0.85;
     font-size: 11px;
     font-weight: 500;
     font-family: var(--font-mono);
@@ -204,7 +213,9 @@
   }
 
   .tile-meta {
-    fill: rgba(255, 255, 255, 0.7);
+    /* White regardless of theme: drawn over saturated per-agent tile fills */
+    fill: white;
+    fill-opacity: 0.7;
     font-size: 9px;
     font-family: var(--font-sans);
     pointer-events: none;

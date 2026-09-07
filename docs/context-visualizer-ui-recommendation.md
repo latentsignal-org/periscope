@@ -1,3 +1,8 @@
+---
+title: Context Visualizer UI Recommendation
+description: Recommended MVP UI direction for the context visualizer
+---
+
 # Context Visualizer UI Recommendation
 
 ## Document Status
@@ -5,7 +10,7 @@
 - Status: Recommended MVP UI direction
 - Date: 2026-04-18
 - Depends on:
-  [`context-session-visualizer-spec.md`](./context-session-visualizer-spec.md),
+  [`periscope-spec.md`](./periscope-spec.md),
   [`context-session-visualizer-roadmap.md`](./context-session-visualizer-roadmap.md),
   [`context-session-visualizer-mvp-plan.md`](./context-session-visualizer-mvp-plan.md),
   [`v1-ui-spec.md`](./v1-ui-spec.md)

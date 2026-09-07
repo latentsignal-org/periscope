@@ -1,0 +1,73 @@
+FROM --platform=$BUILDPLATFORM node:24-bookworm AS frontend-build
+
+WORKDIR /src/frontend
+
+COPY frontend/package.json frontend/package-lock.json ./
+
+# @kenn-io/kit-ui is a commit-pinned git dependency
+# (github:kenn-io/kit-ui#<commit> in frontend/package.json); the repository
+# is public, so npm clones it anonymously over HTTPS (git ships in the
+# node:bookworm image).
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
+FROM golang:1.26.3-bookworm AS build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+# sqlite-vec's cgo bindings (pulled in via go.kenn.io/kit/vector/sqlitevec)
+# #include "sqlite3.h", which this image does not ship. Compile them against
+# the header of the exact SQLite amalgamation that mattn/go-sqlite3 bundles
+# and statically links, so header and linked library always match.
+# "-O2 -g" restates Go's built-in default, which setting CGO_CFLAGS would
+# otherwise replace, leaving the SQLite amalgamation unoptimized (2-3x
+# slower queries).
+RUN mkdir -p /sqlite-include \
+    && cp "$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3)/sqlite3-binding.h" /sqlite-include/sqlite3.h
+ENV CGO_CFLAGS="-O2 -g -I/sqlite-include"
+
+COPY . ./
+COPY --from=frontend-build /src/frontend/dist ./internal/web/dist
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=
+
+RUN go run ./internal/pricing/cmd/litellm-snapshot -restore
+
+RUN CGO_ENABLED=1 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -tags fts5 -trimpath -buildvcs=false \
+      -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" \
+      -o /out/periscope ./cmd/periscope
+
+RUN /out/periscope --version
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /data /agents
+
+ENV PERISCOPE_DATA_DIR=/data
+
+COPY --from=build /out/periscope /usr/local/bin/periscope
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+
+RUN chmod +x /usr/local/bin/periscope /usr/local/bin/docker-entrypoint.sh
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["--host", "0.0.0.0", "--no-browser"]

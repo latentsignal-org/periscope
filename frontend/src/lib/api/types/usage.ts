@@ -1,12 +1,14 @@
 /** Usage types — match Go structs in internal/server/usage.go
  *  and internal/db/usage.go */
+import type { Money } from "../../money.js";
 
 export interface UsageTotals {
   inputTokens: number;
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
-  totalCost: number;
+  totalCost: Money;
+  copilotAICredits?: number;
 }
 
 export interface ModelBreakdown {
@@ -15,16 +17,17 @@ export interface ModelBreakdown {
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
-  cost: number;
+  cost: Money;
 }
 
 export interface ProjectBreakdown {
+  project_key: string;
   project: string;
   inputTokens: number;
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
-  cost: number;
+  cost: Money;
 }
 
 export interface AgentBreakdown {
@@ -33,7 +36,16 @@ export interface AgentBreakdown {
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
-  cost: number;
+  cost: Money;
+}
+
+export interface MachineBreakdown {
+  machineName: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  cost: Money;
 }
 
 export interface DailyUsageEntry {
@@ -42,20 +54,22 @@ export interface DailyUsageEntry {
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
-  totalCost: number;
+  totalCost: Money;
   modelsUsed: string[];
   modelBreakdowns?: ModelBreakdown[];
   projectBreakdowns?: ProjectBreakdown[];
   agentBreakdowns?: AgentBreakdown[];
+  machineBreakdowns?: MachineBreakdown[];
 }
 
 export interface ProjectTotal {
+  project_key: string;
   project: string;
   inputTokens: number;
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
-  cost: number;
+  cost: Money;
 }
 
 export interface ModelTotal {
@@ -64,7 +78,7 @@ export interface ModelTotal {
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
-  cost: number;
+  cost: Money;
 }
 
 export interface AgentTotal {
@@ -73,7 +87,7 @@ export interface AgentTotal {
   outputTokens: number;
   cacheCreationTokens: number;
   cacheReadTokens: number;
-  cost: number;
+  cost: Money;
 }
 
 export interface CacheStats {
@@ -82,7 +96,7 @@ export interface CacheStats {
   uncachedInputTokens: number;
   outputTokens: number;
   hitRate: number;
-  savingsVsUncached: number;
+  savingsVsUncached: Money;
 }
 
 export interface UsageSessionCounts {
@@ -94,8 +108,53 @@ export interface UsageSessionCounts {
 export interface UsageComparison {
   priorFrom: string;
   priorTo: string;
-  priorTotalCost: number;
+  priorTotalCost: Money;
   deltaPct: number;
+}
+
+export interface UnsupportedUsage {
+  kind: string;
+}
+
+export type UsagePairwiseDimension = "model" | "project";
+
+export interface UsagePairwiseComparisonSide {
+  totalCost: Money;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  totalTokens: number;
+  sessionCount: number;
+  costPerSession?: Money;
+  tokensPerSession?: number;
+}
+
+export interface UsagePairwiseComparisonDelta {
+  totalCostDelta: Money;
+  totalCostDeltaRatio: number | null;
+  inputTokensDelta: number;
+  inputTokensDeltaRatio: number | null;
+  outputTokensDelta: number;
+  outputTokensDeltaRatio: number | null;
+  cacheCreationDelta: number;
+  cacheCreationDeltaRatio: number | null;
+  cacheReadDelta: number;
+  cacheReadDeltaRatio: number | null;
+  totalTokensDelta: number;
+  totalTokensDeltaRatio: number | null;
+  sessionCountDelta: number;
+  sessionCountDeltaRatio: number | null;
+  costPerSessionDelta: Money | null;
+  costPerSessionRatio: number | null;
+  tokensPerSessionDelta: number | null;
+  tokensPerSessionRatio: number | null;
+}
+
+export interface UsagePairwiseComparisonResponse {
+  left: UsagePairwiseComparisonSide;
+  right: UsagePairwiseComparisonSide;
+  deltas: UsagePairwiseComparisonDelta;
 }
 
 export interface UsageSummaryResponse {
@@ -108,6 +167,7 @@ export interface UsageSummaryResponse {
   agentTotals: AgentTotal[];
   sessionCounts: UsageSessionCounts;
   cacheStats: CacheStats;
+  unsupportedUsage?: UnsupportedUsage;
   comparison?: UsageComparison;
 }
 
@@ -117,8 +177,12 @@ export interface TopSessionEntry {
   agent: string;
   project: string;
   startedAt: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
   totalTokens: number;
-  cost: number;
+  cost: Money;
 }
 
 export type TopUsageSessionsResponse = TopSessionEntry[];
@@ -127,11 +191,16 @@ export interface UsageParams {
   from?: string;
   to?: string;
   project?: string;
+  machine?: string;
   agent?: string;
   model?: string;
   exclude_project?: string;
   exclude_agent?: string;
   exclude_model?: string;
+  min_user_messages?: number;
+  include_one_shot?: boolean;
+  include_automated?: boolean;
+  active_since?: string;
   timezone?: string;
 }
 

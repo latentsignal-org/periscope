@@ -1,5 +1,19 @@
 import type { PinnedMessage } from "../api/types.js";
-import * as api from "../api/client.js";
+import { PinsService } from "../api/generated/index";
+import {
+  callGenerated,
+  configureGeneratedClient,
+  isAbortError,
+} from "../api/runtime.js";
+import { LatestRead } from "../utils/latest-read.js";
+
+interface PinsResponse {
+  pins: PinnedMessage[];
+}
+
+interface PinMessageResponse {
+  id: number;
+}
 
 class PinsStore {
   /** All pins across all sessions (loaded for pinned tab). */
@@ -18,6 +32,8 @@ class PinsStore {
   #mutationVersion = 0;
   /** Project that the current this.pins was fetched for. */
   #loadedProject: string | undefined = undefined;
+  #allPinsRead = new LatestRead();
+  #sessionPinsRead = new LatestRead();
 
   async loadAll(project?: string) {
     // Clear immediately when switching projects to prevent stale
@@ -28,20 +44,30 @@ class PinsStore {
     }
     this.loading = true;
     const loadVer = ++this.#loadAllVersion;
+    const signal = this.#allPinsRead.begin();
     const mutVer = this.#mutationVersion;
     try {
-      const res = await api.listPins(project);
+      configureGeneratedClient();
+      const res = await callGenerated(
+        () => PinsService.getApiV1Pins({ project }),
+        signal,
+      ) as unknown as PinsResponse;
       // Apply only if this is the latest load AND no mutation
       // occurred since the request started (which would make
       // this response stale relative to the optimistic state).
-      if (this.#loadAllVersion === loadVer && this.#mutationVersion === mutVer) {
+      if (
+        this.#allPinsRead.isCurrent(signal) &&
+        this.#loadAllVersion === loadVer &&
+        this.#mutationVersion === mutVer
+      ) {
         this.pins = res.pins;
         this.#loadedProject = project;
       }
-    } catch {
+    } catch (e) {
+      if (isAbortError(e) || !this.#allPinsRead.isCurrent(signal)) return;
       // Silently ignore — pins are non-critical.
     } finally {
-      if (this.#loadAllVersion === loadVer) {
+      if (this.#allPinsRead.finish(signal)) {
         this.loading = false;
       }
     }
@@ -51,6 +77,7 @@ class PinsStore {
     const isNewSession = this.#currentSessionId !== sessionId;
     this.#currentSessionId = sessionId;
     const loadVer = ++this.#loadVersion;
+    const signal = this.#sessionPinsRead.begin();
     const mutVer = this.#mutationVersion;
     // Only clear on session change to avoid flickering pins
     // during re-fetches triggered by mutation completion.
@@ -58,20 +85,43 @@ class PinsStore {
       this.sessionPinIds = new Set();
     }
     try {
-      const res = await api.listSessionPins(sessionId);
-      if (this.#loadVersion === loadVer && this.#mutationVersion === mutVer) {
+      configureGeneratedClient();
+      const res = await callGenerated(
+        () => PinsService.getApiV1SessionsIdPins({ id: sessionId }),
+        signal,
+      ) as unknown as PinsResponse;
+      if (
+        this.#sessionPinsRead.isCurrent(signal) &&
+        this.#loadVersion === loadVer &&
+        this.#mutationVersion === mutVer
+      ) {
         this.sessionPinIds = new Set(
           res.pins.map((p) => p.message_id),
         );
       }
-    } catch {
+    } catch (e) {
+      if (isAbortError(e) || !this.#sessionPinsRead.isCurrent(signal)) return;
       // Silently ignore — pins are non-critical.
+    } finally {
+      this.#sessionPinsRead.finish(signal);
     }
   }
 
   clearSession() {
+    this.cancelSessionPinsRead();
     this.#currentSessionId = null;
     this.sessionPinIds = new Set();
+  }
+
+  cancelAllPinsRead(): void {
+    this.#loadAllVersion++;
+    this.#allPinsRead.cancel();
+    this.loading = false;
+  }
+
+  cancelSessionPinsRead(): void {
+    this.#loadVersion++;
+    this.#sessionPinsRead.cancel();
   }
 
   isPinned(messageId: number): boolean {
@@ -90,7 +140,11 @@ class PinsStore {
     this.#inflight.add(messageId);
     this.#mutationVersion++;
     try {
-      await api.unpinMessage(sessionId, messageId);
+      configureGeneratedClient();
+      await PinsService.deleteApiV1SessionsIdMessagesMessageidPin({
+        id: sessionId,
+        messageId,
+      });
       // Only update sessionPinIds if still viewing the same session.
       if (this.#currentSessionId === sessionId) {
         const next = new Set(this.sessionPinIds);
@@ -124,7 +178,13 @@ class PinsStore {
       this.#inflight.add(messageId);
       this.#mutationVersion++;
       try {
-        const result = await api.pinMessage(sessionId, messageId);
+        configureGeneratedClient();
+        const result =
+          await PinsService.postApiV1SessionsIdMessagesMessageidPin({
+            id: sessionId,
+            messageId,
+            requestBody: {},
+          }) as unknown as PinMessageResponse;
         // Only update sessionPinIds if still viewing the same session.
         if (this.#currentSessionId === sessionId) {
           const next = new Set(this.sessionPinIds);

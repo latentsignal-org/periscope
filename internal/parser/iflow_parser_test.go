@@ -5,7 +5,20 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// parseIflowSessionForTest exercises the iFlow provider's transcript parsing
+// in isolation, passing the project directly so tests can assert parse
+// behavior without project-resolution enrichment.
+func parseIflowSessionForTest(
+	t *testing.T, path, project, machine string,
+) ([]ParseResult, error) {
+	t.Helper()
+	return parseIflowSession(path, project, machine)
+}
 
 func TestParseIflowSession(t *testing.T) {
 	tests := []struct {
@@ -26,60 +39,31 @@ func TestParseIflowSession(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			results, err := ParseIflowSession(
+			results, err := parseIflowSessionForTest(
+				t,
 				tt.filename,
 				"test-project",
 				"local",
 			)
 
-			if err != nil {
-				t.Fatalf("ParseIflowSession error: %v", err)
-			}
-
-			if len(results) == 0 {
-				t.Fatal("expected at least one result")
-			}
+			require.NoError(t, err, "ParseIflowSession error")
+			require.NotEmpty(t, results, "expected at least one result")
 
 			session := results[0].Session
-			if session.ID != tt.expectID {
-				t.Errorf("expected ID %s, got %s", tt.expectID, session.ID)
-			}
-
-			if session.Agent != AgentIflow {
-				t.Errorf("expected agent %s, got %s", AgentIflow, session.Agent)
-			}
-
-			if session.Project != "test-project" {
-				t.Errorf("expected project test-project, got %s", session.Project)
-			}
-
-			if session.MessageCount != tt.expectMessageCount {
-				t.Errorf("expected %d messages, got %d", tt.expectMessageCount, session.MessageCount)
-			}
-
-			if len(results[0].Messages) != tt.expectMessageCount {
-				t.Errorf("expected %d parsed messages, got %d", tt.expectMessageCount, len(results[0].Messages))
-			}
-
-			if session.FirstMessage != tt.expectFirstMessage {
-				t.Errorf("expected first message %q, got %q", tt.expectFirstMessage, session.FirstMessage)
-			}
+			assert.Equal(t, tt.expectID, session.ID, "ID")
+			assert.Equal(t, AgentIflow, session.Agent, "agent")
+			assert.Equal(t, "test-project", session.Project, "project")
+			assert.Equal(t, tt.expectMessageCount, session.MessageCount, "message count")
+			assert.Len(t, results[0].Messages, tt.expectMessageCount, "parsed messages")
+			assert.Equal(t, tt.expectFirstMessage, session.FirstMessage, "first message")
 
 			// Check that timestamps are parsed
-			if session.StartedAt.IsZero() {
-				t.Error("expected non-zero StartedAt")
-			}
-			if session.EndedAt.IsZero() {
-				t.Error("expected non-zero EndedAt")
-			}
+			assert.False(t, session.StartedAt.IsZero(), "expected non-zero StartedAt")
+			assert.False(t, session.EndedAt.IsZero(), "expected non-zero EndedAt")
 
 			// Check that file info is populated
-			if session.File.Path == "" {
-				t.Error("expected non-empty file path")
-			}
-			if session.File.Size == 0 {
-				t.Error("expected non-zero file size")
-			}
+			assert.NotEmpty(t, session.File.Path, "expected non-empty file path")
+			assert.NotZero(t, session.File.Size, "expected non-zero file size")
 		})
 	}
 }
@@ -88,57 +72,45 @@ func TestExtractIflowProjectHints(t *testing.T) {
 	cwd, gitBranch := ExtractIflowProjectHints("testdata/iflow/session-5de701fc-7454-4858-a249-95cac4fd3b51.jsonl")
 
 	// Expected values from the test file
-	if cwd != "C:\\exp\\docker-image-retagger" {
-		t.Errorf("expected cwd C:\\exp\\docker-image-retagger, got %s", cwd)
-	}
+	assert.Equal(t, "C:\\exp\\docker-image-retagger", cwd, "cwd")
 
 	// gitBranch is null in this test file
-	if gitBranch != "" {
-		t.Errorf("expected empty gitBranch, got %s", gitBranch)
-	}
+	assert.Empty(t, gitBranch, "gitBranch")
 }
 
 func TestIflowSystemMessageFiltering(t *testing.T) {
-	results, err := ParseIflowSession(
+	results, err := parseIflowSessionForTest(
+		t,
 		"testdata/iflow/session-5de701fc-7454-4858-a249-95cac4fd3b51.jsonl",
 		"test-project",
 		"local",
 	)
 
-	if err != nil {
-		t.Fatalf("ParseIflowSession error: %v", err)
-	}
-
-	if len(results) == 0 {
-		t.Fatal("expected at least one result")
-	}
+	require.NoError(t, err, "ParseIflowSession error")
+	require.NotEmpty(t, results, "expected at least one result")
 
 	messages := results[0].Messages
 
 	// Verify that user messages have content
 	for _, msg := range messages {
 		if msg.Role == RoleUser {
-			if msg.Content == "" && len(msg.ToolResults) == 0 {
-				t.Errorf("user message at ordinal %d should have content or tool results", msg.Ordinal)
-			}
+			hasContent := msg.Content != "" || len(msg.ToolResults) > 0
+			assert.True(t, hasContent,
+				"user message at ordinal %d should have content or tool results", msg.Ordinal)
 		}
 	}
 }
 
 func TestIflowToolCallParsing(t *testing.T) {
-	results, err := ParseIflowSession(
+	results, err := parseIflowSessionForTest(
+		t,
 		"testdata/iflow/session-5de701fc-7454-4858-a249-95cac4fd3b51.jsonl",
 		"test-project",
 		"local",
 	)
 
-	if err != nil {
-		t.Fatalf("ParseIflowSession error: %v", err)
-	}
-
-	if len(results) == 0 {
-		t.Fatal("expected at least one result")
-	}
+	require.NoError(t, err, "ParseIflowSession error")
+	require.NotEmpty(t, results, "expected at least one result")
 
 	messages := results[0].Messages
 
@@ -148,12 +120,8 @@ func TestIflowToolCallParsing(t *testing.T) {
 	hasToolUse := false
 	hasToolResult := false
 	for _, msg := range messages {
-		if msg.Role != RoleUser && msg.Role != RoleAssistant {
-			t.Errorf("unexpected role: %s", msg.Role)
-		}
-		if msg.Ordinal < 0 {
-			t.Errorf("invalid ordinal: %d", msg.Ordinal)
-		}
+		assert.Contains(t, []RoleType{RoleUser, RoleAssistant}, msg.Role, "unexpected role")
+		assert.GreaterOrEqual(t, msg.Ordinal, 0, "invalid ordinal")
 		if len(msg.ToolCalls) > 0 {
 			hasToolUse = true
 		}
@@ -161,27 +129,20 @@ func TestIflowToolCallParsing(t *testing.T) {
 			hasToolResult = true
 		}
 	}
-	if !hasToolUse {
-		t.Error("expected at least one message with tool calls")
-	}
-	if !hasToolResult {
-		t.Error("expected at least one message with tool results")
-	}
+	assert.True(t, hasToolUse, "expected at least one message with tool calls")
+	assert.True(t, hasToolResult, "expected at least one message with tool results")
 }
 
 func TestIflowBurstMerge(t *testing.T) {
-	results, err := ParseIflowSession(
+	results, err := parseIflowSessionForTest(
+		t,
 		"testdata/iflow/session-5de701fc-7454-4858-a249-95cac4fd3b51.jsonl",
 		"test-project",
 		"local",
 	)
 
-	if err != nil {
-		t.Fatalf("ParseIflowSession error: %v", err)
-	}
-	if len(results) == 0 {
-		t.Fatal("expected at least one result")
-	}
+	require.NoError(t, err, "ParseIflowSession error")
+	require.NotEmpty(t, results, "expected at least one result")
 
 	messages := results[0].Messages
 
@@ -189,23 +150,12 @@ func TestIflowBurstMerge(t *testing.T) {
 	// streaming burst from lines 1-4 of the fixture. It must
 	// retain the explanatory text from the first snapshot and
 	// all three unique read_file tool calls.
-	if len(messages) < 2 {
-		t.Fatal("expected at least 2 messages")
-	}
+	require.GreaterOrEqual(t, len(messages), 2, "expected at least 2 messages")
 
 	first := messages[1]
-	if first.Role != RoleAssistant {
-		t.Fatalf("expected assistant at ordinal 1, got %s", first.Role)
-	}
-	if !strings.Contains(first.Content, "DOCKER_API_VERSION") {
-		t.Error("first assistant burst lost explanatory text")
-	}
-	if len(first.ToolCalls) != 3 {
-		t.Errorf(
-			"expected 3 tool calls in first burst, got %d",
-			len(first.ToolCalls),
-		)
-	}
+	require.Equal(t, RoleAssistant, first.Role, "expected assistant at ordinal 1")
+	assert.Contains(t, first.Content, "DOCKER_API_VERSION", "first assistant burst lost explanatory text")
+	assert.Len(t, first.ToolCalls, 3, "expected 3 tool calls in first burst")
 
 	// Verify every tool_result in the session has a matching
 	// tool_call somewhere, confirming no orphaned results.
@@ -220,9 +170,7 @@ func TestIflowBurstMerge(t *testing.T) {
 		}
 	}
 	for id := range resultIDs {
-		if !callIDs[id] {
-			t.Errorf("orphaned tool_result %s has no tool_call", id)
-		}
+		assert.Truef(t, callIDs[id], "orphaned tool_result %s has no tool_call", id)
 	}
 }
 
@@ -275,18 +223,10 @@ func TestIflowBurstBoundary(t *testing.T) {
 
 	// All three entries must survive: the user entry between
 	// the two assistant entries prevents burst merging.
-	if len(result) != 3 {
-		t.Fatalf("expected 3 entries, got %d", len(result))
-	}
-	if result[0].uuid != "a1" {
-		t.Errorf("expected a1, got %s", result[0].uuid)
-	}
-	if result[1].uuid != "u1" {
-		t.Errorf("expected u1, got %s", result[1].uuid)
-	}
-	if result[2].uuid != "a2" {
-		t.Errorf("expected a2, got %s", result[2].uuid)
-	}
+	require.Len(t, result, 3, "expected 3 entries")
+	assert.Equal(t, "a1", result[0].uuid)
+	assert.Equal(t, "u1", result[1].uuid)
+	assert.Equal(t, "a2", result[2].uuid)
 
 	// Also test: different-parent assistant between snapshots.
 	entries2 := []dagEntryIflow{
@@ -323,12 +263,7 @@ func TestIflowBurstBoundary(t *testing.T) {
 	}
 
 	result2 := deduplicateIflowEntries(entries2)
-	if len(result2) != 3 {
-		t.Fatalf(
-			"expected 3 entries with interleaved parent, got %d",
-			len(result2),
-		)
-	}
+	require.Len(t, result2, 3, "expected 3 entries with interleaved parent")
 
 	// Third case: a non-user/assistant event (e.g. system) was
 	// filtered out before deduplication runs, so entries are
@@ -358,53 +293,34 @@ func TestIflowBurstBoundary(t *testing.T) {
 	}
 
 	result3 := deduplicateIflowEntries(entries3)
-	if len(result3) != 2 {
-		t.Fatalf(
-			"expected 2 entries with filtered-event gap, got %d",
-			len(result3),
-		)
-	}
+	require.Len(t, result3, 2, "expected 2 entries with filtered-event gap")
 }
 
 func TestIflowTimestampParsing(t *testing.T) {
-	results, err := ParseIflowSession(
+	results, err := parseIflowSessionForTest(
+		t,
 		"testdata/iflow/session-5de701fc-7454-4858-a249-95cac4fd3b51.jsonl",
 		"test-project",
 		"local",
 	)
 
-	if err != nil {
-		t.Fatalf("ParseIflowSession error: %v", err)
-	}
-
-	if len(results) == 0 {
-		t.Fatal("expected at least one result")
-	}
+	require.NoError(t, err, "ParseIflowSession error")
+	require.NotEmpty(t, results, "expected at least one result")
 
 	session := results[0].Session
 
 	// Verify timestamps are in reasonable range
-	if !session.StartedAt.Before(time.Now()) {
-		t.Error("expected StartedAt to be in the past")
-	}
-
-	if !session.EndedAt.Before(time.Now()) {
-		t.Error("expected EndedAt to be in the past")
-	}
-
-	if session.StartedAt.After(session.EndedAt) {
-		t.Error("expected StartedAt to be before EndedAt")
-	}
+	assert.True(t, session.StartedAt.Before(time.Now()), "expected StartedAt to be in the past")
+	assert.True(t, session.EndedAt.Before(time.Now()), "expected EndedAt to be in the past")
+	assert.False(t, session.StartedAt.After(session.EndedAt), "expected StartedAt to be before EndedAt")
 
 	// Verify message timestamps
 	for _, msg := range results[0].Messages {
 		if !msg.Timestamp.IsZero() {
-			if msg.Timestamp.Before(session.StartedAt) {
-				t.Errorf("message timestamp before session start: %v < %v", msg.Timestamp, session.StartedAt)
-			}
-			if msg.Timestamp.After(session.EndedAt) {
-				t.Errorf("message timestamp after session end: %v > %v", msg.Timestamp, session.EndedAt)
-			}
+			assert.Falsef(t, msg.Timestamp.Before(session.StartedAt),
+				"message timestamp before session start: %v < %v", msg.Timestamp, session.StartedAt)
+			assert.Falsef(t, msg.Timestamp.After(session.EndedAt),
+				"message timestamp after session end: %v > %v", msg.Timestamp, session.EndedAt)
 		}
 	}
 }
@@ -432,9 +348,7 @@ func TestIflowSessionIDExtraction(t *testing.T) {
 				sessionID = trimmed
 			}
 
-			if sessionID != tt.expectID {
-				t.Errorf("expected ID %s, got %s", tt.expectID, sessionID)
-			}
+			assert.Equal(t, tt.expectID, sessionID, "ID")
 		})
 	}
 }

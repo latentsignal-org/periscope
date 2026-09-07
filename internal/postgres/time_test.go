@@ -4,7 +4,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wesm/agentsview/internal/db"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.kenn.io/agentsview/internal/db"
 )
 
 func TestParseSQLiteTimestamp(t *testing.T) {
@@ -54,24 +57,12 @@ func TestParseSQLiteTimestamp(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, ok := ParseSQLiteTimestamp(tt.input)
-			if ok != tt.wantOK {
-				t.Fatalf(
-					"ParseSQLiteTimestamp(%q) ok = %v, "+
-						"want %v",
-					tt.input, ok, tt.wantOK,
-				)
-			}
+			require.Equal(t, tt.wantOK, ok)
 			if !ok {
 				return
 			}
 			gotStr := got.UTC().Format(time.RFC3339Nano)
-			if gotStr != tt.wantUTC {
-				t.Errorf(
-					"ParseSQLiteTimestamp(%q) = %q, "+
-						"want %q",
-					tt.input, gotStr, tt.wantUTC,
-				)
-			}
+			assert.Equal(t, tt.wantUTC, gotStr)
 		})
 	}
 }
@@ -81,24 +72,14 @@ func TestFormatISO8601(t *testing.T) {
 		2026, 3, 11, 12, 34, 56, 123456789,
 		time.UTC,
 	)
-	got := FormatISO8601(ts)
-	want := "2026-03-11T12:34:56.123456789Z"
-	if got != want {
-		t.Errorf("FormatISO8601() = %q, want %q", got, want)
-	}
+	assert.Equal(t, "2026-03-11T12:34:56.123456789Z", FormatISO8601(ts))
 }
 
 func TestFormatISO8601NonUTC(t *testing.T) {
 	loc := time.FixedZone("EST", -5*3600)
 	ts := time.Date(2026, 3, 11, 7, 34, 56, 0, loc)
-	got := FormatISO8601(ts)
-	want := "2026-03-11T12:34:56Z"
-	if got != want {
-		t.Errorf(
-			"FormatISO8601() = %q, want %q (should be UTC)",
-			got, want,
-		)
-	}
+	assert.Equal(t, "2026-03-11T12:34:56Z", FormatISO8601(ts),
+		"should be UTC")
 }
 
 func TestNormalizeSyncTimestamp(t *testing.T) {
@@ -126,12 +107,8 @@ func TestNormalizeSyncTimestamp(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := NormalizeSyncTimestamp(tt.input)
-			if err != nil {
-				t.Fatalf("error = %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("got %q, want %q", got, tt.want)
-			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -161,63 +138,25 @@ func TestNormalizeLocalSyncTimestamp(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := NormalizeLocalSyncTimestamp(tt.input)
-			if err != nil {
-				t.Fatalf("error = %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("got %q, want %q", got, tt.want)
-			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
 		})
-	}
-}
-
-func TestPreviousLocalSyncTimestamp(t *testing.T) {
-	got, err := PreviousLocalSyncTimestamp(
-		"2026-03-11T12:34:56.124Z",
-	)
-	if err != nil {
-		t.Fatalf("error = %v", err)
-	}
-	want := "2026-03-11T12:34:56.123Z"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-func TestPreviousLocalSyncTimestampEmpty(t *testing.T) {
-	got, err := PreviousLocalSyncTimestamp("")
-	if err != nil {
-		t.Fatalf("error = %v", err)
-	}
-	if got != "" {
-		t.Errorf("got %q, want empty", got)
 	}
 }
 
 func TestNormalizeLocalSyncStateTimestamps(t *testing.T) {
 	local, err := db.Open(t.TempDir() + "/test.db")
-	if err != nil {
-		t.Fatalf("opening test db: %v", err)
-	}
+	require.NoError(t, err)
 	defer local.Close()
 
-	if err := local.SetSyncState(
+	require.NoError(t, local.SetSyncState(
 		"last_push_at",
 		"2026-03-11T12:34:56.123456789Z",
-	); err != nil {
-		t.Fatalf("SetSyncState: %v", err)
-	}
+	))
 
-	if err := NormalizeLocalSyncStateTimestamps(local); err != nil {
-		t.Fatalf("NormalizeLocalSyncStateTimestamps: %v", err)
-	}
+	require.NoError(t, NormalizeLocalSyncStateTimestamps(local))
 
 	got, err := local.GetSyncState("last_push_at")
-	if err != nil {
-		t.Fatalf("GetSyncState: %v", err)
-	}
-	want := "2026-03-11T12:34:56.123Z"
-	if got != want {
-		t.Errorf("last_push_at = %q, want %q", got, want)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "2026-03-11T12:34:56.123Z", got)
 }

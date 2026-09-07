@@ -1,4 +1,6 @@
 minimum_prek_version = "0.3.6"
+default_install_hook_types = ["pre-commit", "pre-push"]
+default_stages = ["pre-commit"]
 
 [[repos]]
 repo = "local"
@@ -7,7 +9,17 @@ repo = "local"
 id = "golangci-lint"
 name = "golangci-lint"
 language = "system"
-entry = "make lint"
+entry = "make lint-golangci"
+pass_filenames = false
+always_run = true
+
+[[repos.hooks]]
+id = "nilaway"
+name = "NilAway"
+language = "system"
+entry = "make nilaway"
+stages = ["pre-push"]
+types = ["go"]
 pass_filenames = false
 always_run = true
 
@@ -15,5 +27,6 @@ always_run = true
 id = "mdformat"
 name = "mdformat"
 language = "system"
-entry = "uvx --from mdformat==0.7.22 --with mdformat-tables==1.0.0 mdformat --wrap 80"
+entry = "uvx --from mdformat==0.7.22 --with mdformat-frontmatter --with mdformat-mkdocs --with mdformat-tables==1.0.0 mdformat --wrap 80 --align-semantic-breaks-in-lists"
 types = ["markdown"]
+exclude = "^docs/(activity|changelog|chat-import|commands|configuration|duckdb|index|insights|pg-sync|quickstart|recent-edits|remote-access|session-api|session-intelligence|stats|token-usage|usage)\\.md$"

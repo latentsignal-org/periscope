@@ -1,6 +1,9 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { getMarkdownExportUrl } from "./client.js";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vite-plus/test";
+import {
+  getInsightMarkdownExportUrl,
+  getMarkdownExportUrl,
+} from "./client.js";
 
 const storage = {
   getItem: vi.fn().mockReturnValue(""),
@@ -29,6 +32,24 @@ describe("markdown export URLs", () => {
     );
     expect(getMarkdownExportUrl("sess-123", 1)).toBe(
       "/api/v1/sessions/sess-123/md?depth=1",
+    );
+  });
+
+  it("keeps the configured remote origin in markdown export URLs", () => {
+    storage.getItem.mockImplementation((key: string) =>
+      key === "agentsview-server-url"
+        ? "https://remote.example.test/agentsview"
+        : "",
+    );
+
+    expect(getMarkdownExportUrl("sess-123", "all")).toBe(
+      "https://remote.example.test/agentsview/api/v1/sessions/sess-123/md?depth=all",
+    );
+  });
+
+  it("builds markdown export URL for an insight", () => {
+    expect(getInsightMarkdownExportUrl(42)).toBe(
+      "/api/v1/insights/42/md",
     );
   });
 });

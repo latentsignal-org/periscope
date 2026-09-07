@@ -4,160 +4,118 @@ import (
 	"maps"
 	"testing"
 
-	"github.com/wesm/agentsview/internal/dbtest"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.kenn.io/agentsview/internal/dbtest"
 )
 
-func TestRemoteSkippedFiles_InitiallyEmpty(t *testing.T) {
+func TestRemoteSkippedFiles(t *testing.T) {
 	d := dbtest.OpenTestDB(t)
 
-	loaded, err := d.LoadRemoteSkippedFiles("devbox1")
-	if err != nil {
-		t.Fatalf("LoadRemoteSkippedFiles: %v", err)
-	}
-	if len(loaded) != 0 {
-		t.Fatalf("expected empty, got %d entries", len(loaded))
-	}
+	t.Run("initially empty", func(t *testing.T) {
+		loaded, err := d.LoadRemoteSkippedFiles("empty-host")
+		require.NoError(t, err, "LoadRemoteSkippedFiles")
+		require.Empty(t, loaded)
+	})
+
+	t.Run("round trip", func(t *testing.T) {
+		entries := map[string]int64{
+			"/home/user/.claude/sessions/a.jsonl": 1000,
+			"/home/user/.claude/sessions/b.jsonl": 2000,
+			"/home/user/.claude/sessions/c.jsonl": 3000,
+		}
+		require.NoError(t,
+			d.ReplaceRemoteSkippedFiles("roundtrip-host", entries))
+
+		loaded, err := d.LoadRemoteSkippedFiles("roundtrip-host")
+		require.NoError(t, err, "LoadRemoteSkippedFiles")
+		assert.True(t, maps.Equal(loaded, entries),
+			"loaded %v, want %v", loaded, entries)
+	})
+
+	t.Run("host isolation", func(t *testing.T) {
+		entries := map[string]int64{
+			"/a.jsonl": 100,
+			"/b.jsonl": 200,
+		}
+		require.NoError(t,
+			d.ReplaceRemoteSkippedFiles("isolation-host-1", entries))
+
+		// Different host should return empty.
+		loaded, err := d.LoadRemoteSkippedFiles("isolation-host-2")
+		require.NoError(t, err, "LoadRemoteSkippedFiles isolation-host-2")
+		require.Empty(t, loaded, "isolation-host-2 should be empty")
+
+		// Original host still has its entries.
+		loaded, err = d.LoadRemoteSkippedFiles("isolation-host-1")
+		require.NoError(t, err, "LoadRemoteSkippedFiles isolation-host-1")
+		assert.True(t, maps.Equal(loaded, entries),
+			"isolation-host-1: loaded %v, want %v", loaded, entries)
+	})
+
+	t.Run("replace overwrites", func(t *testing.T) {
+		first := map[string]int64{
+			"/a.jsonl": 100,
+			"/b.jsonl": 200,
+		}
+		require.NoError(t,
+			d.ReplaceRemoteSkippedFiles("replace-host", first))
+
+		// Replace with different entries.
+		second := map[string]int64{
+			"/c.jsonl": 300,
+		}
+		require.NoError(t,
+			d.ReplaceRemoteSkippedFiles("replace-host", second))
+
+		loaded, err := d.LoadRemoteSkippedFiles("replace-host")
+		require.NoError(t, err, "LoadRemoteSkippedFiles")
+		require.Len(t, loaded, 1)
+		assert.Equal(t, int64(300), loaded["/c.jsonl"])
+	})
+
+	t.Run("replace does not affect other hosts", func(t *testing.T) {
+		host1 := map[string]int64{"/a.jsonl": 100}
+		host2 := map[string]int64{"/b.jsonl": 200}
+
+		require.NoError(t,
+			d.ReplaceRemoteSkippedFiles("replace-other-1", host1))
+		require.NoError(t,
+			d.ReplaceRemoteSkippedFiles("replace-other-2", host2))
+
+		// Replace replace-other-1 with empty; replace-other-2 unaffected.
+		require.NoError(t,
+			d.ReplaceRemoteSkippedFiles("replace-other-1", map[string]int64{}))
+
+		loaded1, err := d.LoadRemoteSkippedFiles("replace-other-1")
+		require.NoError(t, err, "LoadRemoteSkippedFiles replace-other-1")
+		require.Empty(t, loaded1, "replace-other-1 should be empty")
+
+		loaded2, err := d.LoadRemoteSkippedFiles("replace-other-2")
+		require.NoError(t, err, "LoadRemoteSkippedFiles replace-other-2")
+		assert.True(t, maps.Equal(loaded2, host2),
+			"replace-other-2: loaded %v, want %v", loaded2, host2)
+	})
 }
 
-func TestRemoteSkippedFiles_RoundTrip(t *testing.T) {
+func TestClearRemoteSkippedFiles(t *testing.T) {
 	d := dbtest.OpenTestDB(t)
 
-	entries := map[string]int64{
-		"/home/user/.claude/sessions/a.jsonl": 1000,
-		"/home/user/.claude/sessions/b.jsonl": 2000,
-		"/home/user/.claude/sessions/c.jsonl": 3000,
-	}
-	if err := d.ReplaceRemoteSkippedFiles(
-		"devbox1", entries,
-	); err != nil {
-		t.Fatalf("ReplaceRemoteSkippedFiles: %v", err)
-	}
+	require.NoError(t, d.ReplaceRemoteSkippedFiles(
+		"host-a", map[string]int64{"/sessions/a.jsonl": 101},
+	))
+	require.NoError(t, d.ReplaceRemoteSkippedFiles(
+		"host-b", map[string]int64{"/sessions/b.jsonl": 202},
+	))
 
-	loaded, err := d.LoadRemoteSkippedFiles("devbox1")
-	if err != nil {
-		t.Fatalf("LoadRemoteSkippedFiles: %v", err)
-	}
-	if !maps.Equal(loaded, entries) {
-		t.Errorf("loaded %v, want %v", loaded, entries)
-	}
-}
+	require.NoError(t, d.ClearRemoteSkippedFiles("host-a"))
 
-func TestRemoteSkippedFiles_HostIsolation(t *testing.T) {
-	d := dbtest.OpenTestDB(t)
+	hostA, err := d.LoadRemoteSkippedFiles("host-a")
+	require.NoError(t, err, "LoadRemoteSkippedFiles host-a")
+	assert.Empty(t, hostA)
 
-	entries := map[string]int64{
-		"/a.jsonl": 100,
-		"/b.jsonl": 200,
-	}
-	if err := d.ReplaceRemoteSkippedFiles(
-		"devbox1", entries,
-	); err != nil {
-		t.Fatalf("ReplaceRemoteSkippedFiles: %v", err)
-	}
-
-	// Different host should return empty.
-	loaded, err := d.LoadRemoteSkippedFiles("devbox2")
-	if err != nil {
-		t.Fatalf("LoadRemoteSkippedFiles devbox2: %v", err)
-	}
-	if len(loaded) != 0 {
-		t.Fatalf(
-			"devbox2: expected empty, got %d entries",
-			len(loaded),
-		)
-	}
-
-	// Original host still has its entries.
-	loaded, err = d.LoadRemoteSkippedFiles("devbox1")
-	if err != nil {
-		t.Fatalf("LoadRemoteSkippedFiles devbox1: %v", err)
-	}
-	if !maps.Equal(loaded, entries) {
-		t.Errorf("devbox1: loaded %v, want %v", loaded, entries)
-	}
-}
-
-func TestRemoteSkippedFiles_ReplaceOverwrites(t *testing.T) {
-	d := dbtest.OpenTestDB(t)
-
-	first := map[string]int64{
-		"/a.jsonl": 100,
-		"/b.jsonl": 200,
-	}
-	if err := d.ReplaceRemoteSkippedFiles(
-		"devbox1", first,
-	); err != nil {
-		t.Fatalf("ReplaceRemoteSkippedFiles: %v", err)
-	}
-
-	// Replace with different entries.
-	second := map[string]int64{
-		"/c.jsonl": 300,
-	}
-	if err := d.ReplaceRemoteSkippedFiles(
-		"devbox1", second,
-	); err != nil {
-		t.Fatalf("ReplaceRemoteSkippedFiles: %v", err)
-	}
-
-	loaded, err := d.LoadRemoteSkippedFiles("devbox1")
-	if err != nil {
-		t.Fatalf("LoadRemoteSkippedFiles: %v", err)
-	}
-	if len(loaded) != 1 {
-		t.Fatalf("got %d entries, want 1", len(loaded))
-	}
-	if loaded["/c.jsonl"] != 300 {
-		t.Errorf(
-			"loaded[/c.jsonl] = %d, want 300",
-			loaded["/c.jsonl"],
-		)
-	}
-}
-
-func TestRemoteSkippedFiles_ReplaceDoesNotAffectOtherHosts(
-	t *testing.T,
-) {
-	d := dbtest.OpenTestDB(t)
-
-	host1 := map[string]int64{"/a.jsonl": 100}
-	host2 := map[string]int64{"/b.jsonl": 200}
-
-	if err := d.ReplaceRemoteSkippedFiles(
-		"devbox1", host1,
-	); err != nil {
-		t.Fatalf("ReplaceRemoteSkippedFiles devbox1: %v", err)
-	}
-	if err := d.ReplaceRemoteSkippedFiles(
-		"devbox2", host2,
-	); err != nil {
-		t.Fatalf("ReplaceRemoteSkippedFiles devbox2: %v", err)
-	}
-
-	// Replace devbox1 with empty — devbox2 unaffected.
-	if err := d.ReplaceRemoteSkippedFiles(
-		"devbox1", map[string]int64{},
-	); err != nil {
-		t.Fatalf("ReplaceRemoteSkippedFiles empty: %v", err)
-	}
-
-	loaded1, err := d.LoadRemoteSkippedFiles("devbox1")
-	if err != nil {
-		t.Fatalf("LoadRemoteSkippedFiles devbox1: %v", err)
-	}
-	if len(loaded1) != 0 {
-		t.Fatalf(
-			"devbox1: got %d entries, want 0", len(loaded1),
-		)
-	}
-
-	loaded2, err := d.LoadRemoteSkippedFiles("devbox2")
-	if err != nil {
-		t.Fatalf("LoadRemoteSkippedFiles devbox2: %v", err)
-	}
-	if !maps.Equal(loaded2, host2) {
-		t.Errorf(
-			"devbox2: loaded %v, want %v", loaded2, host2,
-		)
-	}
+	hostB, err := d.LoadRemoteSkippedFiles("host-b")
+	require.NoError(t, err, "LoadRemoteSkippedFiles host-b")
+	assert.Equal(t, map[string]int64{"/sessions/b.jsonl": 202}, hostB)
 }

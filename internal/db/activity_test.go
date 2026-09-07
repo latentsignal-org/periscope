@@ -3,6 +3,9 @@ package db
 import (
 	"context"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetSessionActivity(t *testing.T) {
@@ -12,11 +15,9 @@ func TestGetSessionActivity(t *testing.T) {
 	err := d.UpsertSession(Session{
 		ID:        sid,
 		Agent:     "claude",
-		StartedAt: Ptr("2026-03-26T10:00:00Z"),
+		StartedAt: new("2026-03-26T10:00:00Z"),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	// Insert messages spanning ~29 minutes.
 	msgs := []Message{
@@ -30,172 +31,110 @@ func TestGetSessionActivity(t *testing.T) {
 		// System message — should be excluded from counts.
 		{SessionID: sid, Ordinal: 6, Role: "user", Content: "This session is being continued from a previous conversation.", Timestamp: "2026-03-26T10:29:30Z", ContentLength: 60, IsSystem: true},
 	}
-	if err := d.InsertMessages(msgs); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, d.InsertMessages(msgs))
 
 	resp, err := d.GetSessionActivity(context.Background(), sid)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	// 29 min span => 1min buckets (snapInterval(1740) = 60).
-	if resp.IntervalSeconds != 60 {
-		t.Errorf("interval = %d, want 60", resp.IntervalSeconds)
-	}
+	assert.Equal(t, int64(60), resp.IntervalSeconds, "interval")
 
 	// System message should still count toward total (7 total messages).
-	if resp.TotalMessages != 7 {
-		t.Errorf("total = %d, want 7", resp.TotalMessages)
-	}
+	assert.Equal(t, 7, resp.TotalMessages, "total")
 
 	// Should have 30 buckets (min 0 to min 29).
-	if len(resp.Buckets) < 28 {
-		t.Errorf("bucket count = %d, want >= 28", len(resp.Buckets))
-	}
+	assert.GreaterOrEqual(t, len(resp.Buckets), 28, "bucket count")
 
 	// First bucket (10:00-10:01) should have user=1, assistant=1.
 	first := resp.Buckets[0]
-	if first.UserCount != 1 || first.AssistantCount != 1 {
-		t.Errorf("first bucket: user=%d asst=%d, want 1,1", first.UserCount, first.AssistantCount)
-	}
-	if first.FirstOrdinal == nil || *first.FirstOrdinal != 0 {
-		t.Errorf("first bucket first_ordinal: got %v, want 0", first.FirstOrdinal)
-	}
+	assert.Equal(t, 1, first.UserCount, "first bucket user")
+	assert.Equal(t, 1, first.AssistantCount, "first bucket asst")
+	require.NotNil(t, first.FirstOrdinal, "first bucket first_ordinal")
+	assert.Equal(t, 0, *first.FirstOrdinal, "first bucket first_ordinal")
 
 	// Middle empty bucket should have nil FirstOrdinal.
 	mid := resp.Buckets[15]
-	if mid.UserCount != 0 || mid.AssistantCount != 0 {
-		t.Errorf("mid bucket: user=%d asst=%d, want 0,0", mid.UserCount, mid.AssistantCount)
-	}
-	if mid.FirstOrdinal != nil {
-		t.Errorf("mid bucket first_ordinal: got %v, want nil", mid.FirstOrdinal)
-	}
+	assert.Equal(t, 0, mid.UserCount, "mid bucket user")
+	assert.Equal(t, 0, mid.AssistantCount, "mid bucket asst")
+	assert.Nil(t, mid.FirstOrdinal, "mid bucket first_ordinal")
 }
 
 func TestGetSessionActivity_NoMessages(t *testing.T) {
 	d := testDB(t)
 	sid := "test-empty"
 
-	err := d.UpsertSession(Session{ID: sid, Agent: "claude"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, d.UpsertSession(Session{ID: sid, Agent: "claude"}))
 
 	resp, err := d.GetSessionActivity(context.Background(), sid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(resp.Buckets) != 0 {
-		t.Errorf("buckets = %d, want 0", len(resp.Buckets))
-	}
+	require.NoError(t, err)
+	assert.Empty(t, resp.Buckets, "buckets")
 }
 
 func TestGetSessionActivity_NullTimestamps(t *testing.T) {
 	d := testDB(t)
 	sid := "test-null-ts"
 
-	err := d.UpsertSession(Session{ID: sid, Agent: "claude"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, d.UpsertSession(Session{ID: sid, Agent: "claude"}))
 
 	msgs := []Message{
 		{SessionID: sid, Ordinal: 0, Role: "user", Content: "hi", ContentLength: 2},
 		{SessionID: sid, Ordinal: 1, Role: "assistant", Content: "hello", ContentLength: 5},
 	}
-	if err := d.InsertMessages(msgs); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, d.InsertMessages(msgs))
 
 	resp, err := d.GetSessionActivity(context.Background(), sid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(resp.Buckets) != 0 {
-		t.Errorf("buckets = %d, want 0", len(resp.Buckets))
-	}
-	if resp.TotalMessages != 2 {
-		t.Errorf("total = %d, want 2", resp.TotalMessages)
-	}
+	require.NoError(t, err)
+	assert.Empty(t, resp.Buckets, "buckets")
+	assert.Equal(t, 2, resp.TotalMessages, "total")
 }
 
 func TestGetSessionActivity_SingleMessage(t *testing.T) {
 	d := testDB(t)
 	sid := "test-single"
 
-	err := d.UpsertSession(Session{ID: sid, Agent: "claude"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, d.UpsertSession(Session{ID: sid, Agent: "claude"}))
 
 	msgs := []Message{
 		{SessionID: sid, Ordinal: 0, Role: "user", Content: "hi", Timestamp: "2026-03-26T10:00:00Z", ContentLength: 2},
 	}
-	if err := d.InsertMessages(msgs); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, d.InsertMessages(msgs))
 
 	resp, err := d.GetSessionActivity(context.Background(), sid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(resp.Buckets) != 1 {
-		t.Fatalf("buckets = %d, want 1", len(resp.Buckets))
-	}
-	if resp.Buckets[0].UserCount != 1 {
-		t.Errorf("user count = %d, want 1", resp.Buckets[0].UserCount)
-	}
+	require.NoError(t, err)
+	require.Len(t, resp.Buckets, 1, "buckets")
+	assert.Equal(t, 1, resp.Buckets[0].UserCount, "user count")
 }
 
 func TestGetSessionActivity_MalformedTimestamps(t *testing.T) {
 	d := testDB(t)
 	sid := "test-malformed-ts"
 
-	err := d.UpsertSession(Session{ID: sid, Agent: "claude"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, d.UpsertSession(Session{ID: sid, Agent: "claude"}))
 
 	msgs := []Message{
 		{SessionID: sid, Ordinal: 0, Role: "user", Content: "hi", Timestamp: "2026-03-26T10:00:00Z", ContentLength: 2},
 		{SessionID: sid, Ordinal: 1, Role: "assistant", Content: "hello", Timestamp: "not-a-timestamp", ContentLength: 5},
 		{SessionID: sid, Ordinal: 2, Role: "user", Content: "bye", Timestamp: "2026-03-26T10:00:30Z", ContentLength: 3},
 	}
-	if err := d.InsertMessages(msgs); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, d.InsertMessages(msgs))
 
 	resp, err := d.GetSessionActivity(context.Background(), sid)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	// Malformed timestamp excluded from buckets; valid ones bucketed.
-	if len(resp.Buckets) < 1 {
-		t.Fatal("expected at least 1 bucket")
-	}
+	require.NotEmpty(t, resp.Buckets, "expected at least 1 bucket")
 	// Both valid user messages (ord 0 and 2) are within 30s,
 	// so they land in the same bucket.
-	if resp.Buckets[0].UserCount != 2 || resp.Buckets[0].AssistantCount != 0 {
-		t.Errorf(
-			"first bucket: user=%d asst=%d, want 2,0",
-			resp.Buckets[0].UserCount, resp.Buckets[0].AssistantCount,
-		)
-	}
-	if resp.TotalMessages != 3 {
-		t.Errorf("total = %d, want 3", resp.TotalMessages)
-	}
+	assert.Equal(t, 2, resp.Buckets[0].UserCount, "first bucket user")
+	assert.Equal(t, 0, resp.Buckets[0].AssistantCount, "first bucket asst")
+	assert.Equal(t, 3, resp.TotalMessages, "total")
 }
 
 func TestGetSessionActivity_FractionalTimestamps(t *testing.T) {
 	d := testDB(t)
 	sid := "test-frac-ts"
 
-	err := d.UpsertSession(Session{ID: sid, Agent: "claude"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, d.UpsertSession(Session{ID: sid, Agent: "claude"}))
 
 	// Two messages within the same 60s bucket but with fractional
 	// timestamps that would be mis-bucketed by whole-second truncation.
@@ -206,42 +145,23 @@ func TestGetSessionActivity_FractionalTimestamps(t *testing.T) {
 		// This message is in the next bucket (60.1s after the anchor).
 		{SessionID: sid, Ordinal: 2, Role: "user", Content: "c", Timestamp: "2026-03-26T10:01:01.000Z", ContentLength: 1},
 	}
-	if err := d.InsertMessages(msgs); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, d.InsertMessages(msgs))
 
 	resp, err := d.GetSessionActivity(context.Background(), sid)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
-	if resp.IntervalSeconds != 60 {
-		t.Fatalf("interval = %d, want 60", resp.IntervalSeconds)
-	}
+	require.Equal(t, int64(60), resp.IntervalSeconds, "interval")
 
 	// First bucket should have both fractional-second messages.
-	if len(resp.Buckets) < 1 {
-		t.Fatal("expected at least 1 bucket")
-	}
+	require.NotEmpty(t, resp.Buckets, "expected at least 1 bucket")
 	first := resp.Buckets[0]
-	if first.UserCount != 1 || first.AssistantCount != 1 {
-		t.Errorf(
-			"first bucket: user=%d asst=%d, want 1,1",
-			first.UserCount, first.AssistantCount,
-		)
-	}
+	assert.Equal(t, 1, first.UserCount, "first bucket user")
+	assert.Equal(t, 1, first.AssistantCount, "first bucket asst")
 
 	// Second bucket should have the third message.
-	if len(resp.Buckets) < 2 {
-		t.Fatal("expected at least 2 buckets")
-	}
+	require.GreaterOrEqual(t, len(resp.Buckets), 2, "expected at least 2 buckets")
 	second := resp.Buckets[1]
-	if second.UserCount != 1 {
-		t.Errorf(
-			"second bucket user=%d, want 1",
-			second.UserCount,
-		)
-	}
+	assert.Equal(t, 1, second.UserCount, "second bucket user")
 }
 
 func TestSnapInterval(t *testing.T) {
@@ -272,12 +192,7 @@ func TestSnapInterval(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := SnapInterval(tt.duration)
-			if got != tt.want {
-				t.Errorf(
-					"SnapInterval(%d) = %d, want %d",
-					tt.duration, got, tt.want,
-				)
-			}
+			assert.Equal(t, tt.want, got, "SnapInterval(%d)", tt.duration)
 		})
 	}
 }

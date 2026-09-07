@@ -3,7 +3,7 @@ package server
 import (
 	"testing"
 
-	"github.com/wesm/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/db"
 )
 
 func TestComputeSessionContextView_TrimsToLatestCompaction(t *testing.T) {

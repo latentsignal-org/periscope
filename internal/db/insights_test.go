@@ -7,9 +7,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
-
-func ptr(s string) *string { return &s }
 
 func TestInsights_InsertAndGet(t *testing.T) {
 	d := testDB(t)
@@ -19,35 +19,62 @@ func TestInsights_InsertAndGet(t *testing.T) {
 		Type:     "daily_activity",
 		DateFrom: "2025-01-15",
 		DateTo:   "2025-01-15",
-		Project:  ptr("my-app"),
+		Project:  new("my-app"),
 		Agent:    "claude",
-		Model:    ptr("claude-sonnet-4-20250514"),
-		Prompt:   ptr("What happened today?"),
+		Model:    new("claude-sonnet-4-20250514"),
+		Prompt:   new("What happened today?"),
 		Content:  "# Summary\nStuff happened.",
 	}
 
 	id, err := d.InsertInsight(*want)
+	require.NoError(t, err, "InsertInsight")
+	require.Positive(t, id, "expected positive ID")
+
+	got, err := d.GetInsight(ctx, id)
+	require.NoError(t, err, "GetInsight")
+	require.NotNil(t, got, "expected insight")
+
+	diff := cmp.Diff(want, got, cmpopts.IgnoreFields(Insight{}, "ID", "CreatedAt"))
+	assert.Empty(t, diff, "Insight mismatch (-want +got)")
+	assert.NotEmpty(t, got.CreatedAt, "expected created_at to be set")
+}
+
+func TestInsights_CannedMetadataAndCacheLookup(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+
+	id, err := d.InsertInsight(Insight{
+		Type:            "llm_canned",
+		DateFrom:        "2025-01-15",
+		DateTo:          "2025-01-15",
+		Agent:           "claude",
+		Model:           new("test-model"),
+		Content:         "generated recommendation",
+		Kind:            "prompt_maturity_review",
+		SchemaVersion:   "llm_insight.v1",
+		TemplateID:      "prompt_maturity_review",
+		TemplateVersion: "2026-05-26",
+		AggregateHash:   "abc123",
+		CacheKey:        "prompt_maturity_review:abc123",
+		CacheStatus:     "fresh",
+		ProvenanceJSON:  `{"template_id":"prompt_maturity_review"}`,
+		StructuredJSON:  `{"schema_version":"llm_insight.v1"}`,
+	})
 	if err != nil {
 		t.Fatalf("InsertInsight: %v", err)
 	}
-	if id <= 0 {
-		t.Fatalf("expected positive ID, got %d", id)
-	}
 
-	got, err := d.GetInsight(ctx, id)
+	got, err := d.GetCachedInsight(ctx, "prompt_maturity_review:abc123")
 	if err != nil {
-		t.Fatalf("GetInsight: %v", err)
+		t.Fatalf("GetCachedInsight: %v", err)
 	}
 	if got == nil {
-		t.Fatal("expected insight, got nil")
-		return
+		t.Fatal("expected cached insight")
 	}
-
-	if diff := cmp.Diff(want, got, cmpopts.IgnoreFields(Insight{}, "ID", "CreatedAt")); diff != "" {
-		t.Errorf("Insight mismatch (-want +got):\n%s", diff)
-	}
-	if got.CreatedAt == "" {
-		t.Error("expected created_at to be set")
+	if got.ID != id || got.Kind != "prompt_maturity_review" ||
+		got.SchemaVersion != "llm_insight.v1" ||
+		got.ProvenanceJSON == "" || got.StructuredJSON == "" {
+		t.Fatalf("cached insight metadata mismatch: %+v", got)
 	}
 }
 
@@ -64,22 +91,14 @@ func TestInsights_InsertDateRange(t *testing.T) {
 	}
 
 	id, err := d.InsertInsight(*want)
-	if err != nil {
-		t.Fatalf("InsertInsight: %v", err)
-	}
+	require.NoError(t, err, "InsertInsight")
 
 	got, err := d.GetInsight(ctx, id)
-	if err != nil {
-		t.Fatalf("GetInsight: %v", err)
-	}
-	if got == nil {
-		t.Fatal("expected insight, got nil")
-		return
-	}
+	require.NoError(t, err, "GetInsight")
+	require.NotNil(t, got, "expected insight")
 
-	if diff := cmp.Diff(want, got, cmpopts.IgnoreFields(Insight{}, "ID", "CreatedAt")); diff != "" {
-		t.Errorf("Insight mismatch (-want +got):\n%s", diff)
-	}
+	diff := cmp.Diff(want, got, cmpopts.IgnoreFields(Insight{}, "ID", "CreatedAt"))
+	assert.Empty(t, diff, "Insight mismatch (-want +got)")
 }
 
 func TestInsights_GetNonexistent(t *testing.T) {
@@ -87,12 +106,47 @@ func TestInsights_GetNonexistent(t *testing.T) {
 	ctx := context.Background()
 
 	got, err := d.GetInsight(ctx, 99999)
-	if err != nil {
-		t.Fatalf("GetInsight: %v", err)
+	require.NoError(t, err, "GetInsight")
+	assert.Nil(t, got, "expected nil")
+}
+
+func insertInsightFixtures(t *testing.T, d *DB, entries []Insight) []int64 {
+	t.Helper()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	tx, err := d.getWriter().Begin()
+	require.NoError(t, err, "begin insights seed tx")
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO insights (
+			type, date_from, date_to, project,
+			agent, model, prompt, content,
+			kind, schema_version, template_id,
+			template_version, aggregate_hash, cache_key,
+			cache_status, provenance_json, structured_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	require.NoError(t, err, "prepare insights seed")
+	defer func() { _ = stmt.Close() }()
+
+	ids := make([]int64, 0, len(entries))
+	for i, s := range entries {
+		res, err := stmt.Exec(
+			s.Type, s.DateFrom, s.DateTo, s.Project,
+			s.Agent, s.Model, s.Prompt, s.Content,
+			s.Kind, s.SchemaVersion, s.TemplateID,
+			s.TemplateVersion, s.AggregateHash, s.CacheKey,
+			s.CacheStatus, s.ProvenanceJSON, s.StructuredJSON,
+		)
+		require.NoError(t, err, "insert insight fixture %d", i)
+		id, err := res.LastInsertId()
+		require.NoError(t, err, "fixture insight id %d", i)
+		ids = append(ids, id)
 	}
-	if got != nil {
-		t.Fatalf("expected nil, got %+v", got)
-	}
+
+	require.NoError(t, tx.Commit(), "commit insights seed")
+	return ids
 }
 
 func TestListInsights(t *testing.T) {
@@ -100,17 +154,15 @@ func TestListInsights(t *testing.T) {
 
 	seedFiltersData := func(t *testing.T, d *DB) []int64 {
 		entries := []Insight{
-			{Type: "daily_activity", DateFrom: "2025-01-15", DateTo: "2025-01-15", Project: ptr("app-a"), Agent: "claude", Content: "Day 1 app-a"},
-			{Type: "daily_activity", DateFrom: "2025-01-15", DateTo: "2025-01-15", Project: ptr("app-b"), Agent: "claude", Content: "Day 1 app-b"},
+			{Type: "daily_activity", DateFrom: "2025-01-15", DateTo: "2025-01-15", Project: new("app-a"), Agent: "claude", Content: "Day 1 app-a"},
+			{Type: "daily_activity", DateFrom: "2025-01-15", DateTo: "2025-01-15", Project: new("app-b"), Agent: "claude", Content: "Day 1 app-b"},
 			{Type: "agent_analysis", DateFrom: "2025-01-15", DateTo: "2025-01-15", Agent: "claude", Content: "Analysis"},
-			{Type: "daily_activity", DateFrom: "2025-01-16", DateTo: "2025-01-16", Project: ptr("app-a"), Agent: "claude", Content: "Day 2 app-a"},
+			{Type: "daily_activity", DateFrom: "2025-01-16", DateTo: "2025-01-16", Project: new("app-a"), Agent: "claude", Content: "Day 2 app-a"},
 		}
-		var ids []int64
-		for _, s := range entries {
-			id, err := d.InsertInsight(s)
-			if err != nil {
-				t.Fatalf("InsertInsight: %v", err)
-			}
+		ids := make([]int64, 0, len(entries))
+		for i, insight := range entries {
+			id, err := d.InsertInsight(insight)
+			require.NoError(t, err, "InsertInsight %d", i)
 			ids = append(ids, id)
 		}
 		return ids
@@ -128,13 +180,9 @@ func TestListInsights(t *testing.T) {
 			filter: InsightFilter{},
 			verify: func(t *testing.T, got []Insight, _ []int64) {
 				wantContent := []string{"Day 2 app-a", "Analysis", "Day 1 app-b", "Day 1 app-a"}
-				if len(got) != len(wantContent) {
-					t.Fatalf("got %d insights, want %d", len(got), len(wantContent))
-				}
+				require.Len(t, got, len(wantContent))
 				for i, want := range wantContent {
-					if got[i].Content != want {
-						t.Errorf("got[%d].Content = %q, want %q", i, got[i].Content, want)
-					}
+					assert.Equal(t, want, got[i].Content, "got[%d].Content", i)
 				}
 			},
 		},
@@ -144,13 +192,9 @@ func TestListInsights(t *testing.T) {
 			filter: InsightFilter{Type: "daily_activity"},
 			verify: func(t *testing.T, got []Insight, _ []int64) {
 				wantContent := []string{"Day 2 app-a", "Day 1 app-b", "Day 1 app-a"}
-				if len(got) != len(wantContent) {
-					t.Fatalf("got %d insights, want %d", len(got), len(wantContent))
-				}
+				require.Len(t, got, len(wantContent))
 				for i, want := range wantContent {
-					if got[i].Content != want {
-						t.Errorf("got[%d].Content = %q, want %q", i, got[i].Content, want)
-					}
+					assert.Equal(t, want, got[i].Content, "got[%d].Content", i)
 				}
 			},
 		},
@@ -160,13 +204,9 @@ func TestListInsights(t *testing.T) {
 			filter: InsightFilter{Project: "app-a"},
 			verify: func(t *testing.T, got []Insight, _ []int64) {
 				wantContent := []string{"Day 2 app-a", "Day 1 app-a"}
-				if len(got) != len(wantContent) {
-					t.Fatalf("got %d insights, want %d", len(got), len(wantContent))
-				}
+				require.Len(t, got, len(wantContent))
 				for i, want := range wantContent {
-					if got[i].Content != want {
-						t.Errorf("got[%d].Content = %q, want %q", i, got[i].Content, want)
-					}
+					assert.Equal(t, want, got[i].Content, "got[%d].Content", i)
 				}
 			},
 		},
@@ -176,13 +216,9 @@ func TestListInsights(t *testing.T) {
 			filter: InsightFilter{GlobalOnly: true},
 			verify: func(t *testing.T, got []Insight, _ []int64) {
 				wantContent := []string{"Analysis"}
-				if len(got) != len(wantContent) {
-					t.Fatalf("got %d insights, want %d", len(got), len(wantContent))
-				}
+				require.Len(t, got, len(wantContent))
 				for i, want := range wantContent {
-					if got[i].Content != want {
-						t.Errorf("got[%d].Content = %q, want %q", i, got[i].Content, want)
-					}
+					assert.Equal(t, want, got[i].Content, "got[%d].Content", i)
 				}
 			},
 		},
@@ -191,78 +227,59 @@ func TestListInsights(t *testing.T) {
 			seed:   seedFiltersData,
 			filter: InsightFilter{Type: "agent_analysis", Project: "nonexistent"},
 			verify: func(t *testing.T, got []Insight, _ []int64) {
-				if len(got) != 0 {
-					t.Fatalf("got %d insights, want 0", len(got))
-				}
+				assert.Empty(t, got, "got insights")
 			},
 		},
 		{
 			name: "OrderByCreatedAtDesc",
 			seed: func(t *testing.T, d *DB) []int64 {
-				var ids []int64
+				ids := make([]int64, 0, 3)
 				for _, content := range []string{"first", "second", "third"} {
 					id, err := d.InsertInsight(Insight{
 						Type:     "daily_activity",
 						DateFrom: "2025-01-15", DateTo: "2025-01-15",
 						Agent: "claude", Content: content,
 					})
-					if err != nil {
-						t.Fatalf("InsertInsight: %v", err)
-					}
+					require.NoError(t, err, "InsertInsight")
 					ids = append(ids, id)
 				}
 				return ids
 			},
 			filter: InsightFilter{},
 			verify: func(t *testing.T, got []Insight, ids []int64) {
-				if len(got) != 3 {
-					t.Fatalf("got %d insights, want 3", len(got))
-				}
-				if got[0].ID != ids[2] {
-					t.Errorf("first id = %d, want %d", got[0].ID, ids[2])
-				}
-				if got[2].ID != ids[0] {
-					t.Errorf("last id = %d, want %d", got[2].ID, ids[0])
-				}
+				require.Len(t, got, 3)
+				assert.Equal(t, ids[2], got[0].ID, "first id")
+				assert.Equal(t, ids[0], got[2].ID, "last id")
 			},
 		},
 		{
 			name: "CappedAt500",
 			seed: func(t *testing.T, d *DB) []int64 {
 				const total = 502
-				var ids []int64
+				entries := make([]Insight, 0, total)
 				for i := range total {
-					id, err := d.InsertInsight(Insight{
+					entries = append(entries, Insight{
 						Type:     "daily_activity",
 						DateFrom: "2025-01-15",
 						DateTo:   "2025-01-15",
 						Agent:    "claude",
 						Content:  fmt.Sprintf("insight %d", i),
 					})
-					if err != nil {
-						t.Fatalf("InsertInsight %d: %v", i, err)
-					}
-					ids = append(ids, id)
 				}
-				return ids
+				return insertInsightFixtures(t, d, entries)
 			},
 			filter: InsightFilter{},
 			verify: func(t *testing.T, got []Insight, ids []int64) {
 				const total = 502
-				if len(got) != 500 {
-					t.Fatalf("got %d insights, want 500 (capped)", len(got))
-				}
+				require.Len(t, got, 500, "capped at 500")
 
 				// Newest (id 502) should be first.
 				newestID := ids[total-1]
-				if got[0].ID != newestID {
-					t.Errorf("first ID = %d, want %d (newest)", got[0].ID, newestID)
-				}
+				assert.Equal(t, newestID, got[0].ID, "first ID (newest)")
 				// Oldest retained should be id 3 (skipping 1 and 2).
 				oldestRetainedID := ids[total-500]
-				if got[499].ID != oldestRetainedID {
-					t.Errorf("last ID = %d, want %d (oldest retained)", got[499].ID, oldestRetainedID)
-				}
+				assert.Equal(t, oldestRetainedID, got[499].ID,
+					"last ID (oldest retained)")
 			},
 		},
 	}
@@ -272,12 +289,62 @@ func TestListInsights(t *testing.T) {
 			d := testDB(t)
 			ids := tt.seed(t, d)
 			got, err := d.ListInsights(ctx, tt.filter)
-			if err != nil {
-				t.Fatalf("ListInsights: %v", err)
-			}
+			require.NoError(t, err, "ListInsights")
 			tt.verify(t, got, ids)
 		})
 	}
+}
+
+func TestListInsights_DateFilter(t *testing.T) {
+	d := testDB(t)
+	ctx := context.Background()
+	_, err := d.InsertInsight(Insight{Type: "daily_activity",
+		DateFrom: "2026-06-16", DateTo: "2026-06-16", Agent: "claude", Content: "x"})
+	require.NoError(t, err)
+	_, err = d.InsertInsight(Insight{Type: "daily_activity",
+		DateFrom: "2026-06-17", DateTo: "2026-06-17", Agent: "claude", Content: "y"})
+	require.NoError(t, err)
+
+	got, err := d.ListInsights(ctx, InsightFilter{
+		Type: "daily_activity", DateFrom: "2026-06-16", DateTo: "2026-06-16"})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "2026-06-16", got[0].DateFrom)
+}
+
+func TestListInsights_DistinguishesByDateTo(t *testing.T) {
+	d := testDB(t)
+	// A single-day insight and a week insight sharing the same date_from.
+	_, err := d.InsertInsight(Insight{
+		Type: "daily_activity", DateFrom: "2026-06-15", DateTo: "2026-06-15",
+		Agent: "claude", Content: "day",
+	})
+	require.NoError(t, err)
+	_, err = d.InsertInsight(Insight{
+		Type: "daily_activity", DateFrom: "2026-06-15", DateTo: "2026-06-21",
+		Agent: "claude", Content: "week",
+	})
+	require.NoError(t, err)
+
+	got, err := d.ListInsights(context.Background(), InsightFilter{
+		Type: "daily_activity", DateFrom: "2026-06-15", DateTo: "2026-06-15",
+	})
+	require.NoError(t, err)
+	require.Len(t, got, 1, "filtering both bounds isolates the single-day insight")
+	assert.Equal(t, "day", got[0].Content)
+}
+
+func TestInsightsLookupIndexHasDateTo(t *testing.T) {
+	d := testDB(t)
+	rows, err := d.Reader().Query("PRAGMA index_info(idx_insights_lookup)")
+	require.NoError(t, err)
+	defer rows.Close()
+	var n int
+	for rows.Next() {
+		n++
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, 4, n, "lookup index covers type, date_from, date_to, project")
 }
 
 func TestInsights_Delete(t *testing.T) {
@@ -289,19 +356,11 @@ func TestInsights_Delete(t *testing.T) {
 		DateFrom: "2025-01-15", DateTo: "2025-01-15",
 		Agent: "claude", Content: "to be deleted",
 	})
-	if err != nil {
-		t.Fatalf("InsertInsight: %v", err)
-	}
+	require.NoError(t, err, "InsertInsight")
 
-	if err := d.DeleteInsight(id); err != nil {
-		t.Fatalf("DeleteInsight: %v", err)
-	}
+	require.NoError(t, d.DeleteInsight(id), "DeleteInsight")
 
 	got, err := d.GetInsight(ctx, id)
-	if err != nil {
-		t.Fatalf("GetInsight after delete: %v", err)
-	}
-	if got != nil {
-		t.Fatal("expected nil after delete")
-	}
+	require.NoError(t, err, "GetInsight after delete")
+	assert.Nil(t, got, "expected nil after delete")
 }

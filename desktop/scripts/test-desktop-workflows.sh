@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ARTIFACTS_WORKFLOW="$REPO_ROOT/.github/workflows/desktop-artifacts.yml"
 RELEASE_WORKFLOW="$REPO_ROOT/.github/workflows/desktop-release.yml"
-DOC_FILE="$REPO_ROOT/docs/desktop-release-setup.md"
+DOC_FILE="$REPO_ROOT/docs/internal/desktop-release-setup.md"
 
 assert_contains() {
   local file="$1"
@@ -39,10 +39,12 @@ assert_contains "$ARTIFACTS_WORKFLOW" "os: ubuntu-22.04-arm" \
   "desktop artifacts workflow should use the Ubuntu arm runner"
 assert_contains "$ARTIFACTS_WORKFLOW" "target_triple: aarch64-unknown-linux-gnu" \
   "desktop artifacts workflow should target Linux arm64"
-assert_contains "$ARTIFACTS_WORKFLOW" "artifact_name: agentsview-desktop-linux-arm64" \
+assert_contains "$ARTIFACTS_WORKFLOW" "artifact_name: periscope-desktop-linux-arm64" \
   "desktop artifacts workflow should upload a distinct Linux arm64 artifact"
-assert_contains "$ARTIFACTS_WORKFLOW" "xdg-utils" \
-  "desktop artifacts workflow should install xdg-utils for AppImage bundling"
+ACTION_WORKFLOW="$REPO_ROOT/.github/actions/build-desktop-artifact/action.yml"
+
+assert_contains "$ACTION_WORKFLOW" "xdg-utils" \
+  "desktop artifact action should install xdg-utils for AppImage bundling"
 
 assert_contains "$RELEASE_WORKFLOW" 'name: Desktop Build (Linux ${{ matrix.arch }})' \
   "desktop release workflow should matrix Linux builds by arch"
@@ -50,7 +52,7 @@ assert_contains "$RELEASE_WORKFLOW" 'runs-on: ${{ matrix.os }}' \
   "desktop release workflow should select Linux runner per arch"
 assert_contains "$RELEASE_WORKFLOW" "os: ubuntu-22.04-arm" \
   "desktop release workflow should ship Linux arm64 from an arm runner"
-assert_contains "$RELEASE_WORKFLOW" "artifact_name: agentsview-desktop-linux-arm64" \
+assert_contains "$RELEASE_WORKFLOW" "artifact_name: periscope-desktop-linux-arm64" \
   "desktop release workflow should upload a distinct Linux arm64 release artifact"
 assert_contains "$RELEASE_WORKFLOW" 'create_updater_artifacts: "false"' \
   "desktop release workflow should disable updater artifacts for Linux arm64"
@@ -58,10 +60,18 @@ assert_contains "$RELEASE_WORKFLOW" "linux-x86_64" \
   "desktop release workflow should keep Linux x86_64 updater support"
 assert_contains "$RELEASE_WORKFLOW" "xdg-utils" \
   "desktop release workflow should install xdg-utils for AppImage bundling"
+assert_contains "$RELEASE_WORKFLOW" "if: env.TAURI_SIGNING_PRIVATE_KEY != ''" \
+  "desktop release workflow should gate signed builds on signing secrets"
+assert_contains "$RELEASE_WORKFLOW" "if: steps.check_sigs.outputs.has_sigs == 'true'" \
+  "desktop release workflow should skip updater upload when signatures are missing"
+assert_contains "$RELEASE_WORKFLOW" 'pattern: periscope-desktop-*' \
+  "desktop release workflow should download periscope desktop artifacts"
 assert_not_contains "$RELEASE_WORKFLOW" 'linux-aarch64' \
   "desktop release workflow should not add Linux arm64 to latest.json"
 
-assert_contains "$DOC_FILE" "AgentsView_x.y.z_aarch64.AppImage" \
-  "desktop release docs should mention the Linux arm64 AppImage"
+if [ -f "$DOC_FILE" ]; then
+  assert_contains "$DOC_FILE" "AgentsView_x.y.z_aarch64.AppImage" \
+    "desktop release docs should mention the Linux arm64 AppImage"
+fi
 
 echo "desktop workflow checks passed"

@@ -5,92 +5,140 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/tidwall/gjson"
 )
 
-// DiscoverKimiSessions finds all wire.jsonl files under the Kimi
-// sessions directory. The directory structure is:
-// <sessionsDir>/<project-hash>/<session-uuid>/wire.jsonl
-func DiscoverKimiSessions(sessionsDir string) []DiscoveredFile {
-	if sessionsDir == "" {
-		return nil
+// defaultKimiModel is the model name used to price Kimi turns when the
+// session files carry no model identifier (Kimi wire logs omit it).
+//
+// How the estimate works:
+//
+//   - The wire logs do not record which model served each turn, and Kimi
+//     offers several models concurrently at different rates (e.g.
+//     kimi-k2.7-code, kimi-k2.6, kimi-k2.5), so the exact price is
+//     unknowable from the logs. We approximate it with a recent Kimi
+//     model that has a cleanly matchable rate in the pricing catalog.
+//   - Prices come from the LiteLLM catalog (a community-maintained price
+//     list), not from Kimi/Moonshot directly, so the rate itself is also
+//     an approximation. The cost engine canonicalizes model names before
+//     matching (drops the provider prefix before the last "/", lowercases,
+//     strips non-alphanumerics) and rejects a catalog entry whose provider
+//     conflicts with the model's. "moonshot/kimi-k2.6" therefore resolves
+//     to the catalog's "moonshot/kimi-k2.6" rate (currently 0.95 in /
+//     4.0 out per Mtok).
+//   - k2.6 rather than k2.7 is deliberate: as of this writing the catalog
+//     prices k2.7 only under a cloudflare-namespaced key
+//     ("cloudflare/@cf/moonshotai/kimi-k2.7-code"), which the provider
+//     conflict rule rejects for a "moonshot/" model. k2.6 has a clean
+//     "moonshot/kimi-k2.6" entry and the same 0.95/4.0 rate, so it is the
+//     more robust proxy at an identical price. Switch to k2.7 once the
+//     catalog gains a cleanly matchable (moonshot/ or unqualified) entry.
+//
+// This is deliberately an ESTIMATE, not exact billing:
+//
+//   - The real per-turn model is unknown; turns served by a cheaper or
+//     pricier Kimi model are mis-estimated by the rate gap between them.
+//   - Kimi's aggregate logs only expose output tokens, so input and cache
+//     tokens are not priced here (see ParseKimiSession). The figure is a
+//     floor that tracks output volume, not a full invoice.
+//   - Catalog prices drift; we pin to one representative version rather
+//     than guessing per-session rates.
+//
+// Bump this constant when the catalog gains a newer, cleanly matchable
+// Kimi model so the estimate keeps tracking a current rate.
+const defaultKimiModel = "moonshot/kimi-k2.6"
+
+// kimiSessionIDFromPath extracts the raw Kimi session ID from its
+// wire.jsonl path. Legacy paths yield "<project>:<session>"; .kimi-code
+// paths yield "<workdir>:<agent>:<session>".
+func kimiSessionIDFromPath(path string) string {
+	dir := filepath.Dir(path)
+	base := filepath.Base(dir)
+	parent := filepath.Dir(dir)
+	if filepath.Base(parent) == "agents" {
+		// New layout: .../<workdir>_<hash>/session_<uuid>/agents/<agent>/wire.jsonl
+		agentID := base
+		sessionDir := filepath.Dir(parent)
+		sessionUUID := filepath.Base(sessionDir)
+		workdirDir := filepath.Dir(sessionDir)
+		projHash := filepath.Base(workdirDir)
+		return projHash + ":" + agentID + ":" + sessionUUID
 	}
 
-	projDirs, err := os.ReadDir(sessionsDir)
-	if err != nil {
-		return nil
-	}
-
-	var files []DiscoveredFile
-	for _, projEntry := range projDirs {
-		if !isDirOrSymlink(projEntry, sessionsDir) {
-			continue
-		}
-
-		projDir := filepath.Join(sessionsDir, projEntry.Name())
-		sessionDirs, err := os.ReadDir(projDir)
-		if err != nil {
-			continue
-		}
-
-		for _, sessEntry := range sessionDirs {
-			if !isDirOrSymlink(sessEntry, projDir) {
-				continue
-			}
-			wirePath := filepath.Join(
-				projDir, sessEntry.Name(), "wire.jsonl",
-			)
-			if _, err := os.Stat(wirePath); err != nil {
-				continue
-			}
-			files = append(files, DiscoveredFile{
-				Path:    wirePath,
-				Project: projEntry.Name(),
-				Agent:   AgentKimi,
-			})
-		}
-	}
-
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Path < files[j].Path
-	})
-	return files
+	// Legacy layout: .../<project-hash>/<session-uuid>/wire.jsonl
+	sessionUUID := base
+	projHash := filepath.Base(parent)
+	return projHash + ":" + sessionUUID
 }
 
-// FindKimiSourceFile locates a Kimi session file by its raw
-// session ID (without the "kimi:" prefix). The raw ID has the
-// format "<project-hash>:<session-uuid>", which maps to
-// <sessionsDir>/<project-hash>/<session-uuid>/wire.jsonl.
-func FindKimiSourceFile(sessionsDir, rawID string) string {
-	if sessionsDir == "" {
-		return ""
+// DecodeKimiProjectDir extracts a human-readable project name from a
+// .kimi-code session directory. The directory is encoded as
+// "wd_<workdir>_<12-hex-hash>" (e.g. "wd_kimi-code_057f5c09ee3f"),
+// where the workdir name may itself contain underscores or hyphens.
+// Legacy .kimi sessions use opaque project hashes, which do not
+// carry the "wd_" prefix and are returned unchanged.
+func DecodeKimiProjectDir(dirName string) string {
+	if dirName == "" || !strings.HasPrefix(dirName, "wd_") {
+		return dirName
 	}
-
-	projHash, sessionUUID, ok := strings.Cut(rawID, ":")
-	if !ok || !IsValidSessionID(projHash) ||
-		!IsValidSessionID(sessionUUID) {
-		return ""
+	name := strings.TrimPrefix(dirName, "wd_")
+	if i := strings.LastIndex(name, "_"); i > 0 && isKimiHash(name[i+1:]) {
+		name = name[:i]
 	}
-
-	candidate := filepath.Join(
-		sessionsDir, projHash, sessionUUID, "wire.jsonl",
-	)
-	if _, err := os.Stat(candidate); err == nil {
-		return candidate
-	}
-	return ""
+	return name
 }
 
-// ParseKimiSession parses a Kimi wire.jsonl file.
-// Wire.jsonl contains one JSON object per line with message types:
-// metadata, TurnBegin, StepBegin, ContentPart, ToolCall,
-// ToolResult, StatusUpdate, TurnEnd.
-func ParseKimiSession(
+// isKimiHash reports whether s is a 12-character hexadecimal hash of
+// the kind .kimi-code appends to its workdir directory names.
+func isKimiHash(s string) bool {
+	if len(s) != 12 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		isHex := (c >= '0' && c <= '9') ||
+			(c >= 'a' && c <= 'f') ||
+			(c >= 'A' && c <= 'F')
+		if !isHex {
+			return false
+		}
+	}
+	return true
+}
+
+// kimiIDComponentsValid reports whether the given path-derived
+// components can form a session ID that provider raw-ID lookup can
+// round-trip back to the source file. Each component must itself be a
+// valid session ID (alphanumeric, '-', '_'); a ':' or any other
+// character outside that set would break the ':'-delimited ID split
+// and validation. Sessions with such names are skipped at discovery
+// time rather than imported in a state that cannot be resynced.
+func kimiIDComponentsValid(components ...string) bool {
+	for _, c := range components {
+		if !IsValidSessionID(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// parseSession parses a Kimi wire.jsonl file. Legacy Kimi CLI
+// sessions store nested message.type records (TurnBegin, ContentPart,
+// ToolCall, ToolResult, StatusUpdate, TurnEnd). Kimi Code sessions store
+// top-level records (turn.prompt, context.append_loop_event, usage.record).
+func parseKimiSession(
 	path, project, machine string,
+) (*ParsedSession, []ParsedMessage, error) {
+	return parseKimiSessionWithFallbackModel(
+		path, project, machine, defaultKimiModel,
+	)
+}
+
+func parseKimiSessionWithFallbackModel(
+	path, project, machine, fallbackModel string,
 ) (*ParsedSession, []ParsedMessage, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -104,14 +152,11 @@ func ParseKimiSession(
 	defer f.Close()
 
 	lr := newLineReader(f, maxLineSize)
+	defer releaseLineReader(lr)
 
-	// Extract session ID from path:
-	// .../sessions/<project-hash>/<session-uuid>/wire.jsonl
-	dir := filepath.Dir(path) // .../sessions/<project-hash>/<session-uuid>
-	sessionUUID := filepath.Base(dir)
-	projHash := filepath.Base(filepath.Dir(dir))
-
-	sessionID := projHash + ":" + sessionUUID
+	// Extract session ID from path. Both legacy and .kimi-code
+	// layouts are supported.
+	sessionID := kimiSessionIDFromPath(path)
 
 	var (
 		messages     []ParsedMessage
@@ -123,10 +168,18 @@ func ParseKimiSession(
 
 		// Accumulate content parts and tool calls for the
 		// current assistant turn.
-		pendingText     []string
-		pendingToolCall []ParsedToolCall
-		hasThinking     bool
-		hasToolUse      bool
+		pendingText             []string
+		pendingThinkingText     []string
+		pendingToolCall         []ParsedToolCall
+		pendingModel            string
+		pendingTokenUsage       json.RawMessage
+		pendingContextTokens    int
+		pendingOutputTokens     int
+		pendingHasContextTokens bool
+		pendingHasOutputTokens  bool
+		pendingStopReason       string
+		hasThinking             bool
+		hasToolUse              bool
 
 		// Track token usage from StatusUpdate.
 		totalOutputTokens    int
@@ -138,36 +191,61 @@ func ParseKimiSession(
 		// turn timestamp (latest seen).
 		currentTS time.Time
 		pendingTS time.Time
+
+		currentModel = fallbackModel
 	)
+
+	resetAssistantTurn := func() {
+		pendingText = nil
+		pendingThinkingText = nil
+		pendingToolCall = nil
+		pendingModel = ""
+		pendingTokenUsage = nil
+		pendingContextTokens = 0
+		pendingOutputTokens = 0
+		pendingHasContextTokens = false
+		pendingHasOutputTokens = false
+		pendingStopReason = ""
+		pendingTS = time.Time{}
+		hasThinking = false
+		hasToolUse = false
+	}
 
 	flushAssistantTurn := func() {
 		content := strings.Join(pendingText, "\n")
 		if strings.TrimSpace(content) == "" &&
 			len(pendingToolCall) == 0 {
-			pendingText = nil
-			pendingToolCall = nil
-			pendingTS = time.Time{}
-			hasThinking = false
-			hasToolUse = false
+			resetAssistantTurn()
 			return
 		}
 
+		// Kimi wire logs often omit the model; fall back to the current
+		// (defaulted) model so turns can still be priced.
+		turnModel := pendingModel
+		if turnModel == "" {
+			turnModel = currentModel
+		}
+
 		messages = append(messages, ParsedMessage{
-			Ordinal:       ordinal,
-			Role:          RoleAssistant,
-			Content:       content,
-			Timestamp:     pendingTS,
-			HasThinking:   hasThinking,
-			HasToolUse:    hasToolUse,
-			ContentLength: len(content),
-			ToolCalls:     pendingToolCall,
+			Ordinal:          ordinal,
+			Role:             RoleAssistant,
+			Content:          content,
+			ThinkingText:     strings.Join(pendingThinkingText, "\n"),
+			Timestamp:        pendingTS,
+			HasThinking:      hasThinking,
+			HasToolUse:       hasToolUse,
+			ContentLength:    len(content),
+			ToolCalls:        pendingToolCall,
+			Model:            turnModel,
+			TokenUsage:       pendingTokenUsage,
+			ContextTokens:    pendingContextTokens,
+			OutputTokens:     pendingOutputTokens,
+			HasContextTokens: pendingHasContextTokens,
+			HasOutputTokens:  pendingHasOutputTokens,
+			StopReason:       pendingStopReason,
 		})
 		ordinal++
-		pendingText = nil
-		pendingToolCall = nil
-		pendingTS = time.Time{}
-		hasThinking = false
-		hasToolUse = false
+		resetAssistantTurn()
 	}
 
 	for {
@@ -180,15 +258,9 @@ func ParseKimiSession(
 		}
 
 		root := gjson.Parse(line)
+		recordType := root.Get("type").Str
 
-		// Top-level "type" = "metadata" line.
-		if root.Get("type").Str == "metadata" {
-			continue
-		}
-
-		ts := root.Get("timestamp")
-		if ts.Type == gjson.Number {
-			t := time.Unix(int64(ts.Float()), int64((ts.Float()-float64(int64(ts.Float())))*1e9))
+		if t, ok := kimiRecordTimestamp(root); ok {
 			if startTime.IsZero() || t.Before(startTime) {
 				startTime = t
 			}
@@ -198,8 +270,199 @@ func ParseKimiSession(
 			currentTS = t
 		}
 
+		// Top-level "type" = "metadata" line.
+		if recordType == "metadata" {
+			continue
+		}
+
 		msgType := root.Get("message.type").Str
 		payload := root.Get("message.payload")
+
+		if msgType == "" && recordType != "" {
+			switch recordType {
+			case "config.update":
+				if model := root.Get("modelAlias").Str; model != "" {
+					currentModel = model
+				}
+
+			case "turn.prompt", "turn.steer":
+				flushAssistantTurn()
+
+				userText := kimiContentPartsText(root.Get("input"))
+				if userText == "" {
+					continue
+				}
+
+				if firstMessage == "" {
+					firstMessage = truncate(
+						strings.ReplaceAll(userText, "\n", " "),
+						300,
+					)
+				}
+
+				messages = append(messages, ParsedMessage{
+					Ordinal:       ordinal,
+					Role:          RoleUser,
+					Content:       userText,
+					Timestamp:     currentTS,
+					ContentLength: len(userText),
+				})
+				ordinal++
+
+			case "context.append_loop_event":
+				event := root.Get("event")
+				switch event.Get("type").Str {
+				case "content.part":
+					part := event.Get("part")
+					contentType := part.Get("type").Str
+					switch contentType {
+					case "text":
+						text := part.Get("text").Str
+						if text != "" {
+							if pendingTS.IsZero() {
+								pendingTS = currentTS
+							}
+							pendingText = append(pendingText, text)
+						}
+					case "think":
+						think := part.Get("think").Str
+						if think == "" {
+							think = part.Get("text").Str
+						}
+						if think != "" {
+							if pendingTS.IsZero() {
+								pendingTS = currentTS
+							}
+							hasThinking = true
+							pendingThinkingText = append(
+								pendingThinkingText, think,
+							)
+							pendingText = append(pendingText,
+								"[Thinking]\n"+think+"\n[/Thinking]")
+						}
+					}
+
+				case "tool.call":
+					if pendingTS.IsZero() {
+						pendingTS = currentTS
+					}
+					hasToolUse = true
+					fnName := event.Get("name").Str
+					fnArgs := kimiRawJSON(event.Get("args"))
+					toolID := event.Get("toolCallId").Str
+
+					tc := ParsedToolCall{
+						ToolUseID: toolID,
+						ToolName:  fnName,
+						Category:  NormalizeToolCategory(fnName),
+						InputJSON: fnArgs,
+						SkillName: inferToolSkillName(
+							fnName, fnArgs,
+						),
+					}
+					pendingToolCall = append(pendingToolCall, tc)
+
+					argsResult := kimiJSONResult(event.Get("args"))
+					pendingText = append(pendingText,
+						formatKimiToolUse(fnName, argsResult))
+
+				case "tool.result":
+					flushAssistantTurn()
+
+					toolCallID := event.Get("toolCallId").Str
+					result := event.Get("result")
+					isError := result.Get("isError").Bool()
+					output := extractKimiToolOutput(result.Get("output"))
+					if output == "" {
+						output = result.Get("message").Str
+					}
+					if isError && output == "" {
+						output = "[error]"
+					}
+
+					quoted, err := json.Marshal(output)
+					if err != nil {
+						continue
+					}
+
+					messages = append(messages, ParsedMessage{
+						Ordinal:   ordinal,
+						Role:      RoleUser,
+						Timestamp: currentTS,
+						ToolResults: []ParsedToolResult{{
+							ToolUseID:     toolCallID,
+							ContentRaw:    string(quoted),
+							ContentLength: len(output),
+						}},
+					})
+					ordinal++
+
+				case "step.end":
+					if model := event.Get("model").Str; model != "" {
+						pendingModel = model
+					} else if pendingModel == "" {
+						pendingModel = currentModel
+					}
+					pendingStopReason = event.Get("finishReason").Str
+					if usage := event.Get("usage"); usage.Exists() {
+						tokenUsage, outputTokens, contextTokens,
+							hasOutput, hasContext :=
+							kimiNativeTokenUsage(usage)
+						pendingTokenUsage = tokenUsage
+						pendingOutputTokens = outputTokens
+						pendingContextTokens = contextTokens
+						pendingHasOutputTokens = hasOutput
+						pendingHasContextTokens = hasContext
+						if hasOutput {
+							hasTotalOutputTokens = true
+							totalOutputTokens += outputTokens
+						}
+						if hasContext {
+							hasPeakContextTokens = true
+							if contextTokens > peakContextTokens {
+								peakContextTokens = contextTokens
+							}
+						}
+					}
+					flushAssistantTurn()
+
+				case "step.begin":
+					// Informational; no action needed.
+				}
+
+			case "usage.record":
+				if model := root.Get("model").Str; model != "" {
+					currentModel = model
+				}
+				if usage := root.Get("usage"); usage.Exists() &&
+					len(messages) > 0 {
+					last := &messages[len(messages)-1]
+					if last.Role == RoleAssistant &&
+						len(last.TokenUsage) == 0 {
+						tokenUsage, outputTokens, contextTokens,
+							hasOutput, hasContext :=
+							kimiNativeTokenUsage(usage)
+						last.Model = currentModel
+						last.TokenUsage = tokenUsage
+						last.OutputTokens = outputTokens
+						last.ContextTokens = contextTokens
+						last.HasOutputTokens = hasOutput
+						last.HasContextTokens = hasContext
+						if hasOutput {
+							hasTotalOutputTokens = true
+							totalOutputTokens += outputTokens
+						}
+						if hasContext {
+							hasPeakContextTokens = true
+							if contextTokens > peakContextTokens {
+								peakContextTokens = contextTokens
+							}
+						}
+					}
+				}
+			}
+			continue
+		}
 
 		switch msgType {
 		case "TurnBegin":
@@ -262,6 +525,9 @@ func ParseKimiSession(
 						pendingTS = currentTS
 					}
 					hasThinking = true
+					pendingThinkingText = append(
+						pendingThinkingText, think,
+					)
 					pendingText = append(pendingText,
 						"[Thinking]\n"+think+"\n[/Thinking]")
 				}
@@ -281,6 +547,9 @@ func ParseKimiSession(
 				ToolName:  fnName,
 				Category:  NormalizeToolCategory(fnName),
 				InputJSON: fnArgs,
+				SkillName: inferToolSkillName(
+					fnName, fnArgs,
+				),
 			}
 			pendingToolCall = append(pendingToolCall, tc)
 
@@ -387,7 +656,141 @@ func ParseKimiSession(
 		},
 	}
 
+	// When Kimi wire logs carry only session-level token aggregates
+	// (StatusUpdate path) rather than per-message step.end usage,
+	// individual messages have no token_usage JSON and no model, so the
+	// cost engine prices 0 tokens and the session shows $0.
+	//
+	// Emit one session-level usage event so the engine can produce an
+	// estimate (see defaultKimiModel for the estimation principle).
+	// Only output tokens are available from these aggregates, so input
+	// and cache tokens are intentionally left at zero — the resulting
+	// cost is a lower-bound estimate driven by output volume. Sessions
+	// whose messages already carry per-message token_usage (native
+	// step.end protocol) are priced message-by-message and skipped here
+	// to avoid double counting.
+	if hasTotalOutputTokens && totalOutputTokens > 0 {
+		hasPerMessageTokens := false
+		for _, m := range messages {
+			if len(m.TokenUsage) > 0 {
+				hasPerMessageTokens = true
+				break
+			}
+		}
+		if !hasPerMessageTokens {
+			sess.UsageEvents = []ParsedUsageEvent{{
+				SessionID:    sess.ID,
+				Source:       "session",
+				Model:        currentModel,
+				OutputTokens: totalOutputTokens,
+				OccurredAt:   timeString(endTime, startTime),
+				DedupKey:     "kimi:session:" + sessionID,
+			}}
+		}
+	}
+
 	return sess, messages, nil
+}
+
+func kimiRecordTimestamp(root gjson.Result) (time.Time, bool) {
+	if ts := root.Get("timestamp"); ts.Type == gjson.Number {
+		sec := int64(ts.Float())
+		nsec := int64((ts.Float() - float64(sec)) * 1e9)
+		return time.Unix(sec, nsec), true
+	}
+	if ts := root.Get("time"); ts.Type == gjson.Number {
+		return time.UnixMilli(ts.Int()), true
+	}
+	if ts := root.Get("created_at"); ts.Type == gjson.Number {
+		return time.UnixMilli(ts.Int()), true
+	}
+	return time.Time{}, false
+}
+
+func kimiContentPartsText(parts gjson.Result) string {
+	if !parts.IsArray() {
+		return ""
+	}
+	var out []string
+	parts.ForEach(func(_, part gjson.Result) bool {
+		if part.Get("type").Str == "text" {
+			if text := part.Get("text").Str; text != "" {
+				out = append(out, text)
+			}
+		}
+		return true
+	})
+	return strings.Join(out, "\n")
+}
+
+func kimiRawJSON(value gjson.Result) string {
+	if !value.Exists() {
+		return ""
+	}
+	if value.Type == gjson.String && gjson.Valid(value.Str) {
+		return value.Str
+	}
+	return value.Raw
+}
+
+func kimiJSONResult(value gjson.Result) gjson.Result {
+	raw := kimiRawJSON(value)
+	if gjson.Valid(raw) {
+		return gjson.Parse(raw)
+	}
+	return value
+}
+
+func kimiNativeTokenUsage(
+	usage gjson.Result,
+) (json.RawMessage, int, int, bool, bool) {
+	var (
+		inputOther          int
+		output              int
+		inputCacheRead      int
+		inputCacheCreate    int
+		hasInputOther       bool
+		hasOutput           bool
+		hasInputCacheRead   bool
+		hasInputCacheCreate bool
+	)
+
+	if f := usage.Get("inputOther"); f.Exists() {
+		inputOther = int(f.Int())
+		hasInputOther = true
+	}
+	if f := usage.Get("output"); f.Exists() {
+		output = int(f.Int())
+		hasOutput = true
+	}
+	if f := usage.Get("inputCacheRead"); f.Exists() {
+		inputCacheRead = int(f.Int())
+		hasInputCacheRead = true
+	}
+	if f := usage.Get("inputCacheCreation"); f.Exists() {
+		inputCacheCreate = int(f.Int())
+		hasInputCacheCreate = true
+	}
+
+	if !hasInputOther && !hasOutput && !hasInputCacheRead &&
+		!hasInputCacheCreate {
+		return nil, 0, 0, false, false
+	}
+
+	normalized := map[string]int{
+		"input_tokens":                inputOther,
+		"output_tokens":               output,
+		"cache_read_input_tokens":     inputCacheRead,
+		"cache_creation_input_tokens": inputCacheCreate,
+	}
+	raw, err := json.Marshal(normalized)
+	if err != nil {
+		return nil, 0, 0, false, false
+	}
+
+	contextTokens := inputOther + inputCacheRead + inputCacheCreate
+	hasContext := hasInputOther || hasInputCacheRead || hasInputCacheCreate
+	return raw, output, contextTokens, hasOutput, hasContext
 }
 
 // extractKimiToolOutput extracts text from a Kimi tool result

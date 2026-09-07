@@ -1,10 +1,6 @@
 package server
 
-import (
-	"net/http"
-
-	"github.com/wesm/agentsview/internal/update"
-)
+import "go.kenn.io/agentsview/internal/update"
 
 // UpdateCheckFunc is the signature for functions that check for
 // available updates. The default is update.CheckForUpdate.
@@ -19,44 +15,4 @@ type updateCheckResponse struct {
 	CurrentVersion  string `json:"current_version"`
 	LatestVersion   string `json:"latest_version,omitempty"`
 	IsDevBuild      bool   `json:"is_dev_build,omitempty"`
-}
-
-func (s *Server) handleCheckUpdate(
-	w http.ResponseWriter, _ *http.Request,
-) {
-	if s.cfg.DisableUpdateCheck {
-		writeJSON(w, http.StatusOK, updateCheckResponse{
-			CurrentVersion: s.version.Version,
-		})
-		return
-	}
-
-	checkFn := s.updateCheckFn
-	if checkFn == nil {
-		checkFn = update.CheckForUpdate
-	}
-
-	info, err := checkFn(
-		s.version.Version, false, s.dataDir,
-	)
-	if err != nil {
-		writeJSON(w, http.StatusOK, updateCheckResponse{
-			CurrentVersion: s.version.Version,
-		})
-		return
-	}
-
-	if info == nil {
-		writeJSON(w, http.StatusOK, updateCheckResponse{
-			CurrentVersion: s.version.Version,
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, updateCheckResponse{
-		UpdateAvailable: !info.IsDevBuild,
-		CurrentVersion:  info.CurrentVersion,
-		LatestVersion:   info.LatestVersion,
-		IsDevBuild:      info.IsDevBuild,
-	})
 }

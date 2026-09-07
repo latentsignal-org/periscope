@@ -1,5 +1,8 @@
 <script lang="ts">
-  import SettingsSection from "./SettingsSection.svelte";
+  import { Button, TextInput, Toggle } from "@kenn-io/kit-ui";
+  import { onDestroy } from "svelte";
+  import { m } from "../../i18n/index.js";
+  import { copyToClipboard } from "../../utils/clipboard.js";
   import { settings } from "../../stores/settings.svelte.js";
   import {
     getServerUrl,
@@ -7,7 +10,8 @@
     getAuthToken,
     setAuthToken,
     isRemoteConnection,
-  } from "../../api/client.js";
+  } from "../../api/runtime.js";
+  import { LatestRead } from "../../utils/latest-read.js";
 
   let serverUrl: string = $state(getServerUrl());
   let tokenInput: string = $state(getAuthToken());
@@ -16,13 +20,20 @@
   let saving: boolean = $state(false);
   let saveMsg: string | null = $state(null);
   let remoteToggling: boolean = $state(false);
+  let pendingRequireAuth: boolean = $state(settings.requireAuth);
 
   let isRemote: boolean = $derived(isRemoteConnection());
   let copied: boolean = $state(false);
+  const versionRead = new LatestRead();
+
+  $effect(() => {
+    if (!remoteToggling) pendingRequireAuth = settings.requireAuth;
+  });
 
   async function handleTestConnection() {
     if (!serverUrl.trim()) return;
     testing = true;
+    const signal = versionRead.begin();
     testResult = null;
     try {
       const base = serverUrl.replace(/\/+$/, "");
@@ -30,32 +41,36 @@
       if (tokenInput.trim()) {
         headers["Authorization"] = `Bearer ${tokenInput.trim()}`;
       }
-      const res = await fetch(`${base}/api/v1/version`, { headers });
+      const res = await fetch(`${base}/api/v1/version`, { headers, signal });
+      if (!versionRead.isCurrent(signal)) return;
       if (res.ok) {
         const data = await res.json();
         testResult = {
           ok: true,
-          message: `Connected (v${data.version || "unknown"})`,
+          message: m.settings_remote_connected_version({ version: data.version || m.settings_remote_unknown() }),
         };
       } else {
-        testResult = { ok: false, message: `Server returned ${res.status}` };
+        testResult = { ok: false, message: m.settings_remote_server_returned({ status: res.status }) };
       }
     } catch (e) {
+      if (signal.aborted || !versionRead.isCurrent(signal)) return;
       testResult = {
         ok: false,
-        message: e instanceof Error ? e.message : "Connection failed",
+        message: e instanceof Error ? e.message : m.settings_remote_connection_failed(),
       };
     } finally {
-      testing = false;
+      if (versionRead.finish(signal)) testing = false;
     }
   }
+
+  onDestroy(() => versionRead.cancel());
 
   function handleConnect() {
     if (!serverUrl.trim()) return;
     const url = serverUrl.replace(/\/+$/, "");
     setServerUrl(url);
     setAuthToken(tokenInput.trim());
-    saveMsg = "Connected. Reloading...";
+    saveMsg = m.settings_remote_connected_reloading();
     setTimeout(() => window.location.reload(), 500);
   }
 
@@ -64,72 +79,70 @@
     // scoped key resolves to the remote server's token.
     setAuthToken("");
     setServerUrl("");
-    saveMsg = "Disconnected. Reloading...";
+    saveMsg = m.settings_remote_disconnected_reloading();
     setTimeout(() => window.location.reload(), 500);
   }
 
-  async function handleToggleRemote() {
+  async function handleToggleRemote(requireAuth: boolean) {
+    pendingRequireAuth = requireAuth;
     remoteToggling = true;
     try {
-      await settings.save({ require_auth: !settings.requireAuth });
+      await settings.save({ require_auth: requireAuth });
     } finally {
+      pendingRequireAuth = settings.requireAuth;
       remoteToggling = false;
     }
   }
 
   function handleCopyToken() {
     if (!settings.authToken) return;
-    navigator.clipboard.writeText(settings.authToken);
+    // Fire-and-forget like the previous navigator.clipboard call: the
+    // copied indicator flips immediately regardless of the async result.
+    void copyToClipboard(settings.authToken);
     copied = true;
     setTimeout(() => (copied = false), 2000);
   }
 </script>
 
-<SettingsSection
-  title="Remote Access"
-  description="Connect to a remote Periscope server or enable remote access for this instance."
->
+<div class="remote-settings">
   {#if !isRemote}
     <div class="subsection">
       <div class="toggle-row">
-        <span class="toggle-label">Require auth token</span>
-        <button
-          class="toggle-btn"
-          class:active={settings.requireAuth}
+        <span class="toggle-label">{m.settings_remote_require_auth()}</span>
+        <Toggle
+          checked={pendingRequireAuth}
           disabled={remoteToggling}
-          onclick={handleToggleRemote}
+          ariaLabel={m.settings_remote_require_auth()}
+          onchange={handleToggleRemote}
         >
-          {settings.requireAuth ? "Enabled" : "Disabled"}
-        </button>
+          {pendingRequireAuth ? m.settings_remote_enabled() : m.settings_remote_disabled()}
+        </Toggle>
       </div>
 
       <p class="restart-note">
-        Note: Toggling auth requires a server restart to take effect.
+        {m.settings_remote_restart_note()}
       </p>
 
       {#if settings.requireAuth && settings.authToken}
         <div class="security-warning">
-          Warning: Remote connections use unencrypted HTTP. Use a secure
-          tunnel (Tailscale, SSH tunnel, or a reverse proxy with TLS) to
-          protect your data in transit.
+          {m.settings_remote_security_warning()}
         </div>
 
         <div class="token-display">
-          <span class="field-label">Auth Token</span>
+          <span class="field-label">{m.settings_remote_auth_token()}</span>
           <div class="token-row">
             <code class="token-value">{settings.authToken}</code>
-            <button class="copy-btn" onclick={handleCopyToken}>
-              {copied ? "Copied" : "Copy"}
-            </button>
+            <Button size="sm" onclick={handleCopyToken}>
+              {copied ? m.settings_remote_copied() : m.settings_remote_copy()}
+            </Button>
           </div>
         </div>
 
         <div class="server-info">
-          <span class="field-label">Server</span>
+          <span class="field-label">{m.settings_remote_server()}</span>
           {#if settings.host === "0.0.0.0" || settings.host === "::"}
             <span class="info-value">
-              Listening on all interfaces (port {settings.port}).
-              Connect using your machine's IP address or hostname.
+              {m.settings_remote_listening_all({ port: settings.port })}
             </span>
           {:else}
             <code class="info-value"
@@ -145,23 +158,25 @@
 
   <div class="subsection">
     <span class="subsection-title">
-      {isRemote ? "Remote Connection" : "Connect to Remote Server"}
+      {isRemote ? m.settings_remote_remote_connection() : m.settings_remote_connect_to_remote()}
     </span>
 
     {#if isRemote}
       <div class="connected-info">
-        <span class="field-label">Connected to</span>
+        <span class="field-label">{m.settings_remote_connected_to()}</span>
         <code class="info-value">{getServerUrl()}</code>
       </div>
       <button class="disconnect-btn" onclick={handleDisconnect}>
-        Disconnect
+        {m.settings_remote_disconnect()}
       </button>
     {:else}
       <div class="field">
-        <label class="field-label" for="remote-url">Server URL</label>
-        <input
+        <label class="field-label" for="remote-url">{m.settings_remote_server_url()}</label>
+        <TextInput
           id="remote-url"
           class="setting-input"
+          size="md"
+          block
           type="url"
           placeholder="http://192.168.1.100:8080"
           bind:value={serverUrl}
@@ -169,12 +184,14 @@
       </div>
 
       <div class="field">
-        <label class="field-label" for="remote-token">Auth Token</label>
-        <input
+        <label class="field-label" for="remote-token">{m.settings_remote_auth_token()}</label>
+        <TextInput
           id="remote-token"
           class="setting-input"
+          size="md"
+          block
           type="password"
-          placeholder="Paste auth token from server"
+          placeholder={m.settings_remote_paste_token_from_server()}
           bind:value={tokenInput}
         />
       </div>
@@ -185,14 +202,14 @@
           disabled={testing || !serverUrl.trim()}
           onclick={handleTestConnection}
         >
-          {testing ? "Testing..." : "Test Connection"}
+          {testing ? m.settings_remote_testing() : m.settings_remote_test_connection()}
         </button>
         <button
           class="connect-btn"
           disabled={saving || !serverUrl.trim()}
           onclick={handleConnect}
         >
-          Connect
+          {m.settings_remote_connect()}
         </button>
       </div>
 
@@ -207,13 +224,19 @@
       {/if}
     {/if}
   </div>
-</SettingsSection>
+</div>
 
 <style>
+  .remote-settings {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-5);
+  }
+
   .subsection {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: var(--space-5);
   }
 
   .subsection-title {
@@ -237,32 +260,6 @@
   .toggle-label {
     font-size: 12px;
     color: var(--text-primary);
-  }
-
-  .toggle-btn {
-    height: 26px;
-    padding: 0 12px;
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    font-weight: 500;
-    border: 1px solid var(--border-muted);
-    cursor: pointer;
-    background: var(--bg-inset);
-    color: var(--text-secondary);
-    transition:
-      background 0.12s,
-      color 0.12s;
-  }
-
-  .toggle-btn.active {
-    background: var(--accent-green, #22c55e);
-    color: white;
-    border-color: transparent;
-  }
-
-  .toggle-btn:disabled {
-    opacity: 0.6;
-    cursor: default;
   }
 
   .token-display,
@@ -299,24 +296,6 @@
     min-width: 0;
   }
 
-  .copy-btn {
-    height: 24px;
-    padding: 0 10px;
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--text-secondary);
-    background: var(--bg-inset);
-    border: 1px solid var(--border-muted);
-    cursor: pointer;
-    white-space: nowrap;
-    transition: opacity 0.12s;
-  }
-
-  .copy-btn:hover {
-    opacity: 0.8;
-  }
-
   .info-value {
     font-size: 12px;
     font-family: var(--font-mono, monospace);
@@ -329,21 +308,8 @@
     gap: 4px;
   }
 
-  .setting-input {
-    height: 30px;
-    padding: 0 10px;
-    border-radius: var(--radius-sm);
-    font-size: 12px;
+  :global(.setting-input.kit-text-input) {
     font-family: var(--font-mono, monospace);
-    color: var(--text-primary);
-    background: var(--bg-inset);
-    border: 1px solid var(--border-muted);
-    transition: border-color 0.15s;
-  }
-
-  .setting-input:focus {
-    outline: none;
-    border-color: var(--accent-blue);
   }
 
   .actions {
@@ -372,12 +338,12 @@
   }
 
   .connect-btn {
-    color: white;
+    color: var(--accent-blue-foreground);
     background: var(--accent-blue);
   }
 
   .disconnect-btn {
-    color: white;
+    color: var(--accent-red-foreground);
     background: var(--accent-red, #ef4444);
   }
 

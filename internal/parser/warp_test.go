@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // warpSchema matches the relevant tables from Warp's SQLite database.
@@ -50,9 +52,7 @@ func (s *WarpSeeder) AddConversation(
 		 VALUES (?, ?, ?)`,
 		conversationID, conversationData, lastModified,
 	)
-	if err != nil {
-		s.t.Fatalf("add conversation: %v", err)
-	}
+	require.NoError(s.t, err, "add conversation")
 }
 
 func (s *WarpSeeder) AddExchange(
@@ -68,21 +68,16 @@ func (s *WarpSeeder) AddExchange(
 		exchangeID, conversationID, startTS, input,
 		workingDir, outputStatus, modelID,
 	)
-	if err != nil {
-		s.t.Fatalf("add exchange: %v", err)
-	}
+	require.NoError(s.t, err, "add exchange")
 }
 
 func newWarpTestDB(t *testing.T) (string, *WarpSeeder, *sql.DB) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "warp.sqlite")
 	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		t.Fatalf("open test db: %v", err)
-	}
-	if _, err := db.Exec(warpSchema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
+	require.NoError(t, err, "open test db")
+	_, err = db.Exec(warpSchema)
+	require.NoError(t, err, "create schema")
 	seeder := &WarpSeeder{db: db, t: t}
 	return dbPath, seeder, db
 }
@@ -148,32 +143,25 @@ func TestParseWarpDB_StandardConversation(t *testing.T) {
 	defer db.Close()
 	seedWarpConversation(t, seeder)
 
-	sessions, err := ParseWarpDB(dbPath, "testmachine")
-	if err != nil {
-		t.Fatalf("ParseWarpDB: %v", err)
-	}
+	sessions, err := parseWarpAll(dbPath, "testmachine")
+	require.NoError(t, err, "ParseWarpDB")
 
-	assertEq(t, "sessions len", len(sessions), 1)
+	require.Len(t, sessions, 1, "sessions len")
 
 	s := sessions[0]
-	assertEq(t, "ID", s.Session.ID, "warp:conv-001")
-	assertEq(t, "Agent", s.Session.Agent, AgentWarp)
-	assertEq(t, "Machine", s.Session.Machine, "testmachine")
-	assertEq(t, "Project", s.Session.Project, "myproject")
-	assertEq(t, "UserMessageCount", s.Session.UserMessageCount, 2)
-	assertEq(t, "FirstMessage",
-		s.Session.FirstMessage,
-		"Fix the JSON parsing bug in parser.go",
-	)
+	assert.Equal(t, "warp:conv-001", s.Session.ID, "ID")
+	assert.Equal(t, AgentWarp, s.Session.Agent, "Agent")
+	assert.Equal(t, "testmachine", s.Session.Machine, "Machine")
+	assert.Equal(t, "myproject", s.Session.Project, "Project")
+	assert.Equal(t, 2, s.Session.UserMessageCount, "UserMessageCount")
+	assert.Equal(t, "Fix the JSON parsing bug in parser.go", s.Session.FirstMessage, "FirstMessage")
 
 	wantPath := dbPath + "#conv-001"
-	assertEq(t, "File.Path", s.Session.File.Path, wantPath)
+	assert.Equal(t, wantPath, s.Session.File.Path, "File.Path")
 
 	// Token usage from conversation_data
-	assertEq(t, "HasTotalOutputTokens",
-		s.Session.HasTotalOutputTokens, true)
-	assertEq(t, "TotalOutputTokens",
-		s.Session.TotalOutputTokens, 100000)
+	assert.True(t, s.Session.HasTotalOutputTokens, "HasTotalOutputTokens")
+	assert.Equal(t, 100000, s.Session.TotalOutputTokens, "TotalOutputTokens")
 
 	// Check user messages
 	var userMsgs, toolMsgs int
@@ -185,9 +173,9 @@ func TestParseWarpDB_StandardConversation(t *testing.T) {
 			toolMsgs++
 		}
 	}
-	assertEq(t, "userMsgs", userMsgs, 2)
+	assert.Equal(t, 2, userMsgs, "userMsgs")
 	// 3 run_command + 2 read_files + 1 grep + 1 apply_file_diff = 7
-	assertEq(t, "toolMsgs", toolMsgs, 7)
+	assert.Equal(t, 7, toolMsgs, "toolMsgs")
 }
 
 func TestParseWarpSession_SingleConversation(t *testing.T) {
@@ -195,27 +183,21 @@ func TestParseWarpSession_SingleConversation(t *testing.T) {
 	defer db.Close()
 	seedWarpConversation(t, seeder)
 
-	sess, msgs, err := ParseWarpSession(
+	sess, msgs, err := parseWarpSession(
 		dbPath, "conv-001", "testmachine",
 	)
-	if err != nil {
-		t.Fatalf("ParseWarpSession: %v", err)
-	}
-	if sess == nil {
-		t.Fatal("expected non-nil session")
-	}
+	require.NoError(t, err, "parseWarpSession")
+	require.NotNil(t, sess, "expected non-nil session")
 
-	assertEq(t, "ID", sess.ID, "warp:conv-001")
-	assertEq(t, "Agent", sess.Agent, AgentWarp)
+	assert.Equal(t, "warp:conv-001", sess.ID, "ID")
+	assert.Equal(t, AgentWarp, sess.Agent, "Agent")
 
 	// First user message
-	assertEq(t, "msgs[0].Role", msgs[0].Role, RoleUser)
-	assertEq(t, "msgs[0].Content", msgs[0].Content,
-		"Fix the JSON parsing bug in parser.go")
+	assert.Equal(t, RoleUser, msgs[0].Role, "msgs[0].Role")
+	assert.Equal(t, "Fix the JSON parsing bug in parser.go", msgs[0].Content, "msgs[0].Content")
 	// Second user message
-	assertEq(t, "msgs[1].Role", msgs[1].Role, RoleUser)
-	assertEq(t, "msgs[1].Content", msgs[1].Content,
-		"Now add a test for that fix")
+	assert.Equal(t, RoleUser, msgs[1].Role, "msgs[1].Role")
+	assert.Equal(t, "Now add a test for that fix", msgs[1].Content, "msgs[1].Content")
 }
 
 func TestListWarpSessionMeta(t *testing.T) {
@@ -224,17 +206,12 @@ func TestListWarpSessionMeta(t *testing.T) {
 	seedWarpConversation(t, seeder)
 
 	metas, err := ListWarpSessionMeta(dbPath)
-	if err != nil {
-		t.Fatalf("ListWarpSessionMeta: %v", err)
-	}
+	require.NoError(t, err, "ListWarpSessionMeta")
 
-	assertEq(t, "metas len", len(metas), 1)
-	assertEq(t, "SessionID", metas[0].SessionID, "conv-001")
-	assertEq(t, "VirtualPath",
-		metas[0].VirtualPath, dbPath+"#conv-001")
-	if metas[0].FileMtime == 0 {
-		t.Error("expected non-zero FileMtime")
-	}
+	require.Len(t, metas, 1, "metas len")
+	assert.Equal(t, "conv-001", metas[0].SessionID, "SessionID")
+	assert.Equal(t, dbPath+"#conv-001", metas[0].VirtualPath, "VirtualPath")
+	assert.NotZero(t, metas[0].FileMtime, "expected non-zero FileMtime")
 }
 
 func TestParseWarpDB_EmptyConversation(t *testing.T) {
@@ -245,11 +222,9 @@ func TestParseWarpDB_EmptyConversation(t *testing.T) {
 		"conv-empty", "{}", "2026-04-07 10:00:00",
 	)
 
-	sessions, err := ParseWarpDB(dbPath, "m")
-	if err != nil {
-		t.Fatalf("ParseWarpDB: %v", err)
-	}
-	assertEq(t, "sessions len", len(sessions), 0)
+	sessions, err := parseWarpAll(dbPath, "m")
+	require.NoError(t, err, "ParseWarpDB")
+	assert.Empty(t, sessions, "sessions len")
 }
 
 func TestParseWarpDB_NoQueryText(t *testing.T) {
@@ -266,23 +241,17 @@ func TestParseWarpDB_NoQueryText(t *testing.T) {
 		`[]`, "/tmp", `"Completed"`, "auto",
 	)
 
-	sessions, err := ParseWarpDB(dbPath, "m")
-	if err != nil {
-		t.Fatalf("ParseWarpDB: %v", err)
-	}
-	assertEq(t, "sessions len", len(sessions), 0)
+	sessions, err := parseWarpAll(dbPath, "m")
+	require.NoError(t, err, "ParseWarpDB")
+	assert.Empty(t, sessions, "sessions len")
 }
 
 func TestParseWarpDB_NonExistent(t *testing.T) {
-	sessions, err := ParseWarpDB(
+	sessions, err := parseWarpAll(
 		"/nonexistent/warp.sqlite", "m",
 	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if sessions != nil {
-		t.Error("expected nil sessions for non-existent db")
-	}
+	require.NoError(t, err)
+	assert.Nil(t, sessions, "expected nil sessions for non-existent db")
 }
 
 func TestExtractWarpQueryText(t *testing.T) {
@@ -301,7 +270,7 @@ func TestExtractWarpQueryText(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got := extractWarpQueryText(tc.input)
-			assertEq(t, "text", got, tc.want)
+			assert.Equal(t, tc.want, got, "text")
 		})
 	}
 }
@@ -319,35 +288,28 @@ func TestParseWarpTimestamp(t *testing.T) {
 	for _, tc := range tests {
 		ts := parseWarpTimestamp(tc.input)
 		if tc.year == 0 {
-			if !ts.IsZero() {
-				t.Errorf("expected zero time for %q", tc.input)
-			}
-		} else if ts.Year() != tc.year {
-			t.Errorf("year = %d, want %d for %q",
-				ts.Year(), tc.year, tc.input)
+			assert.True(t, ts.IsZero(), "expected zero time for %q", tc.input)
+		} else {
+			assert.Equal(t, tc.year, ts.Year(), "year for %q", tc.input)
 		}
 	}
 }
 
-func TestFindWarpDBPath(t *testing.T) {
+func TestWarpDBPath(t *testing.T) {
 	// Create a temp dir with warp.sqlite
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "warp.sqlite")
 
 	// Before creating the file
-	assertEq(t, "not found", FindWarpDBPath(dir), "")
+	assert.Empty(t, warpDBPath(dir), "not found")
 
 	// Create the file (sql.Open is lazy; Ping forces creation)
 	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Ping(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
+	require.NoError(t, db.Ping())
 	db.Close()
 
-	assertEq(t, "found", FindWarpDBPath(dir), dbPath)
+	assert.Equal(t, dbPath, warpDBPath(dir), "found")
 }
 
 func TestParseWarpConversationMeta(t *testing.T) {
@@ -376,17 +338,17 @@ func TestParseWarpConversationMeta(t *testing.T) {
 	}`
 
 	meta := parseWarpConversationMeta(data)
-	assertEq(t, "totalTokens", meta.totalTokens, 1700)
-	assertEq(t, "RunCommand", meta.toolStats.RunCommand, 5)
-	assertEq(t, "ReadFiles", meta.toolStats.ReadFiles, 3)
-	assertEq(t, "Grep", meta.toolStats.Grep, 2)
-	assertEq(t, "ApplyFileDiff", meta.toolStats.ApplyFileDiff, 1)
+	assert.Equal(t, 1700, meta.totalTokens, "totalTokens")
+	assert.Equal(t, 5, meta.toolStats.RunCommand, "RunCommand")
+	assert.Equal(t, 3, meta.toolStats.ReadFiles, "ReadFiles")
+	assert.Equal(t, 2, meta.toolStats.Grep, "Grep")
+	assert.Equal(t, 1, meta.toolStats.ApplyFileDiff, "ApplyFileDiff")
 }
 
 func TestParseWarpConversationMeta_Empty(t *testing.T) {
 	meta := parseWarpConversationMeta("{}")
-	assertEq(t, "totalTokens", meta.totalTokens, 0)
-	assertEq(t, "RunCommand", meta.toolStats.RunCommand, 0)
+	assert.Equal(t, 0, meta.totalTokens, "totalTokens")
+	assert.Equal(t, 0, meta.toolStats.RunCommand, "RunCommand")
 }
 
 func TestSynthesizeWarpToolMessages(t *testing.T) {
@@ -403,24 +365,17 @@ func TestSynthesizeWarpToolMessages(t *testing.T) {
 		"auto", &ordinal,
 	)
 
-	assertEq(t, "msgs len", len(msgs), 3) // 2 + 1
-	assertEq(t, "ordinal after", ordinal, 3)
+	require.Len(t, msgs, 3, "msgs len") // 2 + 1
+	assert.Equal(t, 3, ordinal, "ordinal after")
 
 	// All should be assistant messages with tool use
 	for _, m := range msgs {
-		assertEq(t, "Role", m.Role, RoleAssistant)
-		if !m.HasToolUse {
-			t.Error("expected HasToolUse=true")
-		}
-		if len(m.ToolCalls) != 1 {
-			t.Errorf("expected 1 tool call, got %d",
-				len(m.ToolCalls))
-		}
+		assert.Equal(t, RoleAssistant, m.Role, "Role")
+		assert.True(t, m.HasToolUse, "expected HasToolUse=true")
+		assert.Len(t, m.ToolCalls, 1)
 	}
 
 	// Check categories
-	assertEq(t, "tc[0].Category",
-		msgs[0].ToolCalls[0].Category, "Bash")
-	assertEq(t, "tc[2].Category",
-		msgs[2].ToolCalls[0].Category, "Read")
+	assert.Equal(t, "Bash", msgs[0].ToolCalls[0].Category, "tc[0].Category")
+	assert.Equal(t, "Read", msgs[2].ToolCalls[0].Category, "tc[2].Category")
 }

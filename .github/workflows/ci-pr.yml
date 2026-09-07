@@ -1,0 +1,13 @@
+name: CI
+
+# Fork PRs must run the checked-in workflow so periscope-specific paths and
+# CI fixes apply. Upstream kenn-io/agentsview still owns the canonical
+# workflow for same-repo PRs on that repository.
+on:
+  pull_request:
+
+permissions: read-all
+
+jobs:
+  run:
+    uses: ./.github/workflows/ci.yml

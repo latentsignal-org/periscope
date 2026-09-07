@@ -1,17 +1,80 @@
-import * as api from "../api/client.js";
-import type { Session, ProjectInfo, AgentInfo } from "../api/types.js";
+import type { DataChangedEvent } from "../api/client.js";
+import {
+  MetadataService,
+  SessionsService,
+} from "../api/generated/index";
+import {
+  callGenerated,
+  configureGeneratedClient,
+  isAbortError,
+} from "../api/runtime.js";
+import type {
+  Session,
+  ProjectInfo,
+  AgentInfo,
+  SidebarSessionIndexResponse,
+  SidebarSessionIndexRow,
+} from "../api/types.js";
 import { sync } from "./sync.svelte.js";
 import { events } from "./events.svelte.js";
+import { starred } from "./starred.svelte.js";
+import { yokedDates } from "./yokedDates.svelte.js";
+import {
+  SESSION_ANALYTICS_WINDOW_PARAM,
+  parseWindowDaysParam,
+} from "./sessionRouteParams.js";
+import { rollingRange } from "../utils/dates.js";
+import { LatestRead } from "../utils/latest-read.js";
+
+type SidebarIndexParams = Parameters<
+  typeof SessionsService.getApiV1SessionsSidebarIndex
+>[0];
+type MetadataParams = Parameters<
+  typeof MetadataService.getApiV1Projects
+>[0];
+type ClearSessionFiltersOptions = {
+  clearDateYoke?: boolean;
+};
+type LoadOptions = {
+  force?: boolean;
+};
 
 const SESSION_PAGE_SIZE = 500;
+const SIDEBAR_HYDRATION_CONCURRENCY = 6;
+const LIVE_REFRESH_DEBOUNCE_MS = 300;
+const SAFETY_NET_REFRESH_MS = 5 * 60 * 1000;
+const RECENTLY_DELETED_TTL_MS = 10_000;
+
+export interface SessionGroupInput {
+  id: string;
+  parent_session_id?: string | null;
+  relationship_type?: string | null;
+  project: string;
+  machine: string;
+  agent: string;
+  agent_label?: string | null;
+  entrypoint?: string | null;
+  first_message?: string | null;
+  display_name?: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  created_at: string;
+  termination_status?: string | null;
+  message_count: number;
+  user_message_count?: number;
+  transcript_revision?: string;
+  is_automated?: boolean;
+  is_teammate?: boolean;
+  is_index_only?: boolean;
+}
 
 export interface SessionGroup {
   key: string;
   project: string;
-  sessions: Session[];
+  sessions: SessionGroupInput[];
   /** Unfiltered session list for ancestry classification.
    *  Set when a filter (e.g. starred) removes sessions from the group. */
-  allSessions?: Session[];
+  allSessions?: SessionGroupInput[];
   primarySessionId: string;
   totalMessages: number;
   firstMessage: string | null;
@@ -19,10 +82,17 @@ export interface SessionGroup {
   endedAt: string | null;
 }
 
+export interface RecentlyDeletedSessions {
+  key: number;
+  ids: string[];
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export interface Filters {
   project: string;
   machine: string;
   agent: string;
+  termination: string;
   date: string;
   dateFrom: string;
   dateTo: string;
@@ -40,6 +110,7 @@ function defaultFilters(): Filters {
     project: "",
     machine: "",
     agent: "",
+    termination: "",
     date: "",
     dateFrom: "",
     dateTo: "",
@@ -54,23 +125,73 @@ function defaultFilters(): Filters {
 }
 
 const SESSION_FILTERS_KEY = "session-filters";
+// v2 marks entries whose date bounds carry provenance: rolling bounds are
+// persisted as intent (`windowDays`) and rematerialized on load, never as
+// pinned dates. Unversioned entries predate that guarantee and may hold
+// rolling bounds saved as if explicit (#1086).
+const SESSION_FILTERS_VERSION = 2;
 
-function loadSavedFilters(): Filters {
+interface SavedFilters {
+  filters: Filters;
+  windowDays: number | null;
+}
+
+function validWindowDays(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+function loadSavedFilters(): SavedFilters {
   try {
     const raw = localStorage.getItem(SESSION_FILTERS_KEY);
     if (raw) {
-      const saved = JSON.parse(raw) as Partial<Filters>;
-      return { ...defaultFilters(), ...saved };
+      const { version, windowDays, ...saved } = JSON.parse(
+        raw,
+      ) as Partial<Filters> & { version?: unknown; windowDays?: unknown };
+      const filters = { ...defaultFilters(), ...saved };
+      // Deliberately `!==`, not `<`: an entry written by a newer (or older)
+      // format is not trusted either way — dropping date bounds is the
+      // fail-safe direction in both.
+      if (version !== SESSION_FILTERS_VERSION) {
+        // Legacy bounds have unknown provenance. Dropping them once is the
+        // safe direction: an intentional range is re-picked in one click,
+        // while a poisoned one keeps silently hiding new sessions.
+        filters.date = "";
+        filters.dateFrom = "";
+        filters.dateTo = "";
+        saveFilters(filters);
+        return { filters, windowDays: null };
+      }
+      if (validWindowDays(windowDays)) {
+        // Rolling intent survives restarts; its bounds are recomputed
+        // against the current date so the window keeps rolling forward.
+        const range = rollingRange(windowDays);
+        filters.date = "";
+        filters.dateFrom = range.from;
+        filters.dateTo = range.to;
+        return { filters, windowDays };
+      }
+      return { filters, windowDays: null };
     }
   } catch {
     // Corrupted localStorage — fall back to defaults.
   }
-  return defaultFilters();
+  return { filters: defaultFilters(), windowDays: null };
 }
 
-function saveFilters(f: Filters): void {
+function saveFilters(f: Filters, windowDays: number | null = null): void {
+  // Rolling bounds are persisted as intent (windowDays) and rematerialized
+  // on load; the materialized dates themselves are session-scoped. Storing
+  // them verbatim would pin the window to the day it was saved, silently
+  // hiding newer sessions (#1086).
+  const toSave =
+    windowDays !== null
+      ? { ...f, date: "", dateFrom: "", dateTo: "", windowDays }
+      : f;
   try {
-    localStorage.setItem(SESSION_FILTERS_KEY, JSON.stringify(f));
+    localStorage.setItem(
+      SESSION_FILTERS_KEY,
+      JSON.stringify({ ...toSave, version: SESSION_FILTERS_VERSION }),
+    );
   } catch {
     // localStorage full or unavailable — silently skip.
   }
@@ -85,6 +206,7 @@ export function filtersToParams(
   if (f.project) p["project"] = f.project;
   if (f.machine) p["machine"] = f.machine;
   if (f.agent) p["agent"] = f.agent;
+  if (f.termination) p["termination"] = f.termination;
   if (f.date) p["date"] = f.date;
   if (f.dateFrom) p["date_from"] = f.dateFrom;
   if (f.dateTo) p["date_to"] = f.dateTo;
@@ -100,6 +222,36 @@ export function filtersToParams(
   return p;
 }
 
+function hasDateFilters(f: Filters): boolean {
+  return !!(f.date || f.dateFrom || f.dateTo);
+}
+
+export function splitExcludeProjectParam(
+  raw: string | undefined,
+): {
+  hideUnknownProject: boolean;
+  usageExcludedProjects: string;
+} {
+  const projects: string[] = [];
+  const seen = new Set<string>();
+  let hideUnknownProject = false;
+  for (const value of (raw ?? "").split(",")) {
+    const trimmed = value.trim();
+    if (!trimmed) continue;
+    if (trimmed === "unknown") {
+      hideUnknownProject = true;
+      continue;
+    }
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    projects.push(trimmed);
+  }
+  return {
+    hideUnknownProject,
+    usageExcludedProjects: projects.join(","),
+  };
+}
+
 /** Parse URL query params into a typed Filters object.
  *  Unknown/missing params fall back to defaults. */
 export function parseFiltersFromParams(
@@ -109,7 +261,8 @@ export function parseFiltersFromParams(
   const maxMsgs = parseInt(params["max_messages"] ?? "", 10);
   const minUserMsgs = parseInt(params["min_user_messages"] ?? "", 10);
 
-  const hideUnknown = params["exclude_project"] === "unknown";
+  const { hideUnknownProject: hideUnknown } =
+    splitExcludeProjectParam(params["exclude_project"]);
   let project = params["project"] ?? "";
   if (hideUnknown && project === "unknown") {
     project = "";
@@ -123,6 +276,7 @@ export function parseFiltersFromParams(
     project,
     machine: params["machine"] ?? "",
     agent: params["agent"] ?? "",
+    termination: params["termination"] ?? "",
     date: params["date"] ?? "",
     dateFrom: params["date_from"] ?? "",
     dateTo: params["date_to"] ?? "",
@@ -142,11 +296,19 @@ class SessionsStore {
   agents: AgentInfo[] = $state([]);
   machines: string[] = $state([]);
   activeSessionId: string | null = $state(null);
+  activeSessionUsageVersion: number = $state(0);
   childSessions: Map<string, Session> = $state(new Map());
   nextCursor: string | null = $state(null);
   total: number = $state(0);
   loading: boolean = $state(false);
-  filters: Filters = $state(loadSavedFilters());
+  #savedFilters = loadSavedFilters();
+  filters: Filters = $state(this.#savedFilters.filters);
+  /** Rolling window (in days) behind the current date bounds, or null when
+   *  the bounds were chosen explicitly. Persisted as intent and
+   *  rematerialized on load so the window keeps rolling forward (#1086). */
+  dateFiltersWindowDays: number | null = $state(
+    this.#savedFilters.windowDays,
+  );
 
   private signalDetailCache = new Map<
     string,
@@ -173,20 +335,37 @@ class SessionsStore {
   private machinesLoaded: boolean = false;
   private machinesPromise: Promise<void> | null = null;
   private machinesVersion: number = 0;
+  private sidebarHydrationInflightByVersion = new Map<
+    number,
+    Map<string, Promise<void>>
+  >();
+  private sidebarHydrationEpochByVersion = new Map<number, number>();
+  private sidebarHydrationQueue: Array<() => void> = [];
+  private sidebarHydrationActive = 0;
+  private sidebarConsumers = 0;
+  private sidebarLoadPromise: Promise<void> | null = null;
+  private sidebarLoadSignature: string | null = null;
+  private sidebarAbort: AbortController | null = null;
+  private routeAbort: AbortController | null = null;
+  private navigateRead = new LatestRead();
+  private refreshRead = new LatestRead();
+  private childSessionsRead = new LatestRead();
 
   private liveRefreshStarted = false;
   private unsubEvents: (() => void) | null = null;
+  private liveRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private safetyNetTimer: ReturnType<typeof setInterval> | null = null;
 
   get activeSession(): Session | undefined {
-    return this.sessions.find((s) => s.id === this.activeSessionId);
+    const session = this.sessions.find((s) => s.id === this.activeSessionId);
+    return session?.is_index_only ? undefined : session;
   }
 
   get groupedSessions(): SessionGroup[] {
     return buildSessionGroups(this.sessions);
   }
 
-  private get apiParams() {
+  private get apiParams(): SidebarIndexParams {
     const f = this.filters;
     // Don't exclude "unknown" when explicitly viewing it.
     const exclude =
@@ -195,26 +374,28 @@ class SessionsStore {
         : undefined;
     return {
       project: f.project || undefined,
-      exclude_project: exclude,
+      excludeProject: exclude,
       machine: f.machine || undefined,
       agent: f.agent || undefined,
+      termination: f.termination || undefined,
       date: f.date || undefined,
-      date_from: f.dateFrom || undefined,
-      date_to: f.dateTo || undefined,
-      active_since: f.recentlyActive
+      dateFrom: f.dateFrom || undefined,
+      dateTo: f.dateTo || undefined,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      activeSince: f.recentlyActive
         ? new Date(
             Date.now() - 24 * 60 * 60 * 1000,
           ).toISOString()
         : undefined,
-      min_messages:
+      minMessages:
         f.minMessages > 0 ? f.minMessages : undefined,
-      max_messages:
+      maxMessages:
         f.maxMessages > 0 ? f.maxMessages : undefined,
-      min_user_messages:
+      minUserMessages:
         f.minUserMessages > 0 ? f.minUserMessages : undefined,
-      include_one_shot: f.includeOneShot || undefined,
-      include_automated: f.includeAutomated || undefined,
-      include_children: true,
+      includeOneShot: f.includeOneShot || undefined,
+      includeAutomated: f.includeAutomated || undefined,
+      starred: starred.filterOnly || undefined,
     };
   }
 
@@ -224,11 +405,45 @@ class SessionsStore {
     this.total = 0;
   }
 
+  attachSidebar(): () => void {
+    this.sidebarConsumers++;
+    this.startLiveRefresh();
+    let detached = false;
+    return () => {
+      if (detached) return;
+      detached = true;
+      this.sidebarConsumers = Math.max(0, this.sidebarConsumers - 1);
+      if (this.sidebarConsumers === 0) {
+        this.dispose();
+      }
+    };
+  }
+
+  /** Set date filters materialized from a panel date state. `windowDays`
+   *  carries the rolling intent behind the bounds (null for explicitly
+   *  chosen fixed ranges). */
+  applyPanelDateFilters(
+    dateParams: Record<string, string>,
+    windowDays: number | null,
+  ): void {
+    this.filters.date = dateParams["date"] ?? "";
+    this.filters.dateFrom = dateParams["date_from"] ?? "";
+    this.filters.dateTo = dateParams["date_to"] ?? "";
+    this.dateFiltersWindowDays = windowDays;
+    // Persist immediately: a provenance flip with identical bounds does
+    // not register as a filter change, so callers that diff serialized
+    // filters may never trigger a load() and its save.
+    saveFilters(this.filters, windowDays);
+  }
+
   initFromParams(params: Record<string, string>) {
     const prevOneShot = this.filters.includeOneShot;
     const prevAutomated = this.filters.includeAutomated;
     const next = parseFiltersFromParams(params);
     this.filters = next;
+    this.dateFiltersWindowDays = parseWindowDaysParam(
+      params[SESSION_ANALYTICS_WINDOW_PARAM],
+    );
     if (prevOneShot !== next.includeOneShot ||
         prevAutomated !== next.includeAutomated) {
       this.invalidateFilterCaches();
@@ -236,56 +451,98 @@ class SessionsStore {
     this.setActiveSession(null);
   }
 
-  async load() {
-    saveFilters(this.filters);
-    this.startLiveRefresh();
+  async load(options: LoadOptions = {}) {
+    saveFilters(this.filters, this.dateFiltersWindowDays);
+
+    const params = {
+      ...this.apiParams,
+      limit: SESSION_PAGE_SIZE,
+    };
+    const signature = JSON.stringify(params);
+    if (
+      !options.force &&
+      this.sidebarLoadPromise !== null &&
+      this.sidebarLoadSignature === signature
+    ) {
+      return this.sidebarLoadPromise;
+    }
+
+    this.sidebarAbort?.abort();
+    const controller = new AbortController();
+    this.sidebarAbort = controller;
+    const promise = this.loadSidebarPage(params, controller.signal);
+    this.sidebarLoadPromise = promise;
+    this.sidebarLoadSignature = signature;
+    try {
+      await promise;
+    } finally {
+      if (this.sidebarLoadPromise === promise) {
+        this.sidebarLoadPromise = null;
+        this.sidebarLoadSignature = null;
+        if (this.sidebarAbort === controller) {
+          this.sidebarAbort = null;
+        }
+      }
+    }
+  }
+
+  refreshSidebarIfAttached() {
+    if (this.sidebarConsumers === 0) return;
+    void this.load();
+  }
+
+  private async loadSidebarPage(
+    params: SidebarIndexParams,
+    signal: AbortSignal,
+  ) {
     const version = ++this.loadVersion;
-    // Only flip loading=true when we don't already have data to show.
-    // Live-event refetches and filter-change refetches keep the
-    // existing list visible and swap it in place when data arrives,
-    // instead of flashing to a loading indicator.
-    if (this.sessions.length === 0) this.loading = true;
-    // Preserve old data during reload — clearing eagerly
-    // causes a flash because the sidebar and content area
-    // briefly see an empty session list.
+    const indexVersion = this.sidebarIndexVersion + 1;
+    // Keep the existing list visible during reloads, but mark
+    // loading=true so large filter expansions expose that more
+    // pages are still being fetched after page 1 is published.
+    this.loading = true;
+    // Preserve old data during reload — clearing eagerly causes
+    // a flash because the sidebar and content area briefly see
+    // an empty session list.
     const prev = {
       sessions: this.sessions,
       nextCursor: this.nextCursor,
       total: this.total,
     };
     try {
-      let cursor: string | undefined = undefined;
-      let loaded: Session[] = [];
+      const index = await callGenerated(
+        () => SessionsService.getApiV1SessionsSidebarIndex(params),
+        signal,
+      ) as unknown as SidebarSessionIndexResponse;
+      if (this.loadVersion !== version) return;
 
-      for (;;) {
-        if (this.loadVersion !== version) return;
-        const page = await api.listSessions({
-          ...this.apiParams,
-          cursor,
-          limit: SESSION_PAGE_SIZE,
-        });
-        if (this.loadVersion !== version) return;
-
-        if (page.sessions.length === 0) {
-          this.sessions = loaded;
-          this.nextCursor = null;
-          this.total = loaded.length;
-          break;
-        }
-
-        loaded = [...loaded, ...page.sessions];
-        this.sessions = loaded;
-        // Keep total aligned with loaded rows to avoid blank
-        // virtual space while we fetch remaining pages.
-        this.total = loaded.length;
-
-        cursor = page.next_cursor ?? undefined;
-        this.nextCursor = cursor ?? null;
-        if (!cursor) {
-          this.total = loaded.length;
-          break;
+      this.sidebarIndexVersion = indexVersion;
+      this.hydratedSessionsByVersion.set(indexVersion, new Map());
+      this.sidebarHydrationEpochByVersion.set(indexVersion, 0);
+      this.pruneSidebarHydrationVersions(indexVersion);
+      const existing = new Map(this.sessions.map((session) => [
+        session.id,
+        session,
+      ]));
+      this.sessions = index.sessions.map((row) =>
+        sidebarIndexRowToSession(row, existing.get(row.id))
+      );
+      this.sidebarIndexIds = new Set(index.sessions.map((row) => row.id));
+      // Keep the active session's hydrated row when the new index
+      // page doesn't contain it: navigateToSession appends deep-linked,
+      // cross-page, and subagent targets, and dropping them here would
+      // revert activeSession to undefined mid-view. It stays outside
+      // sidebarIndexIds, so later pages keep it at the tail until
+      // pagination reaches its real position.
+      const activeId = this.activeSessionId;
+      if (activeId && !this.sessions.some((s) => s.id === activeId)) {
+        const kept = existing.get(activeId);
+        if (kept && !kept.is_index_only) {
+          this.sessions = [...this.sessions, kept];
         }
       }
+      this.nextCursor = index.next_cursor ?? null;
+      this.total = index.total;
     } catch {
       // Restore previous state so a transient failure
       // doesn't wipe the visible session list.
@@ -301,20 +558,166 @@ class SessionsStore {
     }
   }
 
+  sidebarIndexVersion: number = $state(0);
+  // Session ids supplied by the loaded sidebar index pages; rows in
+  // this.sessions outside this set were appended out of position
+  // (see loadSidebarPage / loadMore).
+  private sidebarIndexIds: Set<string> = new Set();
+  hydratedSessionsByVersion: Map<number, Map<string, Session>> =
+    $state(new Map());
+
+  private pruneSidebarHydrationVersions(retainVersion: number) {
+    for (const version of this.hydratedSessionsByVersion.keys()) {
+      if (version !== retainVersion) {
+        this.hydratedSessionsByVersion.delete(version);
+      }
+    }
+    for (const version of this.sidebarHydrationInflightByVersion.keys()) {
+      if (version !== retainVersion) {
+        this.sidebarHydrationInflightByVersion.delete(version);
+      }
+    }
+    for (const version of this.sidebarHydrationEpochByVersion.keys()) {
+      if (version !== retainVersion) {
+        this.sidebarHydrationEpochByVersion.delete(version);
+      }
+    }
+  }
+
+  async hydrateVisibleSessions(
+    ids: string[],
+    version: number = this.sidebarIndexVersion,
+  ) {
+    const uniqueIds = [...new Set(ids)];
+    const cache =
+      this.hydratedSessionsByVersion.get(version) ?? new Map<string, Session>();
+    this.hydratedSessionsByVersion.set(version, cache);
+    const inflight = this.sidebarHydrationInflightByVersion.get(version) ??
+      new Map<string, Promise<void>>();
+    this.sidebarHydrationInflightByVersion.set(version, inflight);
+    const epoch = this.sidebarHydrationEpochByVersion.get(version) ?? 0;
+    const signal = this.routeSignal();
+
+    await Promise.all(uniqueIds.map((id) => {
+      if (cache.has(id)) return;
+      const existing = inflight.get(id);
+      if (existing) return existing;
+
+      const promise = this.runSidebarHydration(async () => {
+        if (signal.aborted) return;
+        try {
+          configureGeneratedClient();
+          const hydrated = await callGenerated(
+            () => SessionsService.getApiV1SessionsId({ id }),
+            signal,
+          ) as unknown as Session;
+          if (
+            version !== this.sidebarIndexVersion ||
+            epoch !== (this.sidebarHydrationEpochByVersion.get(version) ?? 0)
+          ) {
+            return;
+          }
+          cache.set(id, hydrated);
+          this.mergeHydratedSession(hydrated);
+        } catch {
+          // Visible hydration is best-effort; the skinny row remains usable.
+        } finally {
+          inflight.delete(id);
+        }
+      });
+      inflight.set(id, promise);
+      return promise;
+    }));
+  }
+
+  private async runSidebarHydration(task: () => Promise<void>): Promise<void> {
+    if (this.sidebarHydrationActive >= SIDEBAR_HYDRATION_CONCURRENCY) {
+      await new Promise<void>((resolve) => {
+        this.sidebarHydrationQueue.push(resolve);
+      });
+    }
+
+    this.sidebarHydrationActive++;
+    try {
+      await task();
+    } finally {
+      this.sidebarHydrationActive--;
+      this.sidebarHydrationQueue.shift()?.();
+    }
+  }
+
+  private mergeHydratedSession(hydrated: Session) {
+    const idx = this.sessions.findIndex((s) => s.id === hydrated.id);
+    if (idx < 0) return;
+    const current = this.sessions[idx]!;
+    this.sessions[idx] = {
+      ...current,
+      ...hydrated,
+      display_name: hydrated.display_name ?? current.display_name,
+      is_teammate: hydrated.is_teammate ?? current.is_teammate,
+      is_index_only: false,
+    };
+  }
+
+  private invalidateHydratedSessionDetails() {
+    const version = this.sidebarIndexVersion;
+    this.hydratedSessionsByVersion.set(version, new Map());
+    this.sidebarHydrationInflightByVersion.delete(version);
+    this.sidebarHydrationEpochByVersion.set(
+      version,
+      (this.sidebarHydrationEpochByVersion.get(version) ?? 0) + 1,
+    );
+    this.signalDetailCache.clear();
+    this.signalDetailInflight.clear();
+    this.signalDetailLoading = false;
+  }
+
   async loadMore() {
     if (!this.nextCursor || this.loading) return;
     const version = ++this.loadVersion;
+    const signal = this.routeSignal();
     this.loading = true;
     try {
-      const page = await api.listSessions({
-        ...this.apiParams,
-        cursor: this.nextCursor,
-        limit: SESSION_PAGE_SIZE,
-      });
+      configureGeneratedClient();
+      const index = await callGenerated(
+        () => SessionsService.getApiV1SessionsSidebarIndex({
+          ...this.apiParams,
+          cursor: this.nextCursor!,
+          limit: SESSION_PAGE_SIZE,
+        }),
+        signal,
+      ) as unknown as SidebarSessionIndexResponse;
       if (this.loadVersion !== version) return;
-      this.sessions.push(...page.sessions);
-      this.nextCursor = page.next_cursor ?? null;
-      this.total = page.total;
+      // Merge index-page order first, appended rows last. Rows outside
+      // sidebarIndexIds were appended out of position (the active
+      // session kept by loadSidebarPage, navigateToSession targets);
+      // they stay at the tail until pagination reaches their real
+      // position, then merge in place carrying their hydrated fields.
+      const existingById = new Map(
+        this.sessions.map((session) => [session.id, session]),
+      );
+      for (const row of index.sessions) {
+        this.sidebarIndexIds.add(row.id);
+      }
+      const paged = this.sessions.filter(
+        (s) => this.sidebarIndexIds.has(s.id) &&
+          !index.sessions.some((row) => row.id === s.id),
+      );
+      const appended = this.sessions.filter(
+        (s) => !this.sidebarIndexIds.has(s.id),
+      );
+      this.sessions = [
+        ...paged,
+        ...index.sessions.map((row) =>
+          sidebarIndexRowToSession(row, existingById.get(row.id))
+        ),
+        ...appended,
+      ];
+      this.nextCursor = index.next_cursor ?? null;
+      this.total = index.total;
+    } catch (error) {
+      if (signal.aborted || isAbortError(error)) return;
+      throw error;
     } finally {
       if (this.loadVersion === version) {
         this.loading = false;
@@ -352,7 +755,10 @@ class SessionsStore {
     const ver = this.projectsVersion;
     this.projectsPromise = (async () => {
       try {
-        const res = await api.getProjects(this.metadataParams);
+        configureGeneratedClient();
+        const res = await MetadataService.getApiV1Projects(
+          this.metadataParams,
+        ) as unknown as { projects: ProjectInfo[] };
         if (ver === this.projectsVersion) {
           this.projects = res.projects;
           this.projectsLoaded = true;
@@ -374,7 +780,10 @@ class SessionsStore {
     const ver = this.agentsVersion;
     this.agentsPromise = (async () => {
       try {
-        const res = await api.getAgents(this.metadataParams);
+        configureGeneratedClient();
+        const res = await MetadataService.getApiV1Agents(
+          this.metadataParams,
+        ) as unknown as { agents: AgentInfo[] };
         if (ver === this.agentsVersion) {
           this.agents = res.agents;
           this.agentsLoaded = true;
@@ -396,7 +805,10 @@ class SessionsStore {
     const ver = this.machinesVersion;
     this.machinesPromise = (async () => {
       try {
-        const res = await api.getMachines(this.metadataParams);
+        configureGeneratedClient();
+        const res = await MetadataService.getApiV1Machines(
+          this.metadataParams,
+        ) as unknown as { machines: string[] };
         if (ver === this.machinesVersion) {
           this.machines = res.machines;
           this.machinesLoaded = true;
@@ -414,32 +826,76 @@ class SessionsStore {
 
   private setActiveSession(id: string | null) {
     if (id === this.activeSessionId) return;
+    this.navigateRead.cancel();
+    this.refreshRead.cancel();
+    this.childSessionsRead.cancel();
     this.activeSessionId = id;
+    this.activeSessionUsageVersion = 0;
     this.refreshVersion++;
     this.childSessionsVersion++;
   }
 
   selectSession(id: string) {
     this.setActiveSession(id);
+    void this.hydrateSelectedIndexOnlySession(id);
   }
+
+  private navigateInFlight: { id: string; promise: Promise<void> } | null =
+    null;
 
   /**
    * Navigate to a session by ID, loading it into the sessions list if
    * not already present (e.g. subagent sessions filtered from groups).
+   * Re-invocations for the same still-active session join the in-flight
+   * fetch instead of restarting it, so reactive callers can re-request
+   * hydration without duplicating requests.
    */
   async navigateToSession(id: string) {
+    if (this.navigateInFlight?.id === id && this.activeSessionId === id) {
+      return this.navigateInFlight.promise;
+    }
     this.setActiveSession(id);
     const existing = this.sessions.find((s) => s.id === id);
-    if (!existing) {
+    if (existing) {
+      await this.hydrateSelectedIndexOnlySession(id);
+      return;
+    }
+    const signal = this.navigateRead.begin();
+    const entry = { id, promise: Promise.resolve() };
+    entry.promise = (async () => {
       try {
-        const session = await api.getSession(id);
-        if (this.activeSessionId === id) {
-          this.sessions = [...this.sessions, session];
+        configureGeneratedClient();
+        const session = await callGenerated(
+          () => SessionsService.getApiV1SessionsId({ id }),
+          signal,
+        ) as unknown as Session;
+        if (
+          this.activeSessionId === id && this.navigateRead.isCurrent(signal)
+        ) {
+          const idx = this.sessions.findIndex((s) => s.id === id);
+          if (idx >= 0) {
+            this.mergeHydratedSession(session);
+          } else {
+            this.sessions = [...this.sessions, session];
+          }
         }
       } catch {
         // Session not found — selection stands without metadata
+      } finally {
+        this.navigateRead.finish(signal);
+        if (this.navigateInFlight === entry) {
+          this.navigateInFlight = null;
+        }
       }
-    }
+    })();
+    this.navigateInFlight = entry;
+    return entry.promise;
+  }
+
+  private async hydrateSelectedIndexOnlySession(id: string) {
+    const existing = this.sessions.find((s) => s.id === id);
+    if (!existing?.is_index_only) return;
+    await this.hydrateVisibleSessions([id]);
   }
 
   deselectSession() {
@@ -451,30 +907,44 @@ class SessionsStore {
     const id = this.activeSessionId;
     if (!id) return;
     const version = ++this.refreshVersion;
+    const signal = this.refreshRead.begin();
     try {
-      const session = await api.getSession(id);
+      configureGeneratedClient();
+      const session = await callGenerated(
+        () => SessionsService.getApiV1SessionsId({ id }),
+        signal,
+      ) as unknown as Session;
       if (
         this.refreshVersion !== version ||
-        this.activeSessionId !== id
+        this.activeSessionId !== id ||
+        !this.refreshRead.isCurrent(signal)
       ) {
         return;
       }
       const idx = this.sessions.findIndex((s) => s.id === id);
       if (idx >= 0) {
-        this.sessions[idx] = session;
+        this.mergeHydratedSession(session);
       }
     } catch {
       // Session may have been deleted
+    } finally {
+      this.refreshRead.finish(signal);
     }
   }
 
   async loadChildSessions(parentId: string) {
     const version = ++this.childSessionsVersion;
+    const signal = this.childSessionsRead.begin();
     try {
-      const children = await api.getChildSessions(parentId);
+      configureGeneratedClient();
+      const children = await callGenerated(
+        () => SessionsService.getApiV1SessionsIdChildren({ id: parentId }),
+        signal,
+      ) as unknown as Session[];
       if (
         this.childSessionsVersion !== version ||
-        this.activeSessionId !== parentId
+        this.activeSessionId !== parentId ||
+        !this.childSessionsRead.isCurrent(signal)
       ) {
         return;
       }
@@ -491,6 +961,8 @@ class SessionsStore {
         return;
       }
       this.childSessions = new Map();
+    } finally {
+      this.childSessionsRead.finish(signal);
     }
   }
 
@@ -507,13 +979,27 @@ class SessionsStore {
     if (inflight) return inflight;
     const promise = this.doFetchSignalDetail(id);
     this.signalDetailInflight.set(id, promise);
-    await promise;
+    try {
+      await promise;
+    } finally {
+      if (this.signalDetailInflight.get(id) === promise) {
+        this.signalDetailInflight.delete(id);
+      }
+      this.signalDetailLoading =
+        this.signalDetailInflight.size > 0;
+    }
   }
 
   private async doFetchSignalDetail(id: string) {
+    const signal = this.routeSignal();
     this.signalDetailLoading = true;
     try {
-      const session = await api.getSession(id);
+      configureGeneratedClient();
+      const session = await callGenerated(
+        () => SessionsService.getApiV1SessionsId({ id }),
+        signal,
+      ) as unknown as Session;
+      if (signal.aborted) return;
       this.signalDetailCache.set(id, {
         basis: session.health_score_basis ?? null,
         penalties: session.health_penalties ?? null,
@@ -521,10 +1007,6 @@ class SessionsStore {
       this.mergeDetailIntoList(id);
     } catch {
       // Signal detail is non-critical
-    } finally {
-      this.signalDetailInflight.delete(id);
-      this.signalDetailLoading =
-        this.signalDetailInflight.size > 0;
     }
   }
 
@@ -562,18 +1044,23 @@ class SessionsStore {
       // an unstarred session while starred-only filter is on) — jump to
       // an edge so the keyboard shortcut doesn't silently fail.
       const edge = delta > 0 ? 0 : list.length - 1;
-      this.setActiveSession(list[edge]!.id);
+      const id = list[edge]!.id;
+      this.setActiveSession(id);
+      void this.hydrateSelectedIndexOnlySession(id);
       return;
     }
     const next = idx + delta;
     if (next >= 0 && next < list.length) {
-      this.setActiveSession(list[next]!.id);
+      const id = list[next]!.id;
+      this.setActiveSession(id);
+      void this.hydrateSelectedIndexOnlySession(id);
     }
   }
 
   setProjectFilter(project: string) {
     const prev = this.filters;
     this.filters = { ...defaultFilters(), project, agent: prev.agent };
+    this.dateFiltersWindowDays = null;
     this.setActiveSession(null);
     if (prev.includeOneShot !== this.filters.includeOneShot ||
         prev.includeAutomated !== this.filters.includeAutomated) {
@@ -683,11 +1170,40 @@ class SessionsStore {
     this.load();
   }
 
+  setTerminationFilter(termination: string) {
+    this.filters.termination = termination;
+    this.setActiveSession(null);
+    this.load();
+  }
+
+  /** Add or remove a status from the comma-separated termination
+   * filter. Empty list means "no filter". */
+  toggleTerminationStatus(status: string) {
+    const set = new Set(
+      this.filters.termination
+        .split(",")
+        .filter((s) => s.length > 0),
+    );
+    if (set.has(status)) set.delete(status);
+    else set.add(status);
+    this.setTerminationFilter([...set].join(","));
+  }
+
+  /** Whether the comma-separated termination filter contains
+   * the given status. Used by the multi-select pill UI. */
+  hasTerminationStatus(status: string): boolean {
+    if (!this.filters.termination) return false;
+    return this.filters.termination
+      .split(",")
+      .includes(status);
+  }
+
   get hasActiveFilters(): boolean {
     const f = this.filters;
     return !!(
       f.machine ||
       f.agent ||
+      f.termination ||
       f.recentlyActive ||
       f.hideUnknownProject ||
       f.dateFrom ||
@@ -699,11 +1215,15 @@ class SessionsStore {
     );
   }
 
-  clearSessionFilters() {
+  clearSessionFilters(options: ClearSessionFiltersOptions = {}) {
     const project = this.filters.project;
     const wasOneShot = this.filters.includeOneShot;
     const wasAutomated = this.filters.includeAutomated;
+    if (options.clearDateYoke || hasDateFilters(this.filters)) {
+      yokedDates.clear();
+    }
     this.filters = { ...defaultFilters(), project };
+    this.dateFiltersWindowDays = null;
     this.setActiveSession(null);
     if (wasOneShot !== this.filters.includeOneShot || wasAutomated) {
       this.invalidateFilterCaches();
@@ -711,12 +1231,60 @@ class SessionsStore {
     this.load();
   }
 
-  /** Recently deleted session IDs for undo toast. */
-  recentlyDeleted: { id: string; timer: ReturnType<typeof setTimeout> }[] =
-    $state([]);
+  /** Recently deleted session batches for undo toast. */
+  recentlyDeleted: RecentlyDeletedSessions[] = $state([]);
+  private recentlyDeletedNextKey = 0;
+
+  private newRecentlyDeletedTimer(key: number) {
+    return setTimeout(() => {
+      this.recentlyDeleted = this.recentlyDeleted.filter(
+        (d) => d.key !== key,
+      );
+    }, RECENTLY_DELETED_TTL_MS);
+  }
+
+  private addRecentlyDeleted(ids: string[]) {
+    if (ids.length === 0) return;
+    const key = this.recentlyDeletedNextKey++;
+    const timer = this.newRecentlyDeletedTimer(key);
+    this.recentlyDeleted = [
+      ...this.recentlyDeleted,
+      { key, ids: [...ids], timer },
+    ];
+  }
+
+  /** Multi-select state for batch operations. */
+  selectedIds: Set<string> = $state(new Set());
+  selectMode: boolean = $state(false);
+
+  toggleSelectMode() {
+    this.selectMode = !this.selectMode;
+    if (!this.selectMode) {
+      this.selectedIds = new Set();
+    }
+  }
+
+  toggleSelection(id: string) {
+    const next = new Set(this.selectedIds);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    this.selectedIds = next;
+  }
+
+  selectAll(ids: string[]) {
+    this.selectedIds = new Set(ids);
+  }
+
+  clearSelection() {
+    this.selectedIds = new Set();
+  }
 
   async deleteSession(id: string) {
-    await api.deleteSession(id);
+    configureGeneratedClient();
+    await SessionsService.deleteApiV1SessionsId({ id });
     const before = this.sessions.length;
     this.sessions = this.sessions.filter((s) => s.id !== id);
     const removed = before - this.sessions.length;
@@ -726,26 +1294,61 @@ class SessionsStore {
     if (this.activeSessionId === id) {
       this.setActiveSession(null);
     }
-    const timer = setTimeout(() => {
-      this.recentlyDeleted = this.recentlyDeleted.filter(
-        (d) => d.id !== id,
-      );
-    }, 10_000);
-    this.recentlyDeleted = [...this.recentlyDeleted, { id, timer }];
+    this.addRecentlyDeleted([id]);
     this.invalidateFilterCaches();
   }
 
+  async batchDeleteSessions(ids: string[]) {
+    if (ids.length === 0) return;
+    configureGeneratedClient();
+    await SessionsService.postApiV1SessionsBatchDelete({
+      requestBody: { session_ids: ids },
+    });
+    const idSet = new Set(ids);
+    if (this.activeSessionId && idSet.has(this.activeSessionId)) {
+      this.setActiveSession(null);
+    }
+    this.addRecentlyDeleted(ids);
+    this.selectedIds = new Set();
+    this.selectMode = false;
+    this.invalidateFilterCaches();
+    await this.load({ force: true });
+  }
+
   async restoreSession(id: string) {
-    await api.restoreSession(id);
+    configureGeneratedClient();
+    await SessionsService.postApiV1SessionsIdRestore({ id });
     this.clearRecentlyDeleted(id);
     this.invalidateFilterCaches();
     await this.load();
   }
 
-  private get metadataParams() {
+  async restoreRecentlyDeleted(deleted: RecentlyDeletedSessions) {
+    const ids = [...deleted.ids];
+    if (ids.length === 0) return;
+    configureGeneratedClient();
+    clearTimeout(deleted.timer);
+    const failed: string[] = [];
+    for (const id of ids) {
+      try {
+        await SessionsService.postApiV1SessionsIdRestore({ id });
+      } catch {
+        failed.push(id);
+      }
+    }
+    this.updateRecentlyDeletedBatch(deleted, failed);
+    this.invalidateFilterCaches();
+    await this.load({ force: true });
+    if (failed.length > 0) {
+      const noun = failed.length === 1 ? "session" : "sessions";
+      throw new Error(`Failed to restore ${failed.length} ${noun}`);
+    }
+  }
+
+  private get metadataParams(): MetadataParams {
     return {
-      include_one_shot: this.filters.includeOneShot || undefined,
-      include_automated: this.filters.includeAutomated || undefined,
+      includeOneShot: this.filters.includeOneShot || undefined,
+      includeAutomated: this.filters.includeAutomated || undefined,
     };
   }
 
@@ -768,12 +1371,14 @@ class SessionsStore {
   /** Remove one or all entries from the undo toast list. */
   clearRecentlyDeleted(id?: string) {
     if (id) {
-      this.recentlyDeleted = this.recentlyDeleted.filter((d) => {
-        if (d.id === id) {
+      this.recentlyDeleted = this.recentlyDeleted.flatMap((d) => {
+        if (!d.ids.includes(id)) return [d];
+        const ids = d.ids.filter((deletedId) => deletedId !== id);
+        if (ids.length === 0) {
           clearTimeout(d.timer);
-          return false;
+          return [];
         }
-        return true;
+        return [{ ...d, ids }];
       });
     } else {
       for (const d of this.recentlyDeleted) clearTimeout(d.timer);
@@ -781,24 +1386,128 @@ class SessionsStore {
     }
   }
 
+  private updateRecentlyDeletedBatch(
+    deleted: RecentlyDeletedSessions,
+    ids: string[],
+  ) {
+    this.recentlyDeleted = this.recentlyDeleted.flatMap((d) => {
+      if (d.key !== deleted.key) return [d];
+      if (ids.length === 0) {
+        clearTimeout(d.timer);
+        return [];
+      }
+      return [
+        {
+          ...d,
+          ids: [...ids],
+          timer: this.newRecentlyDeletedTimer(d.key),
+        },
+      ];
+    });
+  }
+
   async renameSession(id: string, displayName: string | null) {
-    const updated = await api.renameSession(id, displayName);
+    configureGeneratedClient();
+    const updated = await SessionsService.patchApiV1SessionsIdRename({
+      id,
+      requestBody: { display_name: displayName },
+    }) as unknown as Session;
     const idx = this.sessions.findIndex((s) => s.id === id);
     if (idx !== -1) {
-      this.sessions[idx] = { ...this.sessions[idx]!, ...updated };
+      const merged = { ...this.sessions[idx]!, ...updated };
+      // When the caller cleared the rename and the backend found no agent name
+      // to restore, display_name is absent from the response (omitempty on nil).
+      // Explicitly null it out so the store reflects the cleared state rather
+      // than keeping the stale value until the next SSE-triggered refresh.
+      if (displayName === null && updated.display_name === undefined) {
+        merged.display_name = null;
+      }
+      this.sessions[idx] = merged;
     }
   }
 
   private startLiveRefresh() {
     if (this.liveRefreshStarted) return;
     this.liveRefreshStarted = true;
-    this.unsubEvents = events.subscribeDebounced(
-      () => { this.load(); },
-    );
+    this.unsubEvents = events.subscribe((event) => {
+      this.handleLiveRefreshEvent(event);
+    });
     this.safetyNetTimer = setInterval(
-      () => { this.load(); },
-      5 * 60 * 1000,
+      () => {
+        this.load();
+        this.refreshActiveChildSessions();
+        this.bumpActiveSessionUsageVersion();
+      },
+      SAFETY_NET_REFRESH_MS,
     );
+  }
+
+  private handleLiveRefreshEvent(event: DataChangedEvent) {
+    if (event.scope === "messages") {
+      this.invalidateHydratedSessionDetails();
+      this.bumpActiveSessionUsageVersion();
+      this.refreshActiveChildSessions();
+      return;
+    }
+    if (event.scope === "sessions" || event.scope === "sync") {
+      this.scheduleIndexRefresh();
+      this.bumpActiveSessionUsageVersion();
+      this.refreshActiveChildSessions();
+    }
+  }
+
+  private scheduleIndexRefresh() {
+    if (this.sidebarConsumers === 0) return;
+    if (this.liveRefreshTimer !== null) {
+      clearTimeout(this.liveRefreshTimer);
+    }
+    this.liveRefreshTimer = setTimeout(() => {
+      this.liveRefreshTimer = null;
+      this.load();
+    }, LIVE_REFRESH_DEBOUNCE_MS);
+  }
+
+  private refreshActiveChildSessions() {
+    const id = this.activeSessionId;
+    if (!id) return;
+    void this.loadChildSessions(id);
+  }
+
+  private bumpActiveSessionUsageVersion() {
+    if (!this.activeSessionId) return;
+    this.activeSessionUsageVersion++;
+  }
+
+  private routeSignal(): AbortSignal {
+    if (!this.routeAbort || this.routeAbort.signal.aborted) {
+      this.routeAbort = new AbortController();
+    }
+    return this.routeAbort.signal;
+  }
+
+  cancelRouteReads(): void {
+    this.sidebarAbort?.abort();
+    this.sidebarAbort = null;
+    this.sidebarLoadPromise = null;
+    this.sidebarLoadSignature = null;
+    this.routeAbort?.abort();
+    this.routeAbort = null;
+    this.navigateRead.cancel();
+    this.refreshRead.cancel();
+    this.childSessionsRead.cancel();
+    this.loadVersion++;
+    this.refreshVersion++;
+    this.childSessionsVersion++;
+    this.loading = false;
+    this.signalDetailInflight.clear();
+    this.signalDetailLoading = false;
+    for (const version of this.sidebarHydrationEpochByVersion.keys()) {
+      this.sidebarHydrationEpochByVersion.set(
+        version,
+        (this.sidebarHydrationEpochByVersion.get(version) ?? 0) + 1,
+      );
+    }
+    for (const resume of this.sidebarHydrationQueue.splice(0)) resume();
   }
 
   dispose() {
@@ -806,16 +1515,76 @@ class SessionsStore {
       this.unsubEvents();
       this.unsubEvents = null;
     }
+    if (this.liveRefreshTimer !== null) {
+      clearTimeout(this.liveRefreshTimer);
+      this.liveRefreshTimer = null;
+    }
     if (this.safetyNetTimer !== null) {
       clearInterval(this.safetyNetTimer);
       this.safetyNetTimer = null;
     }
+    this.cancelRouteReads();
     this.liveRefreshStarted = false;
   }
 }
 
 export function createSessionsStore(): SessionsStore {
   return new SessionsStore();
+}
+
+function sidebarIndexRowToSession(
+  row: SidebarSessionIndexRow,
+  existing?: Session,
+): Session {
+  const skinny: Session = {
+    id: row.id,
+    project: row.project,
+    machine: row.machine,
+    agent: row.agent,
+    agent_label: row.agent_label ?? undefined,
+    entrypoint: row.entrypoint ?? undefined,
+    first_message: null,
+    display_name: row.display_name ?? null,
+    started_at: row.started_at,
+    ended_at: row.ended_at,
+    message_count: row.message_count,
+    user_message_count: row.user_message_count,
+    parent_session_id: row.parent_session_id ?? undefined,
+    relationship_type: row.relationship_type ?? undefined,
+    termination_status: row.termination_status ?? null,
+    total_output_tokens: 0,
+    peak_context_tokens: 0,
+    has_total_output_tokens: false,
+    has_peak_context_tokens: false,
+    transcript_revision: row.transcript_revision,
+    is_automated: row.is_automated,
+    is_teammate: row.is_teammate ?? false,
+    is_index_only: true,
+    created_at: row.created_at,
+  };
+  if (!existing || existing.is_index_only) return skinny;
+  return {
+    ...skinny,
+    ...existing,
+    project: skinny.project,
+    machine: skinny.machine,
+    agent: skinny.agent,
+    agent_label: skinny.agent_label,
+    entrypoint: skinny.entrypoint,
+    display_name: skinny.display_name,
+    started_at: skinny.started_at,
+    ended_at: skinny.ended_at,
+    message_count: skinny.message_count,
+    user_message_count: skinny.user_message_count,
+    parent_session_id: skinny.parent_session_id,
+    relationship_type: skinny.relationship_type,
+    termination_status: skinny.termination_status,
+    transcript_revision: skinny.transcript_revision,
+    is_automated: skinny.is_automated,
+    is_teammate: skinny.is_teammate ?? existing.is_teammate,
+    is_index_only: false,
+    created_at: skinny.created_at,
+  };
 }
 
 function maxString(a: string | null, b: string | null): string | null {
@@ -830,11 +1599,24 @@ function minString(a: string | null, b: string | null): string | null {
   return a < b ? a : b;
 }
 
-function recencyKey(s: Session): string {
-  return s.ended_at ?? s.started_at ?? s.created_at;
+/** Minimal shape that StatusDot / getSessionStatus need from a
+ * row. Both the full `Session` and the lighter `TopSession`
+ * (analytics top list) match it structurally — the recency
+ * fields all have safe fallbacks via `??`. */
+export interface SessionStatusInput {
+  termination_status?: string | null;
+  ended_at?: string | null;
+  started_at?: string | null;
+  created_at?: string;
 }
 
+function recencyKey(s: SessionStatusInput): string {
+  return s.ended_at ?? s.started_at ?? s.created_at ?? "";
+}
+
+const FRESH_MS = 60 * 1000;
 const RECENTLY_ACTIVE_MS = 10 * 60 * 1000;
+const STALE_MS = 60 * 60 * 1000;
 
 /** Ticking timestamp that updates every 30s so derived
  *  recency checks stay reactive without manual triggers. */
@@ -849,6 +1631,79 @@ export function isRecentlyActive(session: Session): boolean {
   return now - ts < RECENTLY_ACTIVE_MS;
 }
 
+export type SessionStatus =
+  | "working"
+  | "waiting"
+  | "idle"
+  | "stale"
+  | "unclean"
+  | "quiet";
+
+/** Combine wall-clock recency with the parser's structural fact
+ * (termination_status) into a single user-facing status.
+ *
+ * Precedence (first match wins, see body below):
+ *   - waiting: < 10m idle AND termination_status == awaiting_user
+ *   - working: < 1m idle AND not awaiting_user
+ *   - idle:    1-10m idle AND not awaiting_user
+ *   - quiet:   ≥ 10m idle AND clean/NULL
+ *   - stale:   10-60m idle AND tool_call_pending/truncated
+ *   - unclean: ≥ 60m idle AND tool_call_pending/truncated
+ *
+ * When a `groupSessions` array is provided, the freshness check
+ * uses the freshest activity across the whole group. Two interactions
+ * matter:
+ *
+ *   1. A parent in tool_call_pending whose subagent is currently
+ *      writing rolls up to "working" via the freshest member — the
+ *      tool_call_pending flag is not consulted at the working/idle
+ *      branch, only at the stale/unclean branch.
+ *   2. A parent in awaiting_user always renders "waiting" within the
+ *      10m window even when a fork or sibling in the group is fresh.
+ *      The parser flag is the stronger signal here: the agent has
+ *      explicitly said "your turn".
+ *
+ * The parser flag always comes from the row's own session (the
+ * parent's file is what's actually ambiguous), never from a child.
+ *
+ * Yellow (stale) and red (unclean) only fire when the parser has
+ * positively flagged the session. Cleanly-finished or unclassified
+ * sessions go straight from active → quiet — short-lived sessions
+ * that complete normally don't pollute the sidebar with stale dots. */
+export function getSessionStatus(
+  session: SessionStatusInput,
+  groupSessions?: SessionStatusInput[],
+): SessionStatus {
+  let freshest = recencyKey(session);
+  if (groupSessions && groupSessions.length > 1) {
+    for (const g of groupSessions) {
+      const k = recencyKey(g);
+      if (k > freshest) freshest = k;
+    }
+  }
+  const ts = new Date(freshest).getTime();
+  const age = now - ts;
+  const term = session.termination_status;
+  const flagged = term === "tool_call_pending" || term === "truncated";
+  const awaitingUser = term === "awaiting_user";
+
+  // awaiting_user wins over the freshness tier as soon as the
+  // parser classifies it. The agent already told us "I'm done,
+  // your turn", so we surface the waiting bubble even when a
+  // related session in the group (e.g. a fork running in
+  // parallel) is currently writing. For tool_call_pending parents
+  // the freshness rollup still does its job — that flag isn't
+  // checked here, so a parent in tool_call_pending with a fresh
+  // subagent falls through to "working" below.
+  if (awaitingUser && age < RECENTLY_ACTIVE_MS) return "waiting";
+
+  if (age < FRESH_MS) return "working";
+  if (age < RECENTLY_ACTIVE_MS) return "idle";
+  if (!flagged) return "quiet";
+  if (age < STALE_MS) return "stale";
+  return "unclean";
+}
+
 /**
  * Walk parent_session_id chains to find the root session.
  * If a link is missing from the loaded set, the walk stops
@@ -857,7 +1712,7 @@ export function isRecentlyActive(session: Session): boolean {
  */
 function findRoot(
   id: string,
-  byId: Map<string, Session>,
+  byId: Map<string, SessionGroupInput>,
   rootCache: Map<string, string>,
 ): string {
   const cached = rootCache.get(id);
@@ -883,8 +1738,10 @@ function findRoot(
   return cur;
 }
 
-export function buildSessionGroups(sessions: Session[]): SessionGroup[] {
-  const byId = new Map<string, Session>();
+export function buildSessionGroups(
+  sessions: SessionGroupInput[],
+): SessionGroup[] {
+  const byId = new Map<string, SessionGroupInput>();
   for (const s of sessions) {
     byId.set(s.id, s);
   }
@@ -926,8 +1783,8 @@ export function buildSessionGroups(sessions: Session[]): SessionGroup[] {
   // A session with <teammate-message in first_message is always a child;
   // if parent_session_id is missing, adopt it into the nearest non-teammate
   // root group in the same project (no time limit).
-  const isTeammateSession = (s: Session) =>
-    s.first_message?.includes("<teammate-message") ?? false;
+  const isTeammateSession = (s: SessionGroupInput) =>
+    s.is_teammate ?? s.first_message?.includes("<teammate-message") ?? false;
 
   const keysToRemove = new Set<string>();
 
@@ -1060,9 +1917,66 @@ export function buildSessionGroups(sessions: Session[]): SessionGroup[] {
     }
   }
 
-  return insertionOrder
+  const ordered = insertionOrder
     .filter((k) => !keysToRemove.has(k))
     .map((k) => groupMap.get(k)!);
+
+  // Two-key sort:
+  //   1. status priority — working → waiting → idle → stale →
+  //      quiet → unclean. Awaiting-user rows sit above idle even
+  //      when older, and unclean (terminated mid tool call) sinks
+  //      to the very bottom so noise from old crashed sessions
+  //      doesn't push live work off-screen.
+  //   2. group freshness — within a tier, the group whose
+  //      newest member was written most recently wins. Mirrors
+  //      the time-since-last-update order the sidebar had before
+  //      the status sort was added.
+  ordered.sort((a, b) => {
+    const sa = statusSortKey(a);
+    const sb = statusSortKey(b);
+    if (sa !== sb) return sa - sb;
+    const ra = groupFreshness(a);
+    const rb = groupFreshness(b);
+    if (ra > rb) return -1;
+    if (ra < rb) return 1;
+    return 0;
+  });
+  return ordered;
+}
+
+function statusSortKey(group: SessionGroup): number {
+  const primary =
+    group.sessions.find((s) => s.id === group.primarySessionId) ??
+    group.sessions[0]!;
+  const status = getSessionStatus(primary, group.sessions);
+  switch (status) {
+    case "working":
+      return 0;
+    case "waiting":
+      return 1;
+    case "idle":
+      return 2;
+    case "stale":
+      return 3;
+    case "quiet":
+      return 4;
+    case "unclean":
+      return 5;
+  }
+  return 6;
+}
+
+function groupFreshness(group: SessionGroup): string {
+  // The freshest activity across any member of the group. A
+  // subagent child's recent write counts as the group's
+  // freshness so a parent waiting on a running child is sorted
+  // by the child's activity.
+  let best = "";
+  for (const s of group.sessions) {
+    const k = recencyKey(s);
+    if (k > best) best = k;
+  }
+  return best;
 }
 
 export const sessions = createSessionsStore();
@@ -1071,5 +1985,5 @@ export const sessions = createSessionsStore();
 // (local trigger or detected via status polling).
 sync.onSyncComplete(() => {
   sessions.invalidateFilterCaches();
-  sessions.load();
+  sessions.refreshSidebarIfAttached();
 });

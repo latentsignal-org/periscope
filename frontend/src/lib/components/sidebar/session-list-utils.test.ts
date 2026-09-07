@@ -1,9 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import type { Session } from "../../api/types.js";
 import type { SessionGroup } from "../../stores/sessions.svelte.js";
 import {
   ITEM_HEIGHT,
-  CHILD_ITEM_HEIGHT,
   HEADER_HEIGHT,
   STORAGE_KEY,
   buildGroupSections,
@@ -13,7 +12,7 @@ import {
   isSubagentDescendant,
   selectPrimaryId,
 } from "./session-list-utils.js";
-import type { GroupSection, DisplayItem } from "./session-list-utils.js";
+import type { DisplayItem } from "./session-list-utils.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -32,6 +31,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     user_message_count: 5,
     total_output_tokens: 0,
     peak_context_tokens: 0,
+    is_automated: false,
     created_at: "2025-01-01T00:00:00Z",
     ...overrides,
   };

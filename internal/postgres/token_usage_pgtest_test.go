@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/wesm/agentsview/internal/db"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.kenn.io/agentsview/internal/db"
 )
 
 func TestStoreSessionAndMessageTokenUsage(t *testing.T) {
@@ -15,9 +18,7 @@ func TestStoreSessionAndMessageTokenUsage(t *testing.T) {
 	ensureStoreSchema(t, pgURL)
 
 	pg, err := Open(pgURL, testSchema, false)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	require.NoError(t, err, "Open")
 	defer pg.Close()
 
 	_, err = pg.Exec(`
@@ -36,9 +37,7 @@ func TestStoreSessionAndMessageTokenUsage(t *testing.T) {
 			has_total_output_tokens = EXCLUDED.has_total_output_tokens,
 			has_peak_context_tokens = EXCLUDED.has_peak_context_tokens
 	`)
-	if err != nil {
-		t.Fatalf("insert session: %v", err)
-	}
+	require.NoError(t, err, "insert session")
 	_, err = pg.Exec(`
 		INSERT INTO messages (
 			session_id, ordinal, role, content,
@@ -56,50 +55,26 @@ func TestStoreSessionAndMessageTokenUsage(t *testing.T) {
 			has_context_tokens = EXCLUDED.has_context_tokens,
 			has_output_tokens = EXCLUDED.has_output_tokens
 	`)
-	if err != nil {
-		t.Fatalf("insert message: %v", err)
-	}
+	require.NoError(t, err, "insert message")
 
 	store, err := NewStore(pgURL, testSchema, true)
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
+	require.NoError(t, err, "NewStore")
 	defer store.Close()
 
 	ctx := context.Background()
 	sess, err := store.GetSession(ctx, "token-store-001")
-	if err != nil {
-		t.Fatalf("GetSession: %v", err)
-	}
-	if sess == nil {
-		t.Fatal("expected session")
-	}
-	if !sess.HasTotalOutputTokens {
-		t.Error("HasTotalOutputTokens = false, want true")
-	}
-	if !sess.HasPeakContextTokens {
-		t.Error("HasPeakContextTokens = false, want true")
-	}
-	if sess.TotalOutputTokens != 500 {
-		t.Errorf("TotalOutputTokens = %d, want 500", sess.TotalOutputTokens)
-	}
+	require.NoError(t, err, "GetSession")
+	require.NotNil(t, sess)
+	assert.True(t, sess.HasTotalOutputTokens)
+	assert.True(t, sess.HasPeakContextTokens)
+	assert.Equal(t, 500, sess.TotalOutputTokens)
 
 	msgs, err := store.GetMessages(ctx, "token-store-001", 0, 10, true)
-	if err != nil {
-		t.Fatalf("GetMessages: %v", err)
-	}
-	if len(msgs) != 1 {
-		t.Fatalf("GetMessages len = %d, want 1", len(msgs))
-	}
-	if !msgs[0].HasOutputTokens {
-		t.Error("HasOutputTokens = false, want true")
-	}
-	if !msgs[0].HasContextTokens {
-		t.Error("HasContextTokens = false, want true")
-	}
-	if msgs[0].OutputTokens != 200 {
-		t.Errorf("OutputTokens = %d, want 200", msgs[0].OutputTokens)
-	}
+	require.NoError(t, err, "GetMessages")
+	require.Len(t, msgs, 1)
+	assert.True(t, msgs[0].HasOutputTokens)
+	assert.True(t, msgs[0].HasContextTokens)
+	assert.Equal(t, 200, msgs[0].OutputTokens)
 }
 
 func TestPushTokenUsageToPostgres(t *testing.T) {
@@ -109,15 +84,11 @@ func TestPushTokenUsageToPostgres(t *testing.T) {
 
 	local := testDB(t)
 	ps, err := New(pgURL, "agentsview", local, "test-machine", true, SyncOptions{})
-	if err != nil {
-		t.Fatalf("creating sync: %v", err)
-	}
+	require.NoError(t, err, "creating sync")
 	defer ps.Close()
 
 	ctx := context.Background()
-	if err := ps.EnsureSchema(ctx); err != nil {
-		t.Fatalf("EnsureSchema: %v", err)
-	}
+	require.NoError(t, ps.EnsureSchema(ctx), "EnsureSchema")
 
 	sess := db.Session{
 		ID:                   "token-push-001",
@@ -131,10 +102,8 @@ func TestPushTokenUsageToPostgres(t *testing.T) {
 		HasTotalOutputTokens: true,
 		HasPeakContextTokens: true,
 	}
-	if err := local.UpsertSession(sess); err != nil {
-		t.Fatalf("UpsertSession: %v", err)
-	}
-	if err := local.InsertMessages([]db.Message{{
+	require.NoError(t, local.UpsertSession(sess), "UpsertSession")
+	require.NoError(t, local.InsertMessages([]db.Message{{
 		SessionID:        "token-push-001",
 		Ordinal:          0,
 		Role:             "assistant",
@@ -146,53 +115,28 @@ func TestPushTokenUsageToPostgres(t *testing.T) {
 		OutputTokens:     200,
 		HasContextTokens: true,
 		HasOutputTokens:  true,
-	}}); err != nil {
-		t.Fatalf("InsertMessages: %v", err)
-	}
+	}}), "InsertMessages")
 
-	if _, err := ps.Push(ctx, false, nil); err != nil {
-		t.Fatalf("Push: %v", err)
-	}
+	_, err = ps.Push(ctx, false, nil)
+	require.NoError(t, err, "Push")
 
 	store, err := NewStore(pgURL, "agentsview", true)
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
+	require.NoError(t, err, "NewStore")
 	defer store.Close()
 
 	gotSess, err := store.GetSession(ctx, "token-push-001")
-	if err != nil {
-		t.Fatalf("GetSession: %v", err)
-	}
-	if gotSess == nil {
-		t.Fatal("expected pushed session")
-	}
-	if !gotSess.HasTotalOutputTokens {
-		t.Error("HasTotalOutputTokens = false, want true")
-	}
-	if !gotSess.HasPeakContextTokens {
-		t.Error("HasPeakContextTokens = false, want true")
-	}
-	if gotSess.TotalOutputTokens != 500 {
-		t.Errorf("TotalOutputTokens = %d, want 500", gotSess.TotalOutputTokens)
-	}
+	require.NoError(t, err, "GetSession")
+	require.NotNil(t, gotSess, "expected pushed session")
+	assert.True(t, gotSess.HasTotalOutputTokens)
+	assert.True(t, gotSess.HasPeakContextTokens)
+	assert.Equal(t, 500, gotSess.TotalOutputTokens)
 
 	gotMsgs, err := store.GetMessages(ctx, "token-push-001", 0, 10, true)
-	if err != nil {
-		t.Fatalf("GetMessages: %v", err)
-	}
-	if len(gotMsgs) != 1 {
-		t.Fatalf("GetMessages len = %d, want 1", len(gotMsgs))
-	}
-	if !gotMsgs[0].HasContextTokens {
-		t.Error("HasContextTokens = false, want true")
-	}
-	if !gotMsgs[0].HasOutputTokens {
-		t.Error("HasOutputTokens = false, want true")
-	}
-	if gotMsgs[0].OutputTokens != 200 {
-		t.Errorf("OutputTokens = %d, want 200", gotMsgs[0].OutputTokens)
-	}
+	require.NoError(t, err, "GetMessages")
+	require.Len(t, gotMsgs, 1)
+	assert.True(t, gotMsgs[0].HasContextTokens)
+	assert.True(t, gotMsgs[0].HasOutputTokens)
+	assert.Equal(t, 200, gotMsgs[0].OutputTokens)
 }
 
 func TestEnsureSchemaBackfillsTokenCoverageFlags(t *testing.T) {
@@ -201,15 +145,11 @@ func TestEnsureSchemaBackfillsTokenCoverageFlags(t *testing.T) {
 	t.Cleanup(func() { cleanPGSchema(t, pgURL) })
 
 	pg, err := Open(pgURL, "agentsview", false)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	require.NoError(t, err, "Open")
 	defer pg.Close()
 
 	ctx := context.Background()
-	if err := EnsureSchema(ctx, pg, "agentsview"); err != nil {
-		t.Fatalf("EnsureSchema initial: %v", err)
-	}
+	require.NoError(t, EnsureSchema(ctx, pg, "agentsview"), "EnsureSchema initial")
 
 	_, err = pg.Exec(`
 		INSERT INTO sessions (
@@ -222,9 +162,7 @@ func TestEnsureSchemaBackfillsTokenCoverageFlags(t *testing.T) {
 			('pg-legacy-zero', 'test-machine', 'proj', 'claude', 1,
 			 0, 0, FALSE, FALSE)
 	`)
-	if err != nil {
-		t.Fatalf("insert legacy sessions: %v", err)
-	}
+	require.NoError(t, err, "insert legacy sessions")
 	_, err = pg.Exec(`
 		INSERT INTO messages (
 			session_id, ordinal, role, content, content_length,
@@ -235,59 +173,33 @@ func TestEnsureSchemaBackfillsTokenCoverageFlags(t *testing.T) {
 			 'claude-sonnet-4-20250514',
 			 '{"input_tokens":0,"output_tokens":0}', 0, 0, FALSE, FALSE)
 	`)
-	if err != nil {
-		t.Fatalf("insert legacy message: %v", err)
-	}
+	require.NoError(t, err, "insert legacy message")
 
-	if err := EnsureSchema(ctx, pg, "agentsview"); err != nil {
-		t.Fatalf("EnsureSchema backfill: %v", err)
-	}
+	require.NoError(t, EnsureSchema(ctx, pg, "agentsview"), "EnsureSchema backfill")
 
 	store, err := NewStore(pgURL, "agentsview", true)
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
+	require.NoError(t, err, "NewStore")
 	defer store.Close()
 
 	nonzero, err := store.GetSession(ctx, "pg-legacy-nonzero")
-	if err != nil {
-		t.Fatalf("GetSession nonzero: %v", err)
-	}
-	if nonzero == nil {
-		t.Fatal("pg-legacy-nonzero missing")
-	}
-	if !nonzero.HasTotalOutputTokens {
-		t.Error("pg-legacy-nonzero HasTotalOutputTokens = false, want true")
-	}
-	if !nonzero.HasPeakContextTokens {
-		t.Error("pg-legacy-nonzero HasPeakContextTokens = false, want true")
-	}
+	require.NoError(t, err, "GetSession nonzero")
+	require.NotNil(t, nonzero, "pg-legacy-nonzero missing")
+	assert.True(t, nonzero.HasTotalOutputTokens,
+		"pg-legacy-nonzero HasTotalOutputTokens")
+	assert.True(t, nonzero.HasPeakContextTokens,
+		"pg-legacy-nonzero HasPeakContextTokens")
 
 	zero, err := store.GetSession(ctx, "pg-legacy-zero")
-	if err != nil {
-		t.Fatalf("GetSession zero: %v", err)
-	}
-	if zero == nil {
-		t.Fatal("pg-legacy-zero missing")
-	}
-	if !zero.HasTotalOutputTokens {
-		t.Error("pg-legacy-zero HasTotalOutputTokens = false, want true")
-	}
-	if !zero.HasPeakContextTokens {
-		t.Error("pg-legacy-zero HasPeakContextTokens = false, want true")
-	}
+	require.NoError(t, err, "GetSession zero")
+	require.NotNil(t, zero, "pg-legacy-zero missing")
+	assert.True(t, zero.HasTotalOutputTokens,
+		"pg-legacy-zero HasTotalOutputTokens")
+	assert.True(t, zero.HasPeakContextTokens,
+		"pg-legacy-zero HasPeakContextTokens")
 
 	msgs, err := store.GetMessages(ctx, "pg-legacy-zero", 0, 10, true)
-	if err != nil {
-		t.Fatalf("GetMessages zero: %v", err)
-	}
-	if len(msgs) != 1 {
-		t.Fatalf("messages len = %d, want 1", len(msgs))
-	}
-	if !msgs[0].HasContextTokens {
-		t.Error("message HasContextTokens = false, want true")
-	}
-	if !msgs[0].HasOutputTokens {
-		t.Error("message HasOutputTokens = false, want true")
-	}
+	require.NoError(t, err, "GetMessages zero")
+	require.Len(t, msgs, 1)
+	assert.True(t, msgs[0].HasContextTokens, "message HasContextTokens")
+	assert.True(t, msgs[0].HasOutputTokens, "message HasOutputTokens")
 }

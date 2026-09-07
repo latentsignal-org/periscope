@@ -1,307 +1,22 @@
 import type {
-  SessionPage,
-  Session,
-  MessagesResponse,
-  SearchResponse,
-  ProjectsResponse,
-  MachinesResponse,
-  AgentsResponse,
-  Stats,
-  VersionInfo,
-  UpdateCheck,
-  SyncStatus,
   SyncProgress,
   SyncStats,
-  PublishResponse,
-  GithubConfig,
-  SetGithubConfigResponse,
-  AnalyticsSummary,
-  ActivityResponse,
-  HeatmapResponse,
-  ProjectsAnalyticsResponse,
-  HourOfWeekResponse,
-  SessionShapeResponse,
-  VelocityResponse,
-  ToolsAnalyticsResponse,
-  TopSessionsResponse,
-  SignalsAnalyticsResponse,
-  Granularity,
-  HeatmapMetric,
-  TopSessionsMetric,
   Insight,
-  InsightsResponse,
   GenerateInsightRequest,
+  Session,
   SessionContextResponse,
   SessionContextTimelineResponse,
-  PinsResponse,
-  TrashResponse,
-  UsageSummaryResponse,
-  TopUsageSessionsResponse,
-  UsageParams,
-  UsageTopSessionsParams,
 } from "./types.js";
-import type { SessionActivityResponse } from "./types/session-activity.js";
-
-const SERVER_URL_KEY = "agentsview-server-url";
-const AUTH_TOKEN_KEY = "agentsview-auth-token";
-
-export function getBase(): string {
-  const server = getServerUrl();
-  if (server) return `${server}/api/v1`;
-  // Use the <base href> tag injected by --base-path so the app
-  // works behind a reverse-proxy subpath (e.g. /agentsview/api/v1).
-  // Only derive from baseURI when a real <base> tag exists;
-  // otherwise fall back to "/api/v1" so SPA fallback pages on
-  // non-root URLs don't produce wrong API paths.
-  const baseEl = document.querySelector("base[href]");
-  if (baseEl) {
-    const base = new URL(document.baseURI).pathname.replace(/\/$/, "");
-    return `${base}/api/v1`;
-  }
-  return "/api/v1";
-}
-
-export function getServerUrl(): string {
-  return localStorage.getItem(SERVER_URL_KEY) ?? "";
-}
-
-export function setServerUrl(url: string): void {
-  if (url) {
-    localStorage.setItem(SERVER_URL_KEY, url);
-  } else {
-    localStorage.removeItem(SERVER_URL_KEY);
-  }
-}
-
-/** Return the localStorage key for the auth token, scoped by server URL. */
-function authTokenKey(): string {
-  const server = getServerUrl();
-  return server ? `${AUTH_TOKEN_KEY}::${server}` : AUTH_TOKEN_KEY;
-}
-
-export function getAuthToken(): string {
-  return localStorage.getItem(authTokenKey()) ?? "";
-}
-
-export function setAuthToken(token: string): void {
-  const key = authTokenKey();
-  if (token) {
-    localStorage.setItem(key, token);
-  } else {
-    localStorage.removeItem(key);
-  }
-}
-
-export function isRemoteConnection(): boolean {
-  return getServerUrl() !== "";
-}
-
-function authHeaders(init?: RequestInit): RequestInit {
-  const token = getAuthToken();
-  if (!token) return init ?? {};
-
-  const headers = new Headers(init?.headers);
-  headers.set("Authorization", `Bearer ${token}`);
-  return { ...init, headers };
-}
-
-export class ApiError extends Error {
-  constructor(
-    public readonly status: number,
-    message: string,
-  ) {
-    super(message);
-    this.name = "ApiError";
-  }
-}
-
-function apiErrorMessage(status: number, body: string): string {
-  return body.trim() || `API ${status}`;
-}
-
-async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${getBase()}${path}`, authHeaders(init));
-  if (!res.ok) {
-    const body = await res.text();
-    throw new ApiError(res.status, apiErrorMessage(res.status, body));
-  }
-  return res.json() as Promise<T>;
-}
-
-type QueryValue = string | number | boolean | undefined | null;
-
-function buildQuery(params: Record<string, QueryValue>): string {
-  const q = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null && value !== "") {
-      q.set(key, String(value));
-    }
-  }
-  const qs = q.toString();
-  return qs ? `?${qs}` : "";
-}
-
-/* Sessions */
-
-export interface ListSessionsParams {
-  project?: string;
-  exclude_project?: string;
-  machine?: string;
-  agent?: string;
-  date?: string;
-  date_from?: string;
-  date_to?: string;
-  active_since?: string;
-  min_messages?: number;
-  max_messages?: number;
-  min_user_messages?: number;
-  include_one_shot?: boolean;
-  include_children?: boolean;
-  cursor?: string;
-  limit?: number;
-}
-
-export function listSessions(
-  params: ListSessionsParams = {},
-): Promise<SessionPage> {
-  return fetchJSON(`/sessions${buildQuery({ ...params })}`);
-}
-
-export function getSession(id: string, init?: RequestInit): Promise<Session> {
-  return fetchJSON(`/sessions/${id}`, init);
-}
-
-export function getChildSessions(
-  id: string,
-  init?: RequestInit,
-): Promise<Session[]> {
-  return fetchJSON(`/sessions/${id}/children`, init);
-}
-
-export function getSessionActivity(
-  sessionId: string,
-): Promise<SessionActivityResponse> {
-  return fetchJSON(
-    `/sessions/${sessionId}/activity`,
-  );
-}
-
-export function getSessionContext(
-  sessionId: string,
-  init?: RequestInit,
-): Promise<SessionContextResponse> {
-  return fetchJSON(
-    `/sessions/${sessionId}/context`,
-    init,
-  );
-}
-
-export function getSessionContextTimeline(
-  sessionId: string,
-  init?: RequestInit,
-): Promise<SessionContextTimelineResponse> {
-  return fetchJSON(
-    `/sessions/${sessionId}/context/timeline`,
-    init,
-  );
-}
-
-/* Messages */
-
-export interface GetMessagesParams {
-  from?: number;
-  limit?: number;
-  direction?: "asc" | "desc";
-}
-
-export function getMessages(
-  sessionId: string,
-  params: GetMessagesParams = {},
-  init?: RequestInit,
-): Promise<MessagesResponse> {
-  return fetchJSON(
-    `/sessions/${sessionId}/messages${buildQuery({ ...params })}`,
-    init,
-  );
-}
-
-/* Search */
-
-export function search(
-  query: string,
-  params: {
-    project?: string;
-    limit?: number;
-    cursor?: number;
-    sort?: "relevance" | "recency";
-  } = {},
-  init?: RequestInit,
-): Promise<SearchResponse> {
-  if (!query) {
-    throw new Error("search query must not be empty");
-  }
-  return fetchJSON(`/search${buildQuery({ q: query, ...params })}`, init);
-}
-
-export interface SessionSearchResponse {
-  ordinals: number[];
-}
-
-export function searchSession(
-  sessionId: string,
-  query: string,
-  init?: RequestInit,
-): Promise<SessionSearchResponse> {
-  return fetchJSON(
-    `/sessions/${sessionId}/search${buildQuery({ q: query })}`,
-    init,
-  );
-}
-
-/* Metadata */
-
-interface MetadataParams {
-  include_one_shot?: boolean;
-  include_automated?: boolean;
-}
-
-export function getProjects(
-  params: MetadataParams = {},
-): Promise<ProjectsResponse> {
-  return fetchJSON(`/projects${buildQuery({ ...params })}`);
-}
-
-export function getMachines(
-  params: MetadataParams = {},
-): Promise<MachinesResponse> {
-  return fetchJSON(`/machines${buildQuery({ ...params })}`);
-}
-
-export function getAgents(
-  params: MetadataParams = {},
-): Promise<AgentsResponse> {
-  return fetchJSON(`/agents${buildQuery({ ...params })}`);
-}
-
-export function getStats(
-  params: MetadataParams = {},
-): Promise<Stats> {
-  return fetchJSON(`/stats${buildQuery({ ...params })}`);
-}
-
-export function getVersion(): Promise<VersionInfo> {
-  return fetchJSON("/version");
-}
-
-export function checkForUpdate(): Promise<UpdateCheck> {
-  return fetchJSON("/update/check");
-}
-
-/* Sync */
-
-export function getSyncStatus(): Promise<SyncStatus> {
-  return fetchJSON("/sync/status");
-}
+import type { SessionTiming } from "./types/timing.js";
+import { SessionsService } from "./generated/index.js";
+import {
+  ApiError,
+  authHeaders,
+  getAuthToken,
+  getBase,
+  isRemoteConnection,
+  responseErrorMessage,
+} from "./runtime.js";
 
 export interface SyncHandle {
   abort: () => void;
@@ -419,6 +134,9 @@ function processFrame(
     onProgress?.(JSON.parse(data) as SyncProgress);
   } else if (event === "done") {
     return JSON.parse(data) as SyncStats;
+  } else if (event === "error") {
+    const payload = JSON.parse(data) as { error?: string };
+    throw new Error(payload.error ?? "Sync failed");
   }
   return undefined;
 }
@@ -437,9 +155,17 @@ export interface DataChangedEvent {
  * limitation of SSE — switching to a fetch-based streaming
  * approach would avoid this but adds significant complexity.
  */
+/** Number of consecutive onerror firings without a successful
+ * connection or event delivery before watchSession gives up. Guards
+ * against the browser hammering `/watch` forever when the session
+ * id is unknown (server returns 404 per the Session API contract)
+ * or the server is permanently refusing the stream. */
+export const WATCH_SESSION_MAX_CONSECUTIVE_ERRORS = 5;
+
 export function watchSession(
   sessionId: string,
   onUpdate: () => void,
+  onTiming?: (t: SessionTiming) => void,
 ): EventSource {
   const url = `${getBase()}/sessions/${sessionId}/watch`;
   const token = getAuthToken();
@@ -448,12 +174,36 @@ export function watchSession(
   const fullUrl = token ? `${url}?token=${encodeURIComponent(token)}` : url;
   const es = new EventSource(fullUrl);
 
+  // Circuit breaker: mirrors watchEvents. A 404 (unknown session)
+  // or other permanent failure would otherwise have EventSource
+  // reconnect in a loop. Counter resets on `open` or a delivered
+  // event so a healthy-but-quiet stream isn't tripped.
+  let consecutiveErrors = 0;
+
+  es.addEventListener("open", () => {
+    consecutiveErrors = 0;
+  });
+
   es.addEventListener("session_updated", () => {
+    consecutiveErrors = 0;
     onUpdate();
   });
 
+  if (onTiming) {
+    es.addEventListener("session.timing", (ev: MessageEvent) => {
+      try {
+        onTiming(JSON.parse(ev.data) as SessionTiming);
+      } catch (err) {
+        console.warn("session.timing parse failed", err);
+      }
+    });
+  }
+
   es.onerror = () => {
-    // Connection will auto-retry via EventSource spec
+    consecutiveErrors += 1;
+    if (consecutiveErrors >= WATCH_SESSION_MAX_CONSECUTIVE_ERRORS) {
+      es.close();
+    }
   };
 
   return es;
@@ -479,8 +229,22 @@ export function watchSession(
  */
 export const WATCH_EVENTS_MAX_CONSECUTIVE_ERRORS = 5;
 
+export interface WatchEventsOptions {
+  /** Called once when the circuit breaker trips WITHOUT the
+   * EventSource ever having reached the OPEN state. That pattern
+   * indicates the endpoint is permanently unreachable for this
+   * client (PG serve mode returning 503, incompatible server
+   * build, wrong URL, etc.), so callers should stop retrying.
+   * Transient failures — where `open` fired at least once before
+   * the breaker tripped — do not call this, letting callers
+   * recover on their own.
+   */
+  onPermanentFailure?: () => void;
+}
+
 export function watchEvents(
   onEvent: (e: DataChangedEvent) => void,
+  opts: WatchEventsOptions = {},
 ): EventSource {
   const url = `${getBase()}/events`;
   const token = getAuthToken();
@@ -490,20 +254,27 @@ export function watchEvents(
   const es = new EventSource(fullUrl);
 
   // Circuit breaker: on N consecutive onerror firings without any
-  // successful connection or event delivery, assume the endpoint
-  // is permanently unavailable (e.g. PG serve mode 503) and stop
-  // reconnecting. The counter resets on both `open` (a successful
-  // (re)connect) and a delivered `data_changed` event, so a quiet
-  // but healthy stream isn't tripped by transient network blips.
+  // successful connection or event delivery, close the stream.
+  // The counter resets on both `open` (a successful (re)connect)
+  // and a delivered `data_changed` event, so a quiet but healthy
+  // stream isn't tripped by transient network blips.
+  //
+  // `hasOpened` distinguishes "never worked" (permanent failure,
+  // e.g. PG serve 503) from "worked once, then failed" (transient
+  // outage). Permanent failures invoke onPermanentFailure so the
+  // caller can stop retrying.
   let consecutiveErrors = 0;
+  let hasOpened = false;
 
   es.addEventListener("open", () => {
+    hasOpened = true;
     consecutiveErrors = 0;
   });
 
   es.addEventListener("data_changed", (msg) => {
     // Successful delivery also resets the circuit breaker.
     consecutiveErrors = 0;
+    hasOpened = true;
     // Parse and shape-check the payload. Anything that isn't an
     // object with a known scope collapses to a safe refresh signal
     // so subscribers never observe scope === undefined.
@@ -533,10 +304,59 @@ export function watchEvents(
     consecutiveErrors += 1;
     if (consecutiveErrors >= WATCH_EVENTS_MAX_CONSECUTIVE_ERRORS) {
       es.close();
+      if (!hasOpened && opts.onPermanentFailure) {
+        opts.onPermanentFailure();
+      }
     }
   };
 
   return es;
+}
+
+/* Periscope context visualizer (not in generated OpenAPI client yet). */
+
+export async function getSessionContext(
+  sessionId: string,
+  init?: RequestInit,
+): Promise<SessionContextResponse> {
+  const res = await fetch(
+    `${getBase()}/sessions/${encodeURIComponent(sessionId)}/context`,
+    authHeaders(init),
+  );
+  if (!res.ok) {
+    throw new ApiError(res.status, await responseErrorMessage(res));
+  }
+  return res.json() as Promise<SessionContextResponse>;
+}
+
+export async function getSessionContextTimeline(
+  sessionId: string,
+  init?: RequestInit,
+): Promise<SessionContextTimelineResponse> {
+  const res = await fetch(
+    `${getBase()}/sessions/${encodeURIComponent(sessionId)}/context/timeline`,
+    authHeaders(init),
+  );
+  if (!res.ok) {
+    throw new ApiError(res.status, await responseErrorMessage(res));
+  }
+  return res.json() as Promise<SessionContextTimelineResponse>;
+}
+
+/** ContextPage imports this name; delegate to the generated client. */
+export const getSession = (
+  id: string,
+): Promise<Session> =>
+  SessionsService.getApiV1SessionsId({ id }) as unknown as Promise<Session>;
+
+export async function enqueueSummarize(id: string): Promise<void> {
+  const res = await fetch(
+    `${getBase()}/sessions/${encodeURIComponent(id)}/summarize`,
+    authHeaders({ method: "POST" }),
+  );
+  if (!res.ok) {
+    throw new ApiError(res.status, await responseErrorMessage(res));
+  }
 }
 
 /** Get the export URL for a session.
@@ -547,6 +367,10 @@ export function watchEvents(
  */
 export function getExportUrl(sessionId: string): string {
   return `${getBase()}/sessions/${sessionId}/export`;
+}
+
+export function getInsightExportUrl(insightId: number): string {
+  return `${getBase()}/insights/${insightId}/export`;
 }
 
 /** Get markdown export URL for a session, with optional child depth. */
@@ -561,13 +385,40 @@ export function getMarkdownExportUrl(
   if (depth !== undefined) {
     url.searchParams.set("depth", String(depth));
   }
+  if (isRemoteConnection()) {
+    return url.toString();
+  }
   return `${url.pathname}${url.search}`;
+}
+
+export function getInsightMarkdownExportUrl(
+  insightId: number,
+): string {
+  return `${getBase()}/insights/${insightId}/md`;
 }
 
 /** Download a session export using fetch with auth headers,
  *  avoiding token leakage in the URL for remote connections. */
 export async function downloadExport(sessionId: string): Promise<void> {
-  const url = getExportUrl(sessionId);
+  await downloadAuthenticatedExport(
+    getExportUrl(sessionId),
+    `session-${sessionId}.html`,
+  );
+}
+
+export async function downloadInsightExport(
+  insightId: number,
+): Promise<void> {
+  await downloadAuthenticatedExport(
+    getInsightExportUrl(insightId),
+    `insight-${insightId}.html`,
+  );
+}
+
+async function downloadAuthenticatedExport(
+  url: string,
+  fallbackFilename: string,
+): Promise<void> {
   const token = getAuthToken();
   if (!token) {
     // Local connection — simple navigation is fine.
@@ -587,313 +438,11 @@ export async function downloadExport(sessionId: string): Promise<void> {
   // Extract filename from Content-Disposition if available.
   const cd = res.headers.get("Content-Disposition");
   const match = cd?.match(/filename="?([^"]+)"?/);
-  a.download = match?.[1] ?? `session-${sessionId}.md`;
+  a.download = match?.[1] ?? fallbackFilename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(blobUrl);
-}
-
-/* Resume in terminal */
-
-export interface ResumeRequest {
-  skip_permissions?: boolean;
-  fork_session?: boolean;
-  command_only?: boolean;
-  opener_id?: string;
-}
-
-export interface ResumeResponse {
-  launched: boolean;
-  terminal?: string;
-  command: string;
-  cwd?: string;
-  error?: string;
-}
-
-export function resumeSession(
-  sessionId: string,
-  flags: ResumeRequest = {},
-): Promise<ResumeResponse> {
-  return fetchJSON(`/sessions/${sessionId}/resume`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(flags),
-  });
-}
-
-/* Publish / GitHub config */
-
-export function publishSession(sessionId: string): Promise<PublishResponse> {
-  return fetchJSON(`/sessions/${sessionId}/publish`, {
-    method: "POST",
-  });
-}
-
-export function getGithubConfig(): Promise<GithubConfig> {
-  return fetchJSON("/config/github");
-}
-
-export function setGithubConfig(
-  token: string,
-): Promise<SetGithubConfigResponse> {
-  return fetchJSON("/config/github", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token }),
-  });
-}
-
-/* Starred */
-
-export async function listStarred(): Promise<{ session_ids: string[] }> {
-  return fetchJSON("/starred");
-}
-
-export async function starSession(id: string): Promise<void> {
-  const res = await fetch(`${getBase()}/sessions/${id}/star`, authHeaders({
-    method: "PUT",
-  }));
-  if (!res.ok) {
-    const body = await res.text();
-    throw new ApiError(res.status, apiErrorMessage(res.status, body));
-  }
-}
-
-export async function enqueueSummarize(id: string): Promise<void> {
-  const res = await fetch(`${getBase()}/sessions/${id}/summarize`, authHeaders({
-    method: "POST",
-  }));
-  if (!res.ok) {
-    const body = await res.text();
-    throw new ApiError(res.status, apiErrorMessage(res.status, body));
-  }
-}
-
-export async function unstarSession(id: string): Promise<void> {
-  const res = await fetch(`${getBase()}/sessions/${id}/star`, authHeaders({
-    method: "DELETE",
-  }));
-  if (!res.ok) {
-    const body = await res.text();
-    throw new ApiError(res.status, apiErrorMessage(res.status, body));
-  }
-}
-
-export async function bulkStarSessions(
-  sessionIds: string[],
-): Promise<void> {
-  const res = await fetch(`${getBase()}/starred/bulk`, authHeaders({
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_ids: sessionIds }),
-  }));
-  if (!res.ok) {
-    const body = await res.text();
-    throw new ApiError(res.status, apiErrorMessage(res.status, body));
-  }
-}
-
-/* Session directory */
-
-export function getSessionDirectory(
-  sessionId: string,
-): Promise<{ path: string }> {
-  return fetchJSON(`/sessions/${sessionId}/directory`);
-}
-
-/* Openers — Conductor-style "Open in" */
-
-export interface Opener {
-  id: string;
-  name: string;
-  kind: "editor" | "terminal" | "files" | "action";
-  bin: string;
-}
-
-export interface OpenersResponse {
-  openers: Opener[];
-}
-
-export function listOpeners(): Promise<OpenersResponse> {
-  return fetchJSON("/openers");
-}
-
-export interface OpenResponse {
-  launched: boolean;
-  opener: string;
-  path: string;
-}
-
-export function openSession(
-  sessionId: string,
-  openerId: string,
-): Promise<OpenResponse> {
-  return fetchJSON(`/sessions/${sessionId}/open`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ opener_id: openerId }),
-  });
-}
-
-/* Terminal config */
-
-export interface TerminalConfig {
-  mode: "auto" | "custom" | "clipboard";
-  custom_bin?: string;
-  custom_args?: string;
-}
-
-export function getTerminalConfig(): Promise<TerminalConfig> {
-  return fetchJSON("/config/terminal");
-}
-
-export function setTerminalConfig(
-  cfg: TerminalConfig,
-): Promise<TerminalConfig> {
-  return fetchJSON("/config/terminal", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(cfg),
-  });
-}
-
-/* Settings */
-
-export interface AppSettings {
-  agent_dirs: Record<string, string[]>;
-  terminal: TerminalConfig;
-  github_configured: boolean;
-  host: string;
-  port: number;
-  auth_token?: string;
-  require_auth?: boolean;
-}
-
-export function getSettings(): Promise<AppSettings> {
-  return fetchJSON("/settings");
-}
-
-export function updateSettings(
-  patch: Partial<AppSettings>,
-): Promise<AppSettings> {
-  return fetchJSON("/settings", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(patch),
-  });
-}
-
-/* Analytics */
-
-export interface AnalyticsParams {
-  from?: string;
-  to?: string;
-  timezone?: string;
-  machine?: string;
-  project?: string;
-  agent?: string;
-  dow?: number;
-  hour?: number;
-  min_user_messages?: number;
-  include_one_shot?: boolean;
-  include_automated?: boolean;
-  active_since?: string;
-}
-
-export function getAnalyticsSummary(
-  params: AnalyticsParams,
-): Promise<AnalyticsSummary> {
-  return fetchJSON(`/analytics/summary${buildQuery({ ...params })}`);
-}
-
-export function getAnalyticsActivity(
-  params: AnalyticsParams & {
-    granularity?: Granularity;
-  },
-): Promise<ActivityResponse> {
-  return fetchJSON(`/analytics/activity${buildQuery({ ...params })}`);
-}
-
-export function getAnalyticsHeatmap(
-  params: AnalyticsParams & {
-    metric?: HeatmapMetric;
-  },
-): Promise<HeatmapResponse> {
-  return fetchJSON(`/analytics/heatmap${buildQuery({ ...params })}`);
-}
-
-export function getAnalyticsProjects(
-  params: AnalyticsParams,
-): Promise<ProjectsAnalyticsResponse> {
-  return fetchJSON(`/analytics/projects${buildQuery({ ...params })}`);
-}
-
-export function getAnalyticsHourOfWeek(
-  params: AnalyticsParams,
-): Promise<HourOfWeekResponse> {
-  return fetchJSON(`/analytics/hour-of-week${buildQuery({ ...params })}`);
-}
-
-export function getAnalyticsSessionShape(
-  params: AnalyticsParams,
-): Promise<SessionShapeResponse> {
-  return fetchJSON(`/analytics/sessions${buildQuery({ ...params })}`);
-}
-
-export function getAnalyticsVelocity(
-  params: AnalyticsParams,
-): Promise<VelocityResponse> {
-  return fetchJSON(`/analytics/velocity${buildQuery({ ...params })}`);
-}
-
-export function getAnalyticsTools(
-  params: AnalyticsParams,
-): Promise<ToolsAnalyticsResponse> {
-  return fetchJSON(`/analytics/tools${buildQuery({ ...params })}`);
-}
-
-export function getAnalyticsTopSessions(
-  params: AnalyticsParams & {
-    metric?: TopSessionsMetric;
-  },
-): Promise<TopSessionsResponse> {
-  return fetchJSON(`/analytics/top-sessions${buildQuery({ ...params })}`);
-}
-
-export function getAnalyticsSignals(
-  params: AnalyticsParams,
-): Promise<SignalsAnalyticsResponse> {
-  return fetchJSON(
-    `/analytics/signals${buildQuery({ ...params })}`,
-  );
-}
-
-/* Insights */
-
-export interface ListInsightsParams {
-  type?: string;
-  project?: string;
-}
-
-export function listInsights(
-  params: ListInsightsParams = {},
-): Promise<InsightsResponse> {
-  return fetchJSON(`/insights${buildQuery({ ...params })}`);
-}
-
-export function getInsight(id: number): Promise<Insight> {
-  return fetchJSON(`/insights/${id}`);
-}
-
-export async function deleteInsight(id: number): Promise<void> {
-  const res = await fetch(`${getBase()}/insights/${id}`, authHeaders({
-    method: "DELETE",
-  }));
-  if (!res.ok) {
-    const body = await res.text();
-    throw new ApiError(res.status, apiErrorMessage(res.status, body));
-  }
 }
 
 export interface GenerateInsightHandle {
@@ -921,8 +470,11 @@ export function generateInsight(
       signal: controller.signal,
     }));
 
-    if (!res.ok || !res.body) {
-      throw new Error(`Generate request failed: ${res.status}`);
+    if (!res.ok) {
+      throw new ApiError(res.status, await responseErrorMessage(res));
+    }
+    if (!res.body) {
+      throw new Error("Generate request failed: empty response");
     }
 
     const reader = res.body.getReader();
@@ -1012,59 +564,6 @@ function processInsightFrame(
     throw new Error(parsed.message);
   }
   return undefined;
-}
-
-/* Session Management */
-
-export function renameSession(
-  id: string,
-  displayName: string | null,
-): Promise<Session> {
-  return fetchJSON(`/sessions/${id}/rename`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ display_name: displayName }),
-  });
-}
-
-export async function deleteSession(id: string): Promise<void> {
-  const res = await fetch(`${getBase()}/sessions/${id}`, authHeaders({
-    method: "DELETE",
-  }));
-  if (!res.ok) {
-    const body = await res.text();
-    throw new ApiError(res.status, apiErrorMessage(res.status, body));
-  }
-}
-
-export async function restoreSession(id: string): Promise<void> {
-  const res = await fetch(`${getBase()}/sessions/${id}/restore`, authHeaders({
-    method: "POST",
-  }));
-  if (!res.ok) {
-    const body = await res.text();
-    throw new ApiError(res.status, apiErrorMessage(res.status, body));
-  }
-}
-
-export async function permanentDeleteSession(
-  id: string,
-): Promise<void> {
-  const res = await fetch(`${getBase()}/sessions/${id}/permanent`, authHeaders({
-    method: "DELETE",
-  }));
-  if (!res.ok) {
-    const body = await res.text();
-    throw new ApiError(res.status, apiErrorMessage(res.status, body));
-  }
-}
-
-export function listTrash(): Promise<TrashResponse> {
-  return fetchJSON("/trash");
-}
-
-export async function emptyTrash(): Promise<{ deleted: number }> {
-  return fetchJSON("/trash", { method: "DELETE" });
 }
 
 /* Import */
@@ -1183,60 +682,4 @@ export async function importChatGPT(
     return readImportSSE(res, cb);
   }
   return res.json();
-}
-
-/* Pins */
-
-export function listPins(project?: string): Promise<PinsResponse> {
-  const url = project ? `/pins?project=${encodeURIComponent(project)}` : "/pins";
-  return fetchJSON(url);
-}
-
-export function listSessionPins(
-  sessionId: string,
-): Promise<PinsResponse> {
-  return fetchJSON(`/sessions/${sessionId}/pins`);
-}
-
-export function pinMessage(
-  sessionId: string,
-  messageId: number,
-  note?: string,
-): Promise<{ id: number }> {
-  return fetchJSON(
-    `/sessions/${sessionId}/messages/${messageId}/pin`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ note: note ?? null }),
-    },
-  );
-}
-
-export async function unpinMessage(
-  sessionId: string,
-  messageId: number,
-): Promise<void> {
-  const res = await fetch(
-    `${getBase()}/sessions/${sessionId}/messages/${messageId}/pin`,
-    authHeaders({ method: "DELETE" }),
-  );
-  if (!res.ok) {
-    const body = await res.text();
-    throw new ApiError(res.status, apiErrorMessage(res.status, body));
-  }
-}
-
-/* Usage */
-
-export function getUsageSummary(
-  params: UsageParams,
-): Promise<UsageSummaryResponse> {
-  return fetchJSON(`/usage/summary${buildQuery({ ...params })}`);
-}
-
-export function getUsageTopSessions(
-  params: UsageTopSessionsParams,
-): Promise<TopUsageSessionsResponse> {
-  return fetchJSON(`/usage/top-sessions${buildQuery({ ...params })}`);
 }

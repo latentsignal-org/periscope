@@ -3,6 +3,9 @@ package parser
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestExtractAssistantContent(t *testing.T) {
@@ -105,25 +108,46 @@ func TestExtractAssistantContent(t *testing.T) {
 			text, hasThinking, toolCalls := extractAssistantContent(
 				tt.lines,
 			)
-			if text != tt.wantText {
-				t.Errorf(
-					"text = %q, want %q", text, tt.wantText,
-				)
-			}
-			if hasThinking != tt.wantThinking {
-				t.Errorf(
-					"hasThinking = %v, want %v",
-					hasThinking, tt.wantThinking,
-				)
-			}
-			if len(toolCalls) != tt.wantToolCount {
-				t.Errorf(
-					"tool call count = %d, want %d",
-					len(toolCalls), tt.wantToolCount,
-				)
-			}
+			assert.Equal(t, tt.wantText, text, "text")
+			assert.Equal(t, tt.wantThinking, hasThinking, "hasThinking")
+			assert.Len(t, toolCalls, tt.wantToolCount, "tool call count")
 		})
 	}
+}
+
+func TestExtractAssistantContentCursorApplyPatch(t *testing.T) {
+	patch := "@@ -1,1 +1,1 @@\n-old\n+new"
+	lines := []string{
+		"[Tool call] ApplyPatch",
+		`  {"patch":"` + strings.ReplaceAll(patch, "\n", `\n`) + `","path":"src/app.ts"}`,
+	}
+
+	text, hasThinking, toolCalls := extractAssistantContent(lines)
+
+	assert.Empty(t, text)
+	assert.False(t, hasThinking)
+	require.Len(t, toolCalls, 1)
+	assert.Equal(t, "ApplyPatch", toolCalls[0].ToolName)
+	assert.Equal(t, "Edit", toolCalls[0].Category)
+	assert.JSONEq(t,
+		`{"patch":"@@ -1,1 +1,1 @@\n-old\n+new","path":"src/app.ts"}`,
+		toolCalls[0].InputJSON)
+}
+
+func TestExtractAssistantContentCursorApplyPatchDedentsRawPatch(t *testing.T) {
+	lines := []string{
+		"[Tool call] ApplyPatch",
+		"  @@ -1,1 +1,1 @@",
+		"  -old",
+		"  +new",
+	}
+
+	_, _, toolCalls := extractAssistantContent(lines)
+
+	require.Len(t, toolCalls, 1)
+	assert.JSONEq(t,
+		`{"patch":"@@ -1,1 +1,1 @@\n-old\n+new"}`,
+		toolCalls[0].InputJSON)
 }
 
 func TestIsContainedIn_EdgeCases(t *testing.T) {
@@ -143,12 +167,7 @@ func TestIsContainedIn_EdgeCases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := isBlockBodyEnd(tt.line)
-			if got != tt.want {
-				t.Errorf(
-					"isBlockBodyEnd(%q) = %v, want %v",
-					tt.line, got, tt.want,
-				)
-			}
+			assert.Equal(t, tt.want, got, "isBlockBodyEnd(%q)", tt.line)
 		})
 	}
 }
@@ -165,9 +184,7 @@ func TestCursorSessionID(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
 			got := CursorSessionID(tt.path)
-			if got != tt.want {
-				t.Errorf("got %q, want %q", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -225,9 +242,7 @@ func TestIsCursorJSONL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := isCursorJSONL(tt.data)
-			if got != tt.want {
-				t.Errorf("got %v, want %v", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -282,6 +297,18 @@ func TestParseCursorJSONL(t *testing.T) {
 			wantCount:        2,
 			wantFirstRole:    RoleUser,
 			wantFirstContent: "Fix it",
+			wantToolUse:      true,
+			wantToolCount:    1,
+		},
+		{
+			name: "assistant with Cursor ApplyPatch",
+			lines: []string{
+				`{"role":"user","message":{"content":"Patch it"}}`,
+				`{"role":"assistant","message":{"content":[{"type":"tool_use","id":"tu_patch","name":"ApplyPatch","input":{"patch":"@@ -1,1 +1,1 @@\n-old\n+new","path":"src/app.ts"}}]}}`,
+			},
+			wantCount:        2,
+			wantFirstRole:    RoleUser,
+			wantFirstContent: "Patch it",
 			wantToolUse:      true,
 			wantToolCount:    1,
 		},
@@ -349,64 +376,29 @@ func TestParseCursorJSONL(t *testing.T) {
 			data := strings.Join(tt.lines, "\n")
 			msgs := parseCursorJSONL(data)
 
-			if len(msgs) != tt.wantCount {
-				t.Fatalf(
-					"message count = %d, want %d",
-					len(msgs), tt.wantCount,
-				)
-			}
+			require.Len(t, msgs, tt.wantCount, "message count")
 			if tt.wantCount == 0 {
 				return
 			}
 
 			first := msgs[0]
-			if first.Role != tt.wantFirstRole {
-				t.Errorf(
-					"first role = %q, want %q",
-					first.Role, tt.wantFirstRole,
-				)
-			}
-			if tt.wantFirstContent != "" &&
-				first.Content != tt.wantFirstContent {
-				t.Errorf(
-					"first content = %q, want %q",
-					first.Content, tt.wantFirstContent,
-				)
+			assert.Equal(t, tt.wantFirstRole, first.Role, "first role")
+			if tt.wantFirstContent != "" {
+				assert.Equal(t, tt.wantFirstContent, first.Content, "first content")
 			}
 
 			// Check assistant properties on last message
 			if tt.wantThinking || tt.wantToolUse ||
 				tt.wantToolCount > 0 {
 				last := msgs[len(msgs)-1]
-				if last.HasThinking != tt.wantThinking {
-					t.Errorf(
-						"hasThinking = %v, want %v",
-						last.HasThinking, tt.wantThinking,
-					)
-				}
-				if last.HasToolUse != tt.wantToolUse {
-					t.Errorf(
-						"hasToolUse = %v, want %v",
-						last.HasToolUse, tt.wantToolUse,
-					)
-				}
-				if len(last.ToolCalls) != tt.wantToolCount {
-					t.Errorf(
-						"tool count = %d, want %d",
-						len(last.ToolCalls),
-						tt.wantToolCount,
-					)
-				}
+				assert.Equal(t, tt.wantThinking, last.HasThinking, "hasThinking")
+				assert.Equal(t, tt.wantToolUse, last.HasToolUse, "hasToolUse")
+				assert.Len(t, last.ToolCalls, tt.wantToolCount, "tool count")
 			}
 
 			// Verify ordinals are contiguous
 			for i, m := range msgs {
-				if m.Ordinal != i {
-					t.Errorf(
-						"ordinal[%d] = %d, want %d",
-						i, m.Ordinal, i,
-					)
-				}
+				assert.Equal(t, i, m.Ordinal, "ordinal[%d]", i)
 			}
 		})
 	}
@@ -490,9 +482,7 @@ func TestDecodeCursorProjectDir(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			got := DecodeCursorProjectDir(tt.input)
-			if got != tt.want {
-				t.Errorf("got %q, want %q", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

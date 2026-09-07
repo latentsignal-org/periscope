@@ -1,101 +1,244 @@
 name: CI
 
 on:
+  workflow_call:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-
+  # Run on every pull request regardless of base branch so stacked PRs that
+  # target another feature branch (not just main) still get the full test,
+  # lint, and e2e suite. The expensive desktop/tauri bundle builds are gated
+  # to main separately in desktop-artifacts.yml.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'kenn-io/agentsview' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'kenn-linux-x64-public' || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version-file: go.mod
+          cache: ${{ github.repository == 'kenn-io/agentsview' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'false' || 'true' }}
 
-      - name: Stub frontend embed dir
+      - name: Install lint tools
         run: |
-          mkdir -p internal/web/dist
-          echo '<!doctype html><html><head></head><body><div id="app"></div></body></html>' > internal/web/dist/index.html
+          make lint-tools
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20  # v9.2.0
+      - name: Run Go linters
+        run: make lint-ci
+
+  frontend:
+    runs-on: ${{ github.repository == 'kenn-io/agentsview' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'kenn-linux-x64-public' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
-          version: v2.10.1
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: "24"
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Type-check (svelte-check)
+        run: npm run check
+        working-directory: frontend
+
+      - name: Design-system conformance (kit-ui-check)
+        # Full rule set over all of src; legitimate exceptions carry inline
+        # kit-ui-check-ignore markers with reasons (e.g. the app token
+        # definitions in app.css).
+        run: npm run check:kit-ui
+        working-directory: frontend
+
+      - name: Run frontend tests
+        run: npm test
+        working-directory: frontend
+
+  frontend-node-25:
+    runs-on: ${{ github.repository == 'kenn-io/agentsview' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'kenn-linux-x64-public' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: "25"
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Run frontend tests
+        run: npm test
+        working-directory: frontend
+
+  docs:
+    runs-on: ${{ github.repository == 'kenn-io/agentsview' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'kenn-linux-x64-public' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+
+      - name: Install docs check tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+
+      - name: Run docs check
+        run: make docs-check
+
+  scripts:
+    runs-on: ${{ github.repository == 'kenn-io/agentsview' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'kenn-linux-x64-public' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Run shell script tests
+        run: |
+          bash scripts/install_test.sh
+          bash scripts/retry_test.sh
+          bash scripts/check_desktop_release_health_test.sh
+          bash scripts/check_desktop_release_health_from_event_test.sh
+          bash desktop/scripts/test-repair-appimage-diricon.sh
 
   test:
     name: Go Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ contains(fromJSON('["ubuntu-latest","ubuntu-24.04","ubuntu-22.04"]'), matrix.os) && github.repository == 'kenn-io/agentsview' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'kenn-linux-x64-public' || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version-file: go.mod
+          cache: ${{ contains(fromJSON('["ubuntu-latest","ubuntu-24.04","ubuntu-22.04"]'), matrix.os) && github.repository == 'kenn-io/agentsview' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'false' || 'true' }}
 
       - name: Setup MinGW (Windows)
         if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@cafece8e6baf9247cf9b1bf95097b0b983cc558d  # v2
+        id: setup_mingw
+        continue-on-error: true
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2
         with:
           msystem: MINGW64
           update: false
           install: mingw-w64-x86_64-gcc
           path-type: inherit
 
-      - name: Stub frontend embed dir
-        run: |
-          mkdir -p internal/web/dist
-          echo '<!doctype html><html><head></head><body><div id="app"></div></body></html>' > internal/web/dist/index.html
+      - name: Setup MinGW (Windows, retry on transient failure)
+        if: runner.os == 'Windows' && steps.setup_mingw.outcome == 'failure'
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+          path-type: inherit
+
+      - name: Restore pricing snapshot
+        run: go run ./internal/pricing/cmd/litellm-snapshot -restore
 
       - name: Run Go tests
-        run: go test -tags fts5 ./... -v -count=1
+        run: go test -tags "fts5" ./... -v -count=1 -timeout=20m
         env:
           CGO_ENABLED: "1"
+
+      - name: Run eval-ingest build-tag tests
+        if: runner.os == 'Linux'
+        run: make test-evalingest
 
       - name: Run Go tests (race detector)
         if: runner.os == 'Linux'
-        run: go test -tags fts5 -race ./... -count=1
+        run: |
+          go test -tags "fts5" ./internal/duckdb -count=1
+          go test -tags "fts5" -race $(go list ./... | grep -v '/internal/duckdb$') -count=1 -timeout=20m
         env:
           CGO_ENABLED: "1"
 
-  coverage:
-    runs-on: ubuntu-latest
+  desktop-windows-unit:
+    name: Desktop Unit Tests (Windows)
+    runs-on: windows-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+      - name: Prepare placeholder sidecar resource
+        shell: pwsh
+        run: |
+          $hostTriple = (rustc -vV | Select-String '^host: ').ToString() -replace '^host:\s+', ''
+          if (-not $hostTriple) {
+            throw "could not determine Rust host triple"
+          }
+          New-Item -ItemType Directory -Force desktop/src-tauri/binaries | Out-Null
+          New-Item -ItemType File -Force "desktop/src-tauri/binaries/periscope-$hostTriple.exe" | Out-Null
+
+      - name: Fetch Windows desktop Rust dependencies
+        shell: pwsh
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
+            if ($LASTEXITCODE -eq 0) {
+              break
+            }
+            if ($attempt -eq 3) {
+              exit $LASTEXITCODE
+            }
+            Start-Sleep -Seconds (10 * $attempt)
+          }
+
+      - name: Run Windows desktop update tests
+        run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml --lib install_downloaded_update
+
+  coverage:
+    runs-on: ${{ github.repository == 'kenn-io/agentsview' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'kenn-linux-x64-public' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version-file: go.mod
+          cache: ${{ github.repository == 'kenn-io/agentsview' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'false' || 'true' }}
 
-      - name: Stub frontend embed dir
-        run: |
-          mkdir -p internal/web/dist
-          echo '<!doctype html><html><head></head><body><div id="app"></div></body></html>' > internal/web/dist/index.html
+      - name: Restore pricing snapshot
+        run: go run ./internal/pricing/cmd/litellm-snapshot -restore
 
       - name: Test with coverage
-        run: go test -tags fts5 -race -coverprofile=coverage.out ./...
+        run: go test -tags "fts5" -coverprofile=coverage.out ./...
         env:
           CGO_ENABLED: "1"
 
       - name: Upload coverage
         id: codecov
-        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2  # v6.0.0
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v7.0.0
         with:
           files: coverage.out
         continue-on-error: true
@@ -105,10 +248,10 @@ jobs:
         run: echo "::warning::Codecov upload failed"
 
   integration:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'kenn-io/agentsview' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'kenn-linux-x64-public' || 'ubuntu-latest' }}
     services:
       postgres:
-        image: postgres:16-alpine
+        image: pgvector/pgvector:pg18
         env:
           POSTGRES_USER: agentsview_test
           POSTGRES_PASSWORD: agentsview_test_password
@@ -121,18 +264,18 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version-file: go.mod
+          cache: ${{ github.repository == 'kenn-io/agentsview' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'false' || 'true' }}
 
-      - name: Stub frontend embed dir
-        run: |
-          mkdir -p internal/web/dist
-          echo '<!doctype html><html><head></head><body><div id="app"></div></body></html>' > internal/web/dist/index.html
+      - name: Restore pricing snapshot
+        run: go run ./internal/pricing/cmd/litellm-snapshot -restore
 
       - name: Run PostgreSQL integration tests
         run: make test-postgres-ci
@@ -141,7 +284,7 @@ jobs:
           TEST_PG_URL: postgres://agentsview_test:agentsview_test_password@localhost:5433/agentsview_test?sslmode=disable
 
       - name: Build SSH test container
-        run: docker build -t agentsview-sshd -f testdata/ssh/Dockerfile .
+        run: bash scripts/retry.sh 3 10 docker build -t agentsview-sshd -f testdata/ssh/Dockerfile .
 
       - name: Start SSH test container
         run: |
@@ -172,17 +315,19 @@ jobs:
           TEST_SSH_KEY: ${{ github.workspace }}/testdata/ssh/test_key
 
   e2e:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'kenn-io/agentsview' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'kenn-linux-x64-public' || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version-file: go.mod
+          cache: ${{ github.repository == 'kenn-io/agentsview' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'false' || 'true' }}
 
-      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: "24"
 
@@ -199,12 +344,15 @@ jobs:
           rm -rf internal/web/dist
           cp -r frontend/dist internal/web/dist
 
+      - name: Restore pricing snapshot
+        run: go run ./internal/pricing/cmd/litellm-snapshot -restore
+
       - name: Pre-build Go binaries
         run: |
-          CGO_ENABLED=1 go build -tags fts5 \
+          CGO_ENABLED=1 go build -tags "fts5,kit_posthog_disabled" \
             -o /tmp/testfixture ./cmd/testfixture
-          CGO_ENABLED=1 go build -tags fts5 \
-            -o /tmp/agentsview ./cmd/agentsview
+          CGO_ENABLED=1 go build -tags "fts5,kit_posthog_disabled" \
+            -o /tmp/periscope ./cmd/periscope
         env:
           CGO_ENABLED: "1"
 
@@ -217,4 +365,4 @@ jobs:
         working-directory: frontend
         env:
           E2E_PREBUILT_FIXTURE: /tmp/testfixture
-          E2E_PREBUILT_SERVER: /tmp/agentsview
+          E2E_PREBUILT_SERVER: /tmp/periscope

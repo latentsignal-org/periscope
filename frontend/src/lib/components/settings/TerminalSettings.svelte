@@ -1,13 +1,18 @@
 <script lang="ts">
-  import SettingsSection from "./SettingsSection.svelte";
+  import { SegmentedControl, TextInput } from "@kenn-io/kit-ui";
+  import { m } from "../../i18n/index.js";
   import { settings } from "../../stores/settings.svelte.js";
-  import { setTerminalConfig } from "../../api/client.js";
+  import {
+    ConfigService,
+    TerminalConfigBody,
+  } from "../../api/generated/index";
+  import { configureGeneratedClient } from "../../api/runtime.js";
 
-  const MODES = [
-    { value: "auto", label: "Auto-detect" },
-    { value: "custom", label: "Custom" },
-    { value: "clipboard", label: "Clipboard only" },
-  ] as const;
+  const MODES = $derived([
+    { value: "auto", label: m.settings_terminal_mode_auto() },
+    { value: "custom", label: m.settings_terminal_mode_custom() },
+    { value: "clipboard", label: m.settings_terminal_mode_clipboard() },
+  ]);
 
   let localMode: string = $state(settings.terminal.mode || "auto");
   let localBin: string = $state(settings.terminal.custom_bin ?? "");
@@ -20,10 +25,13 @@
   });
 
   async function saveTerminal() {
-    await setTerminalConfig({
-      mode: localMode as "auto" | "custom" | "clipboard",
-      custom_bin: localBin || undefined,
-      custom_args: localArgs || undefined,
+    configureGeneratedClient();
+    await ConfigService.postApiV1ConfigTerminal({
+      requestBody: {
+        mode: localMode as TerminalConfigBody.mode,
+        custom_bin: localBin || undefined,
+        custom_args: localArgs || undefined,
+      },
     });
     // Reload settings to pick up the saved values
     await settings.load();
@@ -36,31 +44,25 @@
   );
 </script>
 
-<SettingsSection
-  title="Terminal"
-  description="Configure how sessions are resumed in your terminal."
->
+<div class="terminal-settings">
   <div class="setting-row">
-    <span class="setting-label">Launch mode</span>
-    <div class="setting-options">
-      {#each MODES as opt}
-        <button
-          class="option-btn"
-          class:active={localMode === opt.value}
-          onclick={() => (localMode = opt.value)}
-        >
-          {opt.label}
-        </button>
-      {/each}
-    </div>
+    <span class="setting-label">{m.settings_terminal_launch_mode()}</span>
+    <SegmentedControl
+      options={MODES}
+      value={localMode}
+      ariaLabel={m.settings_terminal_launch_mode()}
+      onchange={(value) => (localMode = value)}
+    />
   </div>
 
   {#if localMode === "custom"}
     <div class="setting-row column">
-      <label class="setting-label" for="terminal-bin">Terminal binary</label>
-      <input
+      <label class="setting-label" for="terminal-bin">{m.settings_terminal_terminal_binary()}</label>
+      <TextInput
         id="terminal-bin"
         class="setting-input"
+        size="md"
+        block
         type="text"
         placeholder="/usr/bin/kitty"
         bind:value={localBin}
@@ -69,11 +71,13 @@
 
     <div class="setting-row column">
       <label class="setting-label" for="terminal-args">
-        Arguments <span class="hint">(use {"{cmd}"} as placeholder)</span>
+        {m.settings_terminal_arguments()} <span class="hint">{m.settings_terminal_args_hint()}</span>
       </label>
-      <input
+      <TextInput
         id="terminal-args"
         class="setting-input"
+        size="md"
+        block
         type="text"
         placeholder="-- bash -c {"{cmd}"}"
         bind:value={localArgs}
@@ -88,13 +92,19 @@
         disabled={settings.saving}
         onclick={saveTerminal}
       >
-        {settings.saving ? "Saving..." : "Save"}
+        {settings.saving ? m.settings_terminal_saving() : m.settings_terminal_save()}
       </button>
     </div>
   {/if}
-</SettingsSection>
+</div>
 
 <style>
+  .terminal-settings {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-5);
+  }
+
   .setting-row {
     display: flex;
     align-items: center;
@@ -119,51 +129,8 @@
     color: var(--text-muted);
   }
 
-  .setting-options {
-    display: flex;
-    gap: 4px;
-  }
-
-  .option-btn {
-    height: 26px;
-    padding: 0 10px;
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--text-muted);
-    background: var(--bg-inset);
-    border: 1px solid var(--border-muted);
-    cursor: pointer;
-    transition: all 0.12s;
-  }
-
-  .option-btn:hover {
-    color: var(--text-secondary);
-    background: var(--bg-surface-hover);
-  }
-
-  .option-btn.active {
-    color: var(--accent-blue);
-    background: color-mix(in srgb, var(--accent-blue) 10%, transparent);
-    border-color: var(--accent-blue);
-  }
-
-  .setting-input {
-    width: 100%;
-    height: 30px;
-    padding: 0 10px;
-    border-radius: var(--radius-sm);
-    font-size: 12px;
+  :global(.setting-input.kit-text-input) {
     font-family: var(--font-mono, monospace);
-    color: var(--text-primary);
-    background: var(--bg-inset);
-    border: 1px solid var(--border-muted);
-    transition: border-color 0.15s;
-  }
-
-  .setting-input:focus {
-    outline: none;
-    border-color: var(--accent-blue);
   }
 
   .save-row {
@@ -177,7 +144,7 @@
     border-radius: var(--radius-sm);
     font-size: 12px;
     font-weight: 500;
-    color: white;
+    color: var(--accent-blue-foreground);
     background: var(--accent-blue);
     border: none;
     cursor: pointer;

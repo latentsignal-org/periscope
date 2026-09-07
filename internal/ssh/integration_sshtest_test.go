@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wesm/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/db"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSSHSyncEndToEnd(t *testing.T) {
@@ -33,42 +35,28 @@ func TestSSHSyncEndToEnd(t *testing.T) {
 	defer cancel()
 
 	stats, err := rs.Run(ctx)
-	if err != nil {
-		t.Fatalf("remote sync: %v", err)
-	}
+	require.NoError(t, err, "remote sync")
 
-	if stats.SessionsSynced == 0 {
-		t.Fatal("expected at least 1 session synced")
-	}
+	require.NotZero(t, stats.SessionsSynced, "expected at least 1 session synced")
 
 	// Verify session landed in DB.
 	page, err := database.ListSessions(
 		context.Background(), db.SessionFilter{Limit: 100},
 	)
-	if err != nil {
-		t.Fatalf("listing sessions: %v", err)
-	}
-	if len(page.Sessions) == 0 {
-		t.Fatal("no sessions in database")
-	}
+	require.NoError(t, err, "listing sessions")
+	require.NotEmpty(t, page.Sessions, "no sessions in database")
 
 	// Session ID should carry the host prefix.
 	found := false
 	for _, s := range page.Sessions {
 		if s.Machine == host {
 			found = true
-			if !strings.HasPrefix(s.ID, host+"~") {
-				t.Errorf(
-					"session ID %q missing host prefix",
-					s.ID,
-				)
-			}
+			assert.True(t, strings.HasPrefix(s.ID, host+"~"),
+				"session ID %q missing host prefix", s.ID)
 			break
 		}
 	}
-	if !found {
-		t.Errorf("no session with machine=%q", host)
-	}
+	assert.True(t, found, "no session with machine=%q", host)
 }
 
 func TestSSHSyncIncremental(t *testing.T) {
@@ -94,27 +82,14 @@ func TestSSHSyncIncremental(t *testing.T) {
 
 	// First sync: should pull sessions.
 	stats1, err := rs.Run(ctx)
-	if err != nil {
-		t.Fatalf("first sync: %v", err)
-	}
-	if stats1.SessionsSynced == 0 {
-		t.Fatal("first sync: expected sessions")
-	}
+	require.NoError(t, err, "first sync")
+	require.NotZero(t, stats1.SessionsSynced, "first sync: expected sessions")
 
 	// Second sync: nothing changed, should skip all.
 	stats2, err := rs.Run(ctx)
-	if err != nil {
-		t.Fatalf("second sync: %v", err)
-	}
-	if stats2.SessionsSynced != 0 {
-		t.Errorf(
-			"second sync: expected 0 synced, got %d",
-			stats2.SessionsSynced,
-		)
-	}
-	if stats2.Skipped == 0 {
-		t.Error("second sync: expected skipped > 0")
-	}
+	require.NoError(t, err, "second sync")
+	assert.Equal(t, 0, stats2.SessionsSynced, "second sync: expected 0 synced")
+	assert.NotZero(t, stats2.Skipped, "second sync: expected skipped > 0")
 }
 
 func TestSSHSyncFull(t *testing.T) {
@@ -139,21 +114,16 @@ func TestSSHSyncFull(t *testing.T) {
 		SSHOpts: opts,
 	}
 	_, err := rs.Run(ctx)
-	if err != nil {
-		t.Fatalf("first sync: %v", err)
-	}
+	require.NoError(t, err, "first sync")
 
 	// Full flag clears the remote skip cache but the engine
 	// still skips unchanged sessions via DB lookup. Verify
 	// it completes without error.
 	rs.Full = true
 	stats, err := rs.Run(ctx)
-	if err != nil {
-		t.Fatalf("full sync: %v", err)
-	}
+	require.NoError(t, err, "full sync")
 	// Session was already synced and unchanged, so it may
 	// be skipped by the engine's own DB-based detection.
-	if stats.SessionsSynced+stats.Skipped == 0 {
-		t.Fatal("full sync: expected sessions processed")
-	}
+	assert.NotZero(t, stats.SessionsSynced+stats.Skipped,
+		"full sync: expected sessions processed")
 }

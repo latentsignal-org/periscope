@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Card } from "@kenn-io/kit-ui";
   import { analytics } from "../../stores/analytics.svelte.js";
   import { scoreToGrade } from "../../utils/grade.js";
   import GradeDistribution
@@ -6,6 +7,7 @@
   import OutcomeDistribution
     from "./OutcomeDistribution.svelte";
   import HealthTrend from "./HealthTrend.svelte";
+  import { m } from "../../i18n/index.js";
 
   const signals = $derived(analytics.signals);
   const visible = $derived(
@@ -13,22 +15,33 @@
     (signals.scored_sessions > 0 ||
      signals.unscored_sessions > 0),
   );
+
+  function formatSessionCount(count: number): string {
+    return m.analytics_session_shape_session_count({
+      count,
+      countLabel: count.toLocaleString(),
+    });
+  }
 </script>
 
 {#if visible && signals}
   <div class="health-section">
     <div class="section-header">
-      <h3 class="section-title">Session Health</h3>
+      <h3 class="section-title">{m.analytics_session_health_title()}</h3>
       <span class="section-subtitle">
-        {signals.scored_sessions} scored
+        {m.analytics_session_health_scored({
+          countLabel: signals.scored_sessions.toLocaleString(),
+        })}
         &middot;
-        {signals.unscored_sessions} unscored
+        {m.analytics_session_health_unscored({
+          countLabel: signals.unscored_sessions.toLocaleString(),
+        })}
       </span>
     </div>
 
     <div class="health-summary-cards">
-      <div class="card">
-        <span class="card-label">Avg Score</span>
+      <Card level="default" padding="none" class="card">
+        <span class="card-label">{m.analytics_session_health_avg_score()}</span>
         <span class="card-value">
           {signals.avg_health_score != null
             ? Math.round(signals.avg_health_score)
@@ -36,12 +49,12 @@
         </span>
         {#if signals.avg_health_score != null}
           <span class="card-sub">
-            Grade {scoreToGrade(signals.avg_health_score)}
+            {m.analytics_session_health_grade({ grade: scoreToGrade(signals.avg_health_score) })}
           </span>
         {/if}
-      </div>
-      <div class="card">
-        <span class="card-label">Completed</span>
+      </Card>
+      <Card level="default" padding="none" class="card">
+        <span class="card-label">{m.analytics_session_health_completed()}</span>
         <span class="card-value" style:color="var(--accent-green)">
           {#if signals.scored_sessions > 0}
             {Math.round(
@@ -55,11 +68,11 @@
           {/if}
         </span>
         <span class="card-sub">
-          {signals.outcome_distribution?.completed ?? 0} sessions
+          {formatSessionCount(signals.outcome_distribution?.completed ?? 0)}
         </span>
-      </div>
-      <div class="card">
-        <span class="card-label">Errored</span>
+      </Card>
+      <Card level="default" padding="none" class="card">
+        <span class="card-label">{m.analytics_session_health_errored()}</span>
         <span class="card-value" style:color="var(--accent-red)">
           {#if signals.scored_sessions > 0}
             {Math.round(
@@ -73,11 +86,11 @@
           {/if}
         </span>
         <span class="card-sub">
-          {signals.outcome_distribution?.errored ?? 0} sessions
+          {formatSessionCount(signals.outcome_distribution?.errored ?? 0)}
         </span>
-      </div>
-      <div class="card">
-        <span class="card-label">Tool Failures</span>
+      </Card>
+      <Card level="default" padding="none" class="card">
+        <span class="card-label">{m.analytics_session_health_tool_failures()}</span>
         <span class="card-value" style:color="var(--accent-amber)">
           {#if signals.scored_sessions > 0}
             {Math.round(signals.tool_health.failure_rate)}%
@@ -86,11 +99,11 @@
           {/if}
         </span>
         <span class="card-sub">
-          {signals.tool_health.sessions_with_failures} sessions
+          {formatSessionCount(signals.tool_health.sessions_with_failures)}
         </span>
-      </div>
-      <div class="card">
-        <span class="card-label">Compactions</span>
+      </Card>
+      <Card level="default" padding="none" class="card">
+        <span class="card-label">{m.analytics_session_health_compactions()}</span>
         <span
           class="card-value"
           style:color={signals.context_health
@@ -103,37 +116,39 @@
         <span class="card-sub">
           {#if signals.context_health.sessions_with_mid_task_compaction > 0}
             {signals.context_health.sessions_with_mid_task_compaction}
-            mid-task &middot;
+            {m.analytics_session_health_mid_task()} &middot;
           {/if}
-          avg {signals.context_health.avg_compaction_count.toFixed(1)}/session
+          {m.analytics_session_health_avg_per_session({
+            value: signals.context_health.avg_compaction_count.toFixed(1),
+          })}
         </span>
-      </div>
+      </Card>
     </div>
 
     <div class="chart-grid">
-      <div class="chart-panel">
+      <Card level="default" padding="none" class="chart-panel">
         <GradeDistribution
           distribution={signals.grade_distribution}
         />
-      </div>
-      <div class="chart-panel">
+      </Card>
+      <Card level="default" padding="none" class="chart-panel">
         <OutcomeDistribution
           distribution={signals.outcome_distribution}
         />
-      </div>
-      <div class="chart-panel wide">
+      </Card>
+      <Card level="default" padding="none" class="chart-panel wide">
         <HealthTrend trend={signals.trend} />
-      </div>
-      <div class="chart-panel">
+      </Card>
+      <Card level="default" padding="none" class="chart-panel">
         <div class="mini-table">
-          <div class="table-title">By Agent</div>
+          <div class="table-title">{m.analytics_by_agent()}</div>
           <table>
             <thead>
               <tr>
-                <th>Agent</th>
-                <th class="num">Sessions</th>
-                <th class="num">Avg Score</th>
-                <th class="num">Completed</th>
+                <th>{m.analytics_col_agent()}</th>
+                <th class="num">{m.analytics_col_sessions()}</th>
+                <th class="num">{m.analytics_session_health_avg_score()}</th>
+                <th class="num">{m.analytics_session_health_completed()}</th>
               </tr>
             </thead>
             <tbody>
@@ -156,17 +171,17 @@
             </tbody>
           </table>
         </div>
-      </div>
-      <div class="chart-panel">
+      </Card>
+      <Card level="default" padding="none" class="chart-panel">
         <div class="mini-table">
-          <div class="table-title">By Project</div>
+          <div class="table-title">{m.analytics_by_project()}</div>
           <table>
             <thead>
               <tr>
-                <th>Project</th>
-                <th class="num">Sessions</th>
-                <th class="num">Avg Score</th>
-                <th class="num">Completed</th>
+                <th>{m.analytics_col_project()}</th>
+                <th class="num">{m.analytics_col_sessions()}</th>
+                <th class="num">{m.analytics_session_health_avg_score()}</th>
+                <th class="num">{m.analytics_session_health_completed()}</th>
               </tr>
             </thead>
             <tbody>
@@ -189,7 +204,7 @@
             </tbody>
           </table>
         </div>
-      </div>
+      </Card>
     </div>
   </div>
 {/if}
@@ -217,10 +232,7 @@
     gap: 12px;
     margin-bottom: 12px;
   }
-  .card {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-muted);
-    border-radius: var(--radius-md);
+  .health-summary-cards :global(.card) {
     padding: 12px;
   }
   .card-label {
@@ -247,13 +259,10 @@
     grid-template-columns: 1fr 1fr;
     gap: 12px;
   }
-  .chart-panel {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-muted);
-    border-radius: var(--radius-md);
+  .chart-grid :global(.chart-panel) {
     padding: 12px;
   }
-  .chart-panel.wide {
+  .chart-grid :global(.chart-panel.wide) {
     grid-column: 1 / -1;
   }
   .mini-table {
@@ -283,14 +292,14 @@
     color: var(--text-primary);
     border-bottom: 1px solid var(--bg-inset);
   }
-  @media (max-width: 767px) {
+  @media (max-width: 760px) {
     .health-summary-cards {
       grid-template-columns: repeat(2, 1fr);
     }
     .chart-grid {
       grid-template-columns: 1fr;
     }
-    .chart-panel.wide {
+    .chart-grid :global(.chart-panel.wide) {
       grid-column: 1;
     }
   }

@@ -1,0 +1,346 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"go.kenn.io/agentsview/internal/config"
+	"go.kenn.io/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/dbtest"
+	"go.kenn.io/agentsview/internal/money"
+	"go.kenn.io/agentsview/internal/service"
+)
+
+func TestNormalizeMCPHTTPAddr(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		addr          string
+		allowInsecure bool
+		want          string
+		wantErr       bool
+	}{
+		{"empty", "", false, "", true},
+		{"bare port", "8085", false, "127.0.0.1:8085", false},
+		{"colon port", ":8085", false, "127.0.0.1:8085", false},
+		{"explicit loopback v4", "127.0.0.1:8085", false, "127.0.0.1:8085", false},
+		{"explicit loopback v6", "[::1]:8085", false, "[::1]:8085", false},
+		{"localhost", "localhost:8085", false, "localhost:8085", false},
+		{"non-loopback rejected", "192.168.1.5:8085", false, "", true},
+		{"all-interfaces rejected", "0.0.0.0:8085", false, "", true},
+		{"non-loopback opted in", "192.168.1.5:8085", true, "192.168.1.5:8085", false},
+		{"all-interfaces opted in", "0.0.0.0:8085", true, "0.0.0.0:8085", false},
+		{"not a port", "notaport", false, "", true},
+		// Empty host with a port still binds all interfaces, so it must be
+		// rejected without the opt-in.
+		{"empty host footgun", "[]:8085", false, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := normalizeMCPHTTPAddr(tc.addr, tc.allowInsecure)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestMCPListenerAuth(t *testing.T) {
+	t.Parallel()
+	// Loopback without require_auth is local-trust: no listener auth, even
+	// when a token happens to be configured.
+	tok, err := mcpListenerAuth("127.0.0.1:8085", "", false)
+	require.NoError(t, err)
+	assert.Empty(t, tok)
+	tok, err = mcpListenerAuth("[::1]:8085", "abc", false)
+	require.NoError(t, err)
+	assert.Empty(t, tok, "loopback bind does not enforce a token without require_auth")
+
+	// require_auth forces auth even on loopback, so a forwarded port is
+	// never an unauthenticated surface.
+	tok, err = mcpListenerAuth("127.0.0.1:8085", "abc", true)
+	require.NoError(t, err)
+	assert.Equal(t, "abc", tok, "require_auth enforces the token on loopback")
+
+	// require_auth on loopback without a token is refused.
+	_, err = mcpListenerAuth("127.0.0.1:8085", "", true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "auth token")
+
+	// Non-loopback with a token enforces it.
+	tok, err = mcpListenerAuth("192.168.1.5:8085", "abc", false)
+	require.NoError(t, err)
+	assert.Equal(t, "abc", tok)
+
+	// Non-loopback without a token is refused (no unauthenticated remote surface).
+	_, err = mcpListenerAuth("192.168.1.5:8085", "", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "auth token")
+}
+
+func TestNewMCPCommand_Wiring(t *testing.T) {
+	t.Parallel()
+	cmd := newMCPCommand()
+	assert.Equal(t, "mcp", cmd.Use)
+	assert.Equal(t, groupData, cmd.GroupID)
+	assert.True(t, cmd.SilenceUsage)
+
+	for _, name := range []string{
+		"http", "http-allow-insecure", "server", "server-token-file", "pg",
+	} {
+		assert.NotNil(t, cmd.Flags().Lookup(name), "missing flag --%s", name)
+	}
+}
+
+func TestRootCommand_RegistersMCP(t *testing.T) {
+	t.Parallel()
+	root := newRootCommand()
+	var found bool
+	for _, c := range root.Commands() {
+		if c.Use == "mcp" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "root command should register the mcp subcommand")
+}
+
+func TestResolveMCPServicePGFlagUsesPGReadStore(t *testing.T) {
+	dataDir := newAgentDataDir(t)
+	remoteDir := t.TempDir()
+	t.Setenv("AGENTSVIEW_PG_URL", "postgres://example.test/periscope")
+	t.Setenv("AGENTSVIEW_PG_SCHEMA", "custom_schema")
+	seedSession(t, dataDir, "local-session", "local")
+	seedSession(t, remoteDir, "pg-session", "remote")
+
+	remoteDB := dbtest.OpenTestDBAt(t, filepath.Join(remoteDir, "sessions.db"))
+	stub := stubPGReadStore(t, remoteDB)
+	forbidStartBackgroundServeForTransport(t,
+		"periscope mcp --pg must use the PG read store, not the daemon")
+
+	cmd := newMCPCommand()
+	cmd.SetArgs([]string{"--pg"})
+	require.NoError(t, cmd.ParseFlags([]string{"--pg"}))
+
+	svc, cleanup, err := resolveMCPService(cmd)
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+
+	res, err := svc.List(context.Background(), service.ListFilter{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, res.Sessions, 1)
+	assert.Equal(t, "pg-session", res.Sessions[0].ID)
+	assert.Equal(t, "postgres://example.test/periscope", stub.PG.URL)
+	assert.Equal(t, "custom_schema", stub.PG.Schema)
+}
+
+func TestResolveMCPServiceExplicitServerUsesReportedCapabilities(
+	t *testing.T,
+) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte("probe-token\n"), 0o600))
+
+	tests := []struct {
+		name                 string
+		readOnly             bool
+		apiVersion           int
+		wantRecallCapability bool
+	}{
+		{
+			name: "writable API v4 server", apiVersion: 4,
+			wantRecallCapability: true,
+		},
+		{name: "writable API v3 server", apiVersion: 3},
+		{name: "read-only API v4 server", readOnly: true, apiVersion: 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var probeCount int
+			srv := httptest.NewServer(http.HandlerFunc(func(
+				w http.ResponseWriter, r *http.Request,
+			) {
+				probeCount++
+				assert.Equal(t, "/api/v1/version", r.URL.Path)
+				assert.Equal(t, "Bearer probe-token", r.Header.Get("Authorization"))
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"read_only":   tt.readOnly,
+					"api_version": tt.apiVersion,
+				})
+			}))
+			t.Cleanup(srv.Close)
+
+			cmd := newMCPCommand()
+			cmd.SetContext(context.Background())
+			require.NoError(t, cmd.ParseFlags([]string{
+				"--server", srv.URL,
+				"--server-token-file", tokenFile,
+			}))
+
+			svc, cleanup, err := resolveMCPService(cmd)
+			require.NoError(t, err)
+			t.Cleanup(cleanup)
+
+			assert.Equal(t, tt.wantRecallCapability,
+				service.SupportsRecallQueries(svc))
+			assert.Equal(t, 1, probeCount)
+		})
+	}
+}
+
+func TestMCPDaemonServiceStartsDaemonForEachOperation(t *testing.T) {
+	dataDir := t.TempDir()
+	cfg := config.Config{
+		DataDir: dataDir,
+		DBPath:  filepath.Join(dataDir, "sessions.db"),
+	}
+	var starts int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/sessions", r.URL.Path)
+		assert.Equal(t, "7", r.URL.Query().Get("limit"))
+		_ = json.NewEncoder(w).Encode(service.SessionList{
+			Sessions: []db.Session{{ID: "from-daemon", Agent: "codex"}},
+			Total:    1,
+		})
+	}))
+	t.Cleanup(ts.Close)
+	host, port := splitTestServerURL(t, ts.URL)
+	stubStartBackgroundServeForTransport(t, func(
+		context.Context, *config.Config, time.Duration,
+	) (*DaemonRuntime, error) {
+		starts++
+		return &DaemonRuntime{Host: host, Port: port}, nil
+	})
+
+	svc := newMCPDaemonService(cfg)
+	for range 2 {
+		res, err := svc.List(context.Background(), service.ListFilter{Limit: 7})
+		require.NoError(t, err)
+		require.Len(t, res.Sessions, 1)
+		assert.Equal(t, "from-daemon", res.Sessions[0].ID)
+	}
+	assert.Equal(t, 2, starts)
+	assert.NoFileExists(t, cfg.DBPath)
+}
+
+func TestMCPDaemonServiceRecallCapabilityFollowsResolvedRuntime(t *testing.T) {
+	tests := []struct {
+		name     string
+		readOnly bool
+		want     bool
+	}{
+		{name: "writable daemon", want: true},
+		{name: "read-only daemon", readOnly: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataDir := runtimeTestDir(t)
+			writeLiveRuntime(t, dataDir, tt.readOnly)
+			svc := newMCPDaemonService(config.Config{DataDir: dataDir})
+
+			assert.Equal(t, tt.want, service.SupportsRecallQueries(svc))
+		})
+	}
+}
+
+func TestMCPDaemonService_UsagePairwiseComparisonForwardsToDaemon(t *testing.T) {
+	dataDir := t.TempDir()
+	cfg := config.Config{
+		DataDir: dataDir,
+		DBPath:  filepath.Join(dataDir, "sessions.db"),
+	}
+
+	expected := service.UsagePairwiseComparisonResponse{
+		Left: service.UsagePairwiseComparisonSide{
+			TotalCost:    money.MustParseDollars("1.25"),
+			TotalTokens:  150,
+			SessionCount: 2,
+		},
+		Right: service.UsagePairwiseComparisonSide{
+			TotalCost:    money.MustParseDollars("3.5"),
+			TotalTokens:  420,
+			SessionCount: 5,
+		},
+		Deltas: service.UsagePairwiseComparisonDelta{
+			TotalCostDelta:    money.MustParseDollars("2.25"),
+			TotalTokensDelta:  270,
+			SessionCountDelta: 3,
+		},
+	}
+
+	var starts int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/usage/pairwise-comparison", r.URL.Path)
+		assert.Equal(t, "2024-06-01", r.URL.Query().Get("from"))
+		assert.Equal(t, "2024-06-07", r.URL.Query().Get("to"))
+		assert.Equal(t, "UTC", r.URL.Query().Get("timezone"))
+		assert.Equal(t, "gpt-4o", r.URL.Query().Get("model"))
+		assert.Equal(t, "model", r.URL.Query().Get("left_dimension"))
+		assert.Equal(t, "claude-sonnet-4-20250514", r.URL.Query().Get("left_value"))
+		assert.Equal(t, "project", r.URL.Query().Get("right_dimension"))
+		assert.Equal(t, "proj-b", r.URL.Query().Get("right_value"))
+		assert.Equal(t, "3", r.URL.Query().Get("min_user_messages"))
+		assert.Equal(t, "true", r.URL.Query().Get("include_one_shot"))
+		assert.Equal(t, "false", r.URL.Query().Get("include_automated"))
+		_ = json.NewEncoder(w).Encode(expected)
+	}))
+	t.Cleanup(ts.Close)
+
+	host, port := splitTestServerURL(t, ts.URL)
+	stubStartBackgroundServeForTransport(t, func(
+		context.Context, *config.Config, time.Duration,
+	) (*DaemonRuntime, error) {
+		starts++
+		return &DaemonRuntime{Host: host, Port: port}, nil
+	})
+
+	svc := newMCPDaemonService(cfg)
+	res, err := svc.UsagePairwiseComparison(
+		context.Background(),
+		service.UsagePairwiseComparisonRequest{
+			UsageRequest: service.UsageRequest{
+				From:            "2024-06-01",
+				To:              "2024-06-07",
+				Timezone:        "UTC",
+				MinUserMessages: 3,
+				IncludeOneShot:  true,
+				Model:           "gpt-4o",
+			},
+			LeftDimension:  "model",
+			LeftValue:      "claude-sonnet-4-20250514",
+			RightDimension: "project",
+			RightValue:     "proj-b",
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Equal(t, expected, *res)
+	assert.Equal(t, 1, starts)
+	assert.NoFileExists(t, cfg.DBPath)
+}
+
+func splitTestServerURL(t *testing.T, raw string) (string, int) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, raw, nil)
+	require.NoError(t, err)
+	host, portText, err := net.SplitHostPort(req.URL.Host)
+	require.NoError(t, err)
+	var port int
+	_, err = fmt.Sscanf(portText, "%d", &port)
+	require.NoError(t, err)
+	return host, port
+}

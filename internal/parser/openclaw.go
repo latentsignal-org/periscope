@@ -3,6 +3,7 @@
 package parser
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,10 +13,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// ParseOpenClawSession parses an OpenClaw JSONL session file.
+// parseSession parses an OpenClaw JSONL session file.
 // OpenClaw stores messages in a JSONL format with a session header
 // line, message entries, compaction summaries, and metadata events.
-func ParseOpenClawSession(
+func (p *openClawProvider) parseSession(
 	path, project, machine string,
 ) (*ParsedSession, []ParsedMessage, error) {
 	info, err := os.Stat(path)
@@ -30,6 +31,7 @@ func ParseOpenClawSession(
 	defer f.Close()
 
 	lr := newLineReader(f, maxLineSize)
+	defer releaseLineReader(lr)
 	var (
 		messages      []ParsedMessage
 		startedAt     time.Time
@@ -98,7 +100,7 @@ func ParseOpenClawSession(
 		switch role {
 		case "user":
 			content := msg.Get("content")
-			text, hasThinking, hasToolUse, tcs, trs :=
+			text, thinkingText, hasThinking, hasToolUse, tcs, trs :=
 				ExtractTextContent(content)
 			text = strings.TrimSpace(text)
 			if text == "" && len(tcs) == 0 && len(trs) == 0 {
@@ -120,6 +122,7 @@ func ParseOpenClawSession(
 				Content:       text,
 				Timestamp:     ts,
 				HasThinking:   hasThinking,
+				ThinkingText:  thinkingText,
 				HasToolUse:    hasToolUse,
 				ContentLength: len(text),
 				ToolCalls:     tcs,
@@ -130,24 +133,28 @@ func ParseOpenClawSession(
 
 		case "assistant":
 			content := msg.Get("content")
-			text, hasThinking, hasToolUse, tcs, trs :=
+			text, thinkingText, hasThinking, hasToolUse, tcs, trs :=
 				ExtractTextContent(content)
 			text = strings.TrimSpace(text)
 			if text == "" && len(tcs) == 0 && len(trs) == 0 {
 				continue
 			}
 
-			messages = append(messages, ParsedMessage{
-				Ordinal:       ordinal,
-				Role:          RoleAssistant,
-				Content:       text,
-				Timestamp:     ts,
-				HasThinking:   hasThinking,
-				HasToolUse:    hasToolUse,
-				ContentLength: len(text),
-				ToolCalls:     tcs,
-				ToolResults:   trs,
-			})
+			pm := ParsedMessage{
+				Ordinal:            ordinal,
+				Role:               RoleAssistant,
+				Content:            text,
+				Timestamp:          ts,
+				HasThinking:        hasThinking,
+				ThinkingText:       thinkingText,
+				HasToolUse:         hasToolUse,
+				ContentLength:      len(text),
+				ToolCalls:          tcs,
+				ToolResults:        trs,
+				tokenPresenceKnown: true,
+			}
+			applyOpenClawAssistantUsage(&pm, msg)
+			messages = append(messages, pm)
 			ordinal++
 
 		case "toolResult":
@@ -175,6 +182,7 @@ func ParseOpenClawSession(
 				ToolResults: []ParsedToolResult{{
 					ToolUseID:     toolCallID,
 					ContentLength: contentLen,
+					ContentRaw:    content.Raw,
 				}},
 			})
 			ordinal++
@@ -222,7 +230,88 @@ func ParseOpenClawSession(
 		},
 	}
 
+	accumulateMessageTokenUsage(sess, messages)
+
 	return sess, messages, nil
+}
+
+// applyOpenClawAssistantUsage copies the assistant turn's model id
+// and per-message token counts into pm so the usage dashboard can
+// attribute cost. OpenClaw uses its own usage shape — short field
+// names (input, output, cacheRead, cacheWrite) under message.usage,
+// with provider/model on message itself. We map the token fields
+// onto the agentsview-native input_tokens/output_tokens/
+// cache_creation_input_tokens/cache_read_input_tokens keys that
+// internal/db/usage.go reads.
+//
+// Cost (message.usage.cost.total) is intentionally not propagated:
+// agentsview re-prices via the model_pricing table (loaded from
+// LiteLLM), so trusting the gateway's at-request cost would skew
+// totals against the canonical pricing source. The model name is
+// the load-bearing field for accurate pricing lookup.
+//
+// Defensive about missing fields — older sessions may carry a model
+// without a usage block, or a usage block without cost; either is
+// fine.
+func applyOpenClawAssistantUsage(
+	pm *ParsedMessage, msg gjson.Result,
+) {
+	if model := msg.Get("model").Str; model != "" {
+		pm.Model = model
+	}
+
+	usage := msg.Get("usage")
+	if !usage.Exists() {
+		return
+	}
+
+	var (
+		input      int
+		output     int
+		cacheRead  int
+		cacheWrite int
+
+		hasInput      bool
+		hasOutput     bool
+		hasCacheRead  bool
+		hasCacheWrite bool
+	)
+	if f := usage.Get("input"); f.Exists() {
+		input = int(f.Int())
+		hasInput = true
+	}
+	if f := usage.Get("output"); f.Exists() {
+		output = int(f.Int())
+		hasOutput = true
+	}
+	if f := usage.Get("cacheRead"); f.Exists() {
+		cacheRead = int(f.Int())
+		hasCacheRead = true
+	}
+	if f := usage.Get("cacheWrite"); f.Exists() {
+		cacheWrite = int(f.Int())
+		hasCacheWrite = true
+	}
+
+	if !hasInput && !hasOutput && !hasCacheRead && !hasCacheWrite {
+		return
+	}
+
+	normalized := map[string]int{
+		"input_tokens":                input,
+		"output_tokens":               output,
+		"cache_read_input_tokens":     cacheRead,
+		"cache_creation_input_tokens": cacheWrite,
+	}
+	j, err := json.Marshal(normalized)
+	if err != nil {
+		return
+	}
+	pm.TokenUsage = j
+	pm.OutputTokens = output
+	pm.HasOutputTokens = hasOutput
+	pm.ContextTokens = input + cacheRead + cacheWrite
+	pm.HasContextTokens = hasInput || hasCacheRead || hasCacheWrite
 }
 
 // extractToolResultText extracts plain text from an OpenClaw
@@ -237,7 +326,12 @@ func extractToolResultText(content gjson.Result) string {
 
 	var parts []string
 	content.ForEach(func(_, block gjson.Result) bool {
-		if block.Get("type").Str == "text" {
+		// OpenClaw tool-result content blocks (type "toolResult") carry
+		// the rendered text inline under "text", the same field plain
+		// "text" blocks use. This matches what DecodeContent reads, so
+		// the measured length and the stored/decoded content agree.
+		switch block.Get("type").Str {
+		case "text", "toolResult":
 			if t := block.Get("text").Str; t != "" {
 				parts = append(parts, t)
 			}

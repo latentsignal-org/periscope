@@ -3,7 +3,7 @@ package summarize
 import (
 	"testing"
 
-	"github.com/wesm/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/db"
 )
 
 // TestBuildTurnsGroupsByUserMessage asserts the turn boundaries

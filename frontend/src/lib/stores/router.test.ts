@@ -4,7 +4,7 @@ import {
   expect,
   vi,
   afterEach,
-} from "vitest";
+} from "vite-plus/test";
 import {
   parsePath,
   RouterStore,
@@ -71,6 +71,8 @@ describe("parsePath", () => {
 
   it("parses page routes", () => {
     for (const route of [
+      "usage",
+      "trends",
       "insights",
       "pinned",
       "trash",
@@ -81,6 +83,25 @@ describe("parsePath", () => {
       expect(result.route).toBe(route);
       expect(result.sessionId).toBeNull();
     }
+  });
+
+  it("parses /activity as a valid route", () => {
+    window.history.replaceState({}, "", "/activity?preset=week&date=2026-06-16");
+    const parsed = parsePath();
+    expect(parsed.route).toBe("activity");
+    expect(parsed.params.preset).toBe("week");
+    expect(parsed.params.date).toBe("2026-06-16");
+  });
+
+  it("replaceParams writes query without a new history entry, keeping the path", () => {
+    window.history.replaceState({}, "", "/activity");
+    const store = new RouterStore();
+    const before = window.history.length;
+    store.replaceParams({ preset: "month", date: "2026-06-01" });
+    expect(window.location.pathname).toBe("/activity");
+    expect(window.location.search).toContain("preset=month");
+    expect(window.location.search).toContain("date=2026-06-01");
+    expect(window.history.length).toBe(before);
   });
 
   it("falls back to default for unknown routes", () => {
@@ -156,6 +177,41 @@ describe("RouterStore", () => {
     spy.mockRestore();
   });
 
+  it("replaces a route and preserves supplied params without adding history", () => {
+    setURL("/token-usage?project=demo&desktop");
+    store = new RouterStore();
+    const before = window.history.length;
+    const replaceSpy = vi.spyOn(
+      window.history,
+      "replaceState",
+    );
+
+    store.replace("usage", {
+      project: "demo",
+      desktop: "",
+      view: "tokens",
+    });
+
+    expect(store.route).toBe("usage");
+    expect(store.params).toEqual({
+      project: "demo",
+      desktop: "",
+      view: "tokens",
+    });
+    expect(window.location.pathname).toBe("/usage");
+    expect(window.location.search).toContain("view=tokens");
+    expect(window.history.length).toBe(before);
+    expect(replaceSpy).toHaveBeenCalledOnce();
+  });
+
+  it("navigate updates URL to /trends", () => {
+    setURL("/");
+    store = new RouterStore();
+    store.navigate("trends");
+    expect(window.location.pathname).toBe("/trends");
+    expect(store.route).toBe("trends");
+  });
+
   it("navigate returns false on same URL (no-op)", () => {
     setURL("/sessions");
     store = new RouterStore();
@@ -191,13 +247,106 @@ describe("RouterStore", () => {
     expect(window.location.search).toBe("?msg=last");
   });
 
+  it("navigateToSession preserves session route params from the sessions view", () => {
+    setURL(
+      "/sessions?window_days=14&project=myproj&termination=unclean&msg=stale",
+    );
+    store = new RouterStore();
+    store.navigateToSession("abc-123");
+
+    expect(window.location.pathname).toBe(
+      "/sessions/abc-123",
+    );
+    expect(window.location.search).toContain("window_days=14");
+    expect(window.location.search).toContain("project=myproj");
+    expect(window.location.search).toContain("termination=unclean");
+    expect(window.location.search).not.toContain("msg=stale");
+  });
+
+  it("navigateToSession can clear stale preserved route params", () => {
+    setURL(
+      "/sessions?window_days=14&project=myproj&include_one_shot=false",
+    );
+    store = new RouterStore();
+    store.navigateToSession("abc-123", undefined, ["include_one_shot"]);
+
+    expect(window.location.pathname).toBe(
+      "/sessions/abc-123",
+    );
+    expect(window.location.search).toContain("window_days=14");
+    expect(window.location.search).toContain("project=myproj");
+    expect(window.location.search).not.toContain("include_one_shot=false");
+  });
+
+  it("navigateToSessions preserves session route params for drilldowns", () => {
+    setURL(
+      "/sessions?date_from=2026-01-01&date_to=2026-01-31&project=myproj",
+    );
+    store = new RouterStore();
+    store.navigateToSessions({ agent: "codex" });
+
+    expect(window.location.pathname).toBe("/sessions");
+    expect(window.location.search).toContain("date_from=2026-01-01");
+    expect(window.location.search).toContain("date_to=2026-01-31");
+    expect(window.location.search).toContain("project=myproj");
+    expect(window.location.search).toContain("agent=codex");
+  });
+
+  it("navigateToSessions can clear preserved route params for drilldowns", () => {
+    setURL(
+      "/sessions?date_from=2026-01-01&date_to=2026-01-31&min_messages=10&max_messages=50",
+    );
+    store = new RouterStore();
+    store.navigateToSessions(
+      { min_messages: "100" },
+      ["min_messages", "max_messages"],
+    );
+
+    expect(window.location.search).toContain("date_from=2026-01-01");
+    expect(window.location.search).toContain("date_to=2026-01-31");
+    expect(window.location.search).toContain("min_messages=100");
+    expect(window.location.search).not.toContain("max_messages=50");
+  });
+
+  it("navigateToSession does not preserve params from non-session routes", () => {
+    setURL("/usage?from=2026-01-01&to=2026-01-07");
+    store = new RouterStore();
+    store.navigateToSession("abc-123");
+
+    expect(window.location.pathname).toBe(
+      "/sessions/abc-123",
+    );
+    expect(window.location.search).toBe("");
+  });
+
   it("navigateToContext updates URL to /context/{id}", () => {
-    setURL("/sessions");
+    setURL("/sessions?project=myproj&date_from=2026-01-01");
     store = new RouterStore();
     store.navigateToContext("abc-123");
     expect(window.location.pathname).toBe("/context/abc-123");
+    expect(window.location.search).toContain("project=myproj");
+    expect(window.location.search).toContain("date_from=2026-01-01");
     expect(store.route).toBe("context");
     expect(store.sessionId).toBe("abc-123");
+  });
+
+  it("buildContextHref preserves session filters", () => {
+    setURL("/sessions?project=myproj&window_days=30");
+    store = new RouterStore();
+
+    expect(store.buildContextHref("abc-123")).toBe(
+      "/context/abc-123?project=myproj&window_days=30",
+    );
+  });
+
+  it("replaceParams keeps the standalone context path", () => {
+    setURL("/context/abc-123?project=old");
+    store = new RouterStore();
+
+    store.replaceParams({ project: "new" });
+
+    expect(window.location.pathname).toBe("/context/abc-123");
+    expect(window.location.search).toBe("?project=new");
   });
 
   it("navigateFromSession returns to /sessions", () => {
@@ -356,5 +505,19 @@ describe("RouterStore", () => {
     store = new RouterStore();
     const href = store.buildSessionHref("abc-123");
     expect(href).toBe("/sessions/abc-123");
+  });
+
+  it("buildSessionHref preserves session route params from the sessions view", () => {
+    setURL(
+      "/sessions?window_days=14&project=myproj&termination=unclean&msg=stale",
+    );
+    store = new RouterStore();
+    const href = store.buildSessionHref("abc-123");
+
+    expect(href).toContain("/sessions/abc-123?");
+    expect(href).toContain("window_days=14");
+    expect(href).toContain("project=myproj");
+    expect(href).toContain("termination=unclean");
+    expect(href).not.toContain("msg=stale");
   });
 });

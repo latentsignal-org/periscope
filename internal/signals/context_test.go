@@ -3,22 +3,15 @@ package signals
 import (
 	"math"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestComputeContextPressure_NoData(t *testing.T) {
 	got := ComputeContextPressure(nil, 0, "")
-	if got.CompactionCount != 0 {
-		t.Errorf(
-			"CompactionCount = %d, want 0",
-			got.CompactionCount,
-		)
-	}
-	if got.PressureMax != nil {
-		t.Errorf(
-			"PressureMax = %v, want nil",
-			*got.PressureMax,
-		)
-	}
+	assert.Equal(t, 0, got.CompactionCount)
+	assert.Nil(t, got.PressureMax)
 }
 
 func TestCountCompactions(t *testing.T) {
@@ -120,13 +113,7 @@ func TestCountCompactions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := countCompactions(tt.tokens)
-			if got != tt.want {
-				t.Errorf(
-					"countCompactions = %d, want %d",
-					got, tt.want,
-				)
-			}
+			assert.Equal(t, tt.want, countCompactions(tt.tokens))
 		})
 	}
 }
@@ -210,23 +197,11 @@ func TestComputePressure(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := computePressure(tt.peak, tt.model)
 			if tt.wantNil {
-				if got != nil {
-					t.Errorf(
-						"computePressure = %v, want nil",
-						*got,
-					)
-				}
+				assert.Nil(t, got)
 				return
 			}
-			if got == nil {
-				t.Fatal("computePressure = nil, want non-nil")
-			}
-			if math.Abs(*got-tt.wantVal) > tt.wantPrec {
-				t.Errorf(
-					"computePressure = %v, want %v",
-					*got, tt.wantVal,
-				)
-			}
+			require.NotNil(t, got)
+			assert.LessOrEqual(t, math.Abs(*got-tt.wantVal), tt.wantPrec)
 		})
 	}
 }
@@ -257,13 +232,7 @@ func TestLookupWindowSize(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := LookupContextWindowSize(tt.model)
-			if got != tt.want {
-				t.Errorf(
-					"LookupContextWindowSize(%q) = %d, want %d",
-					tt.model, got, tt.want,
-				)
-			}
+			assert.Equal(t, tt.want, LookupContextWindowSize(tt.model))
 		})
 	}
 }
@@ -279,21 +248,9 @@ func TestComputeContextPressure_Combined(t *testing.T) {
 	got := ComputeContextPressure(
 		tokens, 150000, "claude-sonnet-4-5",
 	)
-	if got.CompactionCount != 1 {
-		t.Errorf(
-			"CompactionCount = %d, want 1",
-			got.CompactionCount,
-		)
-	}
-	if got.PressureMax == nil {
-		t.Fatal("PressureMax = nil, want 0.75")
-	}
-	if math.Abs(*got.PressureMax-0.75) > 1e-9 {
-		t.Errorf(
-			"PressureMax = %v, want 0.75",
-			*got.PressureMax,
-		)
-	}
+	assert.Equal(t, 1, got.CompactionCount)
+	require.NotNil(t, got.PressureMax)
+	assert.LessOrEqual(t, math.Abs(*got.PressureMax-0.75), 1e-9)
 }
 
 func TestCountMidTaskCompactions(t *testing.T) {
@@ -416,12 +373,7 @@ func TestCountMidTaskCompactions(t *testing.T) {
 			got := CountMidTaskCompactions(
 				tc.boundaryOrdinals, tc.toolCalls,
 			)
-			if got != tc.wantMidTaskCount {
-				t.Errorf(
-					"CountMidTaskCompactions = %d, want %d",
-					got, tc.wantMidTaskCount,
-				)
-			}
+			assert.Equal(t, tc.wantMidTaskCount, got)
 		})
 	}
 }

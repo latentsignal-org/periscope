@@ -27,10 +27,10 @@ func TestDetectCompactCandidate_HighOccupancy(t *testing.T) {
 		MaxContextTokens: 200_000,
 		TurnCount:        25,
 		Composition: map[string]int{
-			"tool_outputs":    60_000,
-			"search_results":  30_000,
+			"tool_outputs":       60_000,
+			"search_results":     30_000,
 			"assistant_messages": 50_000,
-			"user_messages":   30_000,
+			"user_messages":      30_000,
 		},
 		OlderTurnTokens: 130_000,
 	})

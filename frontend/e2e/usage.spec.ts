@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { clickNavTab, expectActiveNavTab } from "./helpers/nav";
 
 test.describe("Usage page", () => {
   test.beforeEach(async ({ page }) => {
@@ -13,8 +14,8 @@ test.describe("Usage page", () => {
     page,
   }) => {
     await expect(
-      page.locator(".page-title"),
-    ).toContainText("Usage");
+      page.locator(".usage-toolbar").first(),
+    ).toBeVisible();
 
     // Summary cards should appear with at least one value.
     await expect(
@@ -64,16 +65,16 @@ test.describe("Usage page", () => {
 
     // Click the first filter dropdown (Project).
     const trigger = page
-      .locator(".filter-dropdown .filter-trigger")
+      .locator(".usage-toolbar .kit-filter-dropdown__btn")
       .first();
     await trigger.click();
 
     // Dropdown panel should appear with rows.
     await expect(
-      page.locator(".dropdown-panel").first(),
+      page.locator(".usage-toolbar .kit-filter-dropdown__panel").first(),
     ).toBeVisible();
     await expect(
-      page.locator(".dropdown-row").first(),
+      page.locator(".usage-toolbar .kit-filter-dropdown__item").first(),
     ).toBeVisible();
   });
 
@@ -92,13 +93,17 @@ test.describe("Usage page", () => {
 
     // Open the project filter and exclude the first item.
     const trigger = page
-      .locator(".filter-dropdown .filter-trigger")
+      .locator(".usage-toolbar .kit-filter-dropdown__btn")
       .first();
     await trigger.click();
-    await page.locator(".dropdown-row").first().click();
+    await page
+      .locator(".usage-toolbar .kit-filter-dropdown__item")
+      .filter({ hasText: "project-delta" })
+      .first()
+      .click();
 
-    // Close dropdown by clicking the page title.
-    await page.locator(".page-title").click();
+    // Close dropdown by clicking outside the menu.
+    await page.mouse.click(10, 10);
 
     // Total cost should change after refetch.
     await expect(async () => {
@@ -119,13 +124,13 @@ test.describe("Usage page", () => {
 
     // Open the project filter.
     const trigger = page
-      .locator(".filter-dropdown .filter-trigger")
+      .locator(".usage-toolbar .kit-filter-dropdown__btn")
       .first();
     await trigger.click();
 
     // Click "Deselect all".
     await page
-      .locator(".bulk-btn")
+      .locator(".usage-toolbar .kit-filter-dropdown__bulk-btn")
       .filter({ hasText: "Deselect all" })
       .first()
       .click();
@@ -135,7 +140,7 @@ test.describe("Usage page", () => {
 
     // Click "Select all".
     await page
-      .locator(".bulk-btn")
+      .locator(".usage-toolbar .kit-filter-dropdown__bulk-btn")
       .filter({ hasText: "Select all" })
       .first()
       .click();
@@ -144,14 +149,86 @@ test.describe("Usage page", () => {
     await expect(trigger).toContainText("All");
   });
 
-  test("top nav shows Usage button as active", async ({
+  test("top nav shows Usage as the active destination", async ({
     page,
   }) => {
-    const usageBtn = page.locator(
-      '.nav-btn[aria-label="Usage"]',
+    await expectActiveNavTab(page, "Usage");
+  });
+
+  test("switches between cost and token views with canonical URLs", async ({
+    page,
+  }) => {
+    const metric = page.getByRole("radiogroup", {
+      name: "Usage metric",
+    });
+
+    await metric.getByRole("radio", { name: "Tokens" }).click();
+    await expect(page).toHaveURL(/\/usage\?.*view=tokens/);
+    await expect(
+      metric.getByRole("radio", { name: "Tokens" }),
+    ).toHaveAttribute("aria-checked", "true");
+
+    await metric.getByRole("radio", { name: "Cost" }).click();
+    await expect(page).toHaveURL(/\/usage(?:\?.*)?$/);
+    expect(new URL(page.url()).searchParams.has("view")).toBe(false);
+  });
+
+  test("ranks token panels by an Output-only selection", async ({
+    page,
+  }) => {
+    await page.getByRole("radio", { name: "Tokens" }).click();
+    const picker = page.locator(
+      '.usage-toolbar button[title="Token types"]',
     );
-    await expect(usageBtn).toBeVisible();
-    await expect(usageBtn).toHaveClass(/active/);
+    await expect(picker).toHaveAttribute(
+      "aria-label",
+      "Token types: All",
+    );
+    await picker.click();
+
+    const menu = page.locator(
+      ".usage-toolbar .kit-filter-dropdown__panel",
+    );
+    await menu.locator("button", { hasText: "Input" }).click();
+    await menu.locator("button", { hasText: "Cache Writes" }).click();
+    const outputRequest = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return url.pathname.endsWith("/api/v1/usage/top-sessions")
+        && url.searchParams.get("token_types") === "output";
+    });
+    await menu.locator("button", { hasText: "Cached Read" }).click();
+    await outputRequest;
+
+    await expect(picker).toHaveAttribute(
+      "aria-label",
+      "Token types: Output",
+    );
+    await expect(page).toHaveURL((url) =>
+      url.pathname === "/usage"
+      && url.searchParams.get("view") === "tokens"
+      && url.searchParams.get("token_types") === "output"
+    );
+    await expect(
+      page.locator(".top-sessions-container .chart-title"),
+    ).toHaveText("Top Sessions by Output Tokens");
+  });
+
+  test("normalizes legacy token links without dropping filters", async ({
+    page,
+  }) => {
+    await page.goto(
+      "/token-usage?window_days=90&project=project-delta",
+    );
+
+    await expect(page).toHaveURL((url) =>
+      url.pathname === "/usage"
+      && url.searchParams.get("view") === "tokens"
+      && url.searchParams.get("window_days") === "90"
+      && url.searchParams.get("project") === "project-delta"
+    );
+    await expect(
+      page.getByRole("radio", { name: "Tokens" }),
+    ).toHaveAttribute("aria-checked", "true");
   });
 
   test("URL updates when filter changes", async ({ page }) => {
@@ -162,13 +239,69 @@ test.describe("Usage page", () => {
 
     // Exclude a project.
     const trigger = page
-      .locator(".filter-dropdown .filter-trigger")
+      .locator(".usage-toolbar .kit-filter-dropdown__btn")
       .first();
     await trigger.click();
-    await page.locator(".dropdown-row").first().click();
-    await page.locator(".page-title").click();
+    await page
+      .locator(".usage-toolbar .kit-filter-dropdown__item")
+      .filter({ hasText: "project-delta" })
+      .first()
+      .click();
+    await page.mouse.click(10, 10);
 
     // URL should contain the exclude_project param.
     await expect(page).toHaveURL(/exclude_project=/);
+  });
+
+  test("returning bare refreshes rolling bounds after midnight", async ({
+    page,
+  }) => {
+    await page.clock.setFixedTime(new Date("2026-07-09T23:59:00"));
+    await page.goto("/usage?window_days=30");
+    await expect(page.locator(".usage-page")).toBeVisible();
+    await expect(
+      page.locator(".kit-date-range-picker__trigger"),
+    ).toContainText("Last 30 days");
+
+    await clickNavTab(page, "Sessions");
+    await page.clock.setFixedTime(new Date("2026-07-10T00:01:00"));
+    const requestPromise = page.waitForRequest((request) =>
+      new URL(request.url()).pathname.endsWith("/api/v1/usage/summary")
+    );
+    await clickNavTab(page, "Usage");
+    const requestUrl = new URL((await requestPromise).url());
+
+    expect(requestUrl.searchParams.get("from")).toBe("2026-06-11");
+    expect(requestUrl.searchParams.get("to")).toBe("2026-07-10");
+    await expect(
+      page.locator(".kit-date-range-picker__trigger"),
+    ).toContainText("Last 30 days");
+  });
+
+  test("adopts a retained Insights range after linking is enabled", async ({
+    page,
+  }) => {
+    await page.goto("/insights");
+    await expect(page.locator(".insights-page")).toBeVisible();
+
+    await page.locator(".kit-date-range-picker__trigger").click();
+    await page.getByRole("button", { name: "90d", exact: true }).click();
+    await expect(page).toHaveURL(/window_days=90/);
+
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page
+      .getByRole("navigation", { name: "Settings" })
+      .locator("button", { hasText: "Date ranges" })
+      .click();
+    await page
+      .getByRole("switch", { name: "Link date ranges across pages" })
+      .check();
+
+    await clickNavTab(page, "Usage");
+
+    await expect(page.locator(".usage-page")).toBeVisible();
+    await expect(
+      page.locator(".kit-date-range-picker__trigger"),
+    ).toContainText("Last 90 days");
   });
 });

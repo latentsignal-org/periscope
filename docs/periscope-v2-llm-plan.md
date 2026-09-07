@@ -1,3 +1,8 @@
+---
+title: Periscope V2 LLM-Augmented Guidance Plan
+description: Draft plan for LLM-augmented guidance in Periscope V2
+---
+
 # Periscope V2 — LLM-Augmented Guidance Plan
 
 ## Document Status

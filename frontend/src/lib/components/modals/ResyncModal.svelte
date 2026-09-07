@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { Button, Modal, Spinner } from "@kenn-io/kit-ui";
+  import { m } from "../../i18n/index.js";
   import { ui } from "../../stores/ui.svelte.js";
   import { sync } from "../../stores/sync.svelte.js";
 
@@ -8,6 +10,11 @@
   let errorMessage: string = $state("");
 
   function startResync() {
+    if (sync.readOnly) {
+      errorMessage = m.resync_error_read_only();
+      view = "error";
+      return;
+    }
     const started = sync.triggerResync(
       () => {
         view = "done";
@@ -19,8 +26,8 @@
     );
     if (started) {
       view = "progress";
-    } else {
-      errorMessage = "A sync is already in progress.";
+    } else if (!errorMessage) {
+      errorMessage = m.resync_error_in_progress();
       view = "error";
     }
   }
@@ -29,21 +36,8 @@
     ui.activeModal = null;
   }
 
-  function handleOverlayClick(e: MouseEvent) {
-    if (
-      view !== "progress" &&
-      (e.target as HTMLElement).classList.contains(
-        "modal-overlay",
-      )
-    ) {
-      close();
-    }
-  }
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape" && view !== "progress") {
-      close();
-    }
+  function handleClose() {
+    if (view !== "progress") close();
   }
 
   const progressPct = $derived(
@@ -57,119 +51,98 @@
   );
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div
-  class="modal-overlay"
-  onclick={handleOverlayClick}
-  onkeydown={handleKeydown}
+{#snippet actions()}
+  {#if view === "confirm"}
+    <Button
+      label={m.resync_cancel()}
+      tone="neutral"
+      surface="outline"
+      onclick={close}
+    />
+    <Button
+      label={m.resync_start()}
+      tone="info"
+      surface="solid"
+      onclick={startResync}
+    />
+  {:else if view === "done"}
+    <Button
+      label={m.resync_close_btn()}
+      tone="info"
+      surface="solid"
+      onclick={close}
+    />
+  {:else if view === "error"}
+    <Button
+      label={m.resync_retry()}
+      tone="info"
+      surface="solid"
+      onclick={startResync}
+    />
+    <Button
+      label={m.resync_close_btn()}
+      tone="neutral"
+      surface="outline"
+      onclick={close}
+    />
+  {/if}
+{/snippet}
+
+<Modal
+  title={m.resync_title()}
+  width="400px"
+  closable={view !== "progress"}
+  closeOnOverlayClick={view !== "progress"}
+  onclose={handleClose}
+  footer={view === "progress" ? undefined : actions}
 >
-  <div class="modal-panel resync-panel">
-    <div class="modal-header">
-      <h3 class="modal-title">Full Resync</h3>
-      {#if view !== "progress"}
-        <button class="modal-close" onclick={close}>
-          &times;
-        </button>
-      {/if}
+  {#if view === "confirm"}
+    <p class="confirm-text">
+      {m.resync_confirm_text()}
+    </p>
+
+  {:else if view === "progress"}
+    <div class="progress-view">
+      <Spinner />
+      <p class="progress-label">
+        {#if sync.progress}
+          {m.resync_syncing_progress({ done: sync.progress.sessions_done, total: sync.progress.sessions_total })}
+        {:else}
+          {m.resync_preparing()}
+        {/if}
+      </p>
+      <div class="progress-bar-track">
+        <div
+          class="progress-bar-fill"
+          style="width: {progressPct}%"
+        ></div>
+      </div>
     </div>
 
-    <div class="modal-body">
-      {#if view === "confirm"}
-        <p class="confirm-text">
-          Re-parse all session files from scratch. Existing
-          sessions will be updated in place &mdash; no data is
-          deleted. Use this after upgrading or when sessions
-          appear incorrect.
+  {:else if view === "done"}
+    <div class="done-view">
+      {#if sync.lastSyncStats}
+        <p class="done-summary">
+          {m.resync_sessions_synced({ count: sync.lastSyncStats.synced })}
         </p>
-        <div class="confirm-actions">
-          <button class="modal-btn" onclick={close}>
-            Cancel
-          </button>
-          <button
-            class="modal-btn modal-btn-primary"
-            onclick={startResync}
-          >
-            Start Full Resync
-          </button>
-        </div>
-
-      {:else if view === "progress"}
-        <div class="progress-view">
-          <div class="modal-spinner"></div>
-          <p class="progress-label">
-            {#if sync.progress}
-              Syncing {sync.progress.sessions_done}
-              / {sync.progress.sessions_total} sessions...
-            {:else}
-              Preparing...
-            {/if}
+        {#if sync.lastSyncStats.failed > 0}
+          <p class="done-warning">
+            {m.resync_failed({ count: sync.lastSyncStats.failed })}
           </p>
-          <div class="progress-bar-track">
-            <div
-              class="progress-bar-fill"
-              style="width: {progressPct}%"
-            ></div>
-          </div>
-        </div>
-
-      {:else if view === "done"}
-        <div class="done-view">
-          {#if sync.lastSyncStats}
-            <p class="done-summary">
-              Sessions synced: {sync.lastSyncStats.synced}
-            </p>
-            {#if sync.lastSyncStats.failed > 0}
-              <p class="done-warning">
-                Failed: {sync.lastSyncStats.failed}
-              </p>
-            {/if}
-          {/if}
-          <div class="done-actions">
-            <button
-              class="modal-btn modal-btn-primary"
-              onclick={close}
-            >
-              Close
-            </button>
-          </div>
-        </div>
-
-      {:else if view === "error"}
-        <div class="error-view">
-          <p class="modal-error">{errorMessage}</p>
-          <div class="error-actions">
-            <button
-              class="modal-btn modal-btn-primary"
-              onclick={startResync}
-            >
-              Retry
-            </button>
-            <button class="modal-btn" onclick={close}>
-              Close
-            </button>
-          </div>
-        </div>
+        {/if}
       {/if}
     </div>
-  </div>
-</div>
+
+  {:else if view === "error"}
+    <p class="modal-error-text">{errorMessage}</p>
+  {/if}
+</Modal>
 
 <style>
-  .resync-panel {
-    width: 400px;
-  }
-
   .confirm-text {
     font-size: 12px;
     color: var(--text-secondary);
     line-height: 1.5;
-    margin-bottom: 16px;
-  }
-
-  .confirm-actions {
-    display: flex;
-    gap: 8px;
-    justify-content: flex-end;
   }
 
   .progress-view {
@@ -204,7 +177,7 @@
   .done-view {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 8px;
   }
 
   .done-summary {
@@ -219,20 +192,13 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .done-actions {
-    display: flex;
-    justify-content: flex-end;
-  }
-
-  .error-view {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .error-actions {
-    display: flex;
-    gap: 8px;
-    justify-content: flex-end;
+  .modal-error-text {
+    font-size: var(--font-size-sm);
+    color: var(--accent-red, #f85149);
+    background: var(--bg-inset);
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--accent-red, #f85149);
+    word-break: break-word;
   }
 </style>

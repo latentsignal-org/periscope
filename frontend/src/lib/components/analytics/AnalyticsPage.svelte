@@ -1,6 +1,12 @@
 <script lang="ts">
+  import { Card } from "@kenn-io/kit-ui";
   import { onMount, onDestroy, untrack } from "svelte";
-  import DateRangePicker from "./DateRangePicker.svelte";
+  import RangePicker from "../shared/RangePicker.svelte";
+  import {
+    resolveRange,
+    selectionFromWindow,
+    type RangeSelection,
+  } from "../shared/rangeSelection.js";
   import SummaryCards from "./SummaryCards.svelte";
   import Heatmap from "./Heatmap.svelte";
   import ActivityTimeline from "./ActivityTimeline.svelte";
@@ -9,14 +15,227 @@
   import SessionShape from "./SessionShape.svelte";
   import VelocityMetrics from "./VelocityMetrics.svelte";
   import ToolUsage from "./ToolUsage.svelte";
+  import TopSkills from "./TopSkills.svelte";
+  import SkillTrend from "./SkillTrend.svelte";
   import AgentComparison from "./AgentComparison.svelte";
   import SessionHealthSection from "./SessionHealthSection.svelte";
   import TopSessions from "./TopSessions.svelte";
   import ActiveFilters from "./ActiveFilters.svelte";
+  import SessionFilterControl from "../filters/SessionFilterControl.svelte";
+  import FilterDropdown from "../usage/FilterDropdown.svelte";
   import { analytics } from "../../stores/analytics.svelte.js";
-  import { sessions } from "../../stores/sessions.svelte.js";
+  import { analyticsPageDates } from "../../stores/analyticsPageDates.js";
+  import {
+    sessions,
+    filtersToParams,
+  } from "../../stores/sessions.svelte.js";
   import { events } from "../../stores/events.svelte.js";
+  import { ui } from "../../stores/ui.svelte.js";
+  import { sync } from "../../stores/sync.svelte.js";
+  import { router } from "../../stores/router.svelte.js";
+  import {
+    yokedDates,
+    panelDateState,
+    panelDateToSessionFilterParams,
+    rangeToPanelDate,
+    sessionParamsToPanelDate,
+    type PanelDateState,
+  } from "../../stores/yokedDates.svelte.js";
+  import { rollingRange } from "../../utils/dates.js";
   import { exportAnalyticsCSV } from "../../utils/csv-export.js";
+  import RefreshControl from "../shared/RefreshControl.svelte";
+  import { m } from "../../i18n/index.js";
+
+  const SESSION_ANALYTICS_WINDOW_PARAM = "window_days";
+
+  const earliestSession = $derived(sync.stats?.earliest_session ?? null);
+
+  const rangeSelection = $derived(
+    selectionFromWindow({
+      isPinned: analytics.isPinned,
+      windowDays: analytics.windowDays,
+      from: analytics.from,
+      to: analytics.to,
+      earliestSession,
+    }),
+  );
+
+  function applyRange(sel: RangeSelection) {
+    if (sel.mode === "relative" && sel.days > 0) {
+      sessionDateIntentEstablished = true;
+      analytics.setRollingWindow(sel.days);
+      const state = panelDateState(analytics.from, analytics.to, {
+        mode: "rolling",
+        windowDays: sel.days,
+      });
+      if (state) {
+        yokedDates.updateFromPanel(state);
+        writeSessionDateParams(state);
+      }
+    } else {
+      const range = resolveRange(sel, earliestSession);
+      sessionDateIntentEstablished = true;
+      analytics.setDateRange(range.from, range.to);
+      const state = panelDateState(range.from, range.to, {
+        mode: "fixed",
+      });
+      if (state) {
+        yokedDates.updateFromPanel(state);
+        writeSessionDateParams(state);
+      }
+    }
+  }
+
+  function parseSessionAnalyticsWindowDays(
+    raw: string | undefined,
+  ): number | null {
+    if (!raw) return null;
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isInteger(n) || n <= 0 || String(n) !== raw) {
+      return null;
+    }
+    return n;
+  }
+
+  function hasSessionDateParams(params: Record<string, string>): boolean {
+    return !!params["date"] || !!params["date_from"] || !!params["date_to"];
+  }
+
+  function rollingPanelDate(days: number): PanelDateState | null {
+    const range = rollingRange(days);
+    return panelDateState(range.from, range.to, {
+      mode: "rolling",
+      windowDays: days,
+    });
+  }
+
+  function sessionAnalyticsDateUrlSignature(
+    params: Record<string, string>,
+    state: PanelDateState | null,
+  ): string {
+    if (state?.mode === "rolling") {
+      return JSON.stringify({
+        mode: state.mode,
+        windowDays: state.windowDays ?? null,
+        from: state.from,
+        to: state.to,
+      });
+    }
+    if (state) {
+      return JSON.stringify({
+        mode: state.mode,
+        date: params["date"] ?? "",
+        dateFrom: params["date_from"] ?? "",
+        dateTo: params["date_to"] ?? "",
+        from: state.from,
+        to: state.to,
+      });
+    }
+    if (hasSessionDateParams(params)) {
+      return JSON.stringify({
+        mode: "invalid",
+        date: params["date"] ?? "",
+        dateFrom: params["date_from"] ?? "",
+        dateTo: params["date_to"] ?? "",
+      });
+    }
+    return JSON.stringify({ mode: "none" });
+  }
+
+  function sessionDateFiltersAreClear(): boolean {
+    return !sessions.filters.date &&
+      !sessions.filters.dateFrom &&
+      !sessions.filters.dateTo;
+  }
+
+  function analyticsDateYokeIsClear(): boolean {
+    return (
+      !hasSessionDateParams(router.params) &&
+      parseSessionAnalyticsWindowDays(
+        router.params[SESSION_ANALYTICS_WINDOW_PARAM],
+      ) === null &&
+      sessionDateFiltersAreClear() &&
+      yokedDates.range === null
+    );
+  }
+
+  function syncSessionFiltersForDateState(
+    state: PanelDateState,
+  ): boolean {
+    const before = JSON.stringify(filtersToParams(sessions.filters));
+    const params = panelDateToSessionFilterParams(state);
+    sessions.applyPanelDateFilters(
+      params,
+      state.mode === "rolling" ? state.windowDays ?? null : null,
+    );
+    const after = JSON.stringify(filtersToParams(sessions.filters));
+    return before !== after;
+  }
+
+  function writeSessionDateParams(state: PanelDateState): void {
+    const sessionChanged = syncSessionFiltersForDateState(state);
+    const params = filtersToParams(sessions.filters);
+    delete params[SESSION_ANALYTICS_WINDOW_PARAM];
+    if (state.mode === "rolling" && state.windowDays) {
+      params[SESSION_ANALYTICS_WINDOW_PARAM] = String(state.windowDays);
+    }
+    router.replaceParams(params);
+    if (sessionChanged) sessions.load();
+  }
+
+  function analyticsPanelDateSignature(): string {
+    return JSON.stringify({
+      from: analytics.from,
+      to: analytics.to,
+      isPinned: analytics.isPinned,
+      windowDays: analytics.windowDays,
+      selectedDate: analytics.selectedDate,
+      selectedDow: analytics.selectedDow,
+      selectedHour: analytics.selectedHour,
+    });
+  }
+
+  function applyAnalyticsPanelDate(state: PanelDateState): boolean {
+    const before = analyticsPanelDateSignature();
+    if (state.mode === "rolling" && state.windowDays) {
+      analytics.applyRollingWindow(state.windowDays);
+    } else {
+      analytics.applyDateRange(state.from, state.to);
+    }
+    const after = analyticsPanelDateSignature();
+    return before !== after;
+  }
+
+  function currentAnalyticsPanelDate(): PanelDateState | null {
+    if (!analytics.isPinned) {
+      return panelDateState(analytics.from, analytics.to, {
+        mode: "rolling",
+        windowDays: analytics.windowDays,
+      });
+    }
+    return panelDateState(analytics.from, analytics.to, {
+      mode: "fixed",
+    });
+  }
+
+  function refreshAnalytics(): Promise<void> {
+    const refresh = analytics.fetchAll();
+    const state = currentAnalyticsPanelDate();
+    if (state && !analyticsDateYokeIsClear()) {
+      yokedDates.updateFromPanel(state);
+      writeSessionDateParams(state);
+    }
+    return refresh;
+  }
+
+  function handleDateRangeChange(from: string, to: string) {
+    const state = panelDateState(from, to, { mode: "fixed" });
+    if (!state) return;
+    sessionDateIntentEstablished = true;
+    analytics.setDateRange(from, to);
+    yokedDates.updateFromPanel(state);
+    writeSessionDateParams(state);
+  }
 
   function shortTz(tz: string): string {
     const slash = tz.lastIndexOf("/");
@@ -25,8 +244,38 @@
       : tz;
   }
 
-  const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+  let knownModels: string[] = $state([]);
 
+  function mergeIntoKnownModels(names: string[]): void {
+    if (names.length === 0) return;
+    const set = new Set(knownModels);
+    let changed = false;
+    for (const model of names) {
+      if (model && !set.has(model)) {
+        set.add(model);
+        changed = true;
+      }
+    }
+    if (changed) {
+      knownModels = [...set].sort();
+    }
+  }
+
+  $effect(() => {
+    const fromSummary = analytics.summary?.models ?? [];
+    untrack(() => mergeIntoKnownModels(fromSummary));
+  });
+
+  $effect(() => {
+    const selected = analytics.model
+      .split(",")
+      .filter((model) => model.length > 0);
+    untrack(() => mergeIntoKnownModels(selected));
+  });
+
+  const modelItems = $derived(
+    knownModels.map((name) => ({ name })),
+  );
   function handleExportCSV() {
     exportAnalyticsCSV({
       from: analytics.from,
@@ -39,18 +288,19 @@
     });
   }
 
-  let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let unsubEvents: (() => void) | undefined;
+  let analyticsDateUrlInitRan = $state(false);
+  let analyticsDateUrlInitComplete = $state(false);
+  let lastAnalyticsDateUrlSignature: string | null = $state(null);
+  let sessionDateIntentEstablished = false;
 
   onMount(() => {
-    analytics.fetchAll();
-    refreshTimer = setInterval(
-      () => analytics.fetchAll(),
-      REFRESH_INTERVAL_MS,
-    );
-    unsubEvents = events.subscribeDebounced(
-      () => analytics.fetchAll(),
-    );
+    // The URL-date effect owns the initial load so deep links and stored yoke
+    // ranges are applied before the first analytics request. RefreshControl
+    // handles the periodic refresh after that. SSE events only flag new data --
+    // refetching on every event would thrash the aggregation -- so refetching
+    // stays bounded to the RefreshControl scheduler and its manual button.
+    unsubEvents = events.subscribe(() => analytics.markNewData());
   });
 
   // Sync sidebar filters to analytics dashboard. Runs whenever
@@ -58,7 +308,9 @@
   // so that local drill-downs don't re-trigger.
   $effect(() => {
     const headerProject = sessions.filters.project;
+    const headerMachine = sessions.filters.machine;
     const headerAgent = sessions.filters.agent;
+    const headerTermination = sessions.filters.termination;
     const headerRecentlyActive = sessions.filters.recentlyActive;
     const headerMinUserMessages =
       sessions.filters.minUserMessages;
@@ -68,7 +320,9 @@
       sessions.filters.includeAutomated;
 
     const curProject = untrack(() => analytics.project);
+    const curMachine = untrack(() => analytics.machine);
     const curAgent = untrack(() => analytics.agent);
+    const curTermination = untrack(() => analytics.termination);
     const curRecentlyActive = untrack(
       () => analytics.recentlyActive,
     );
@@ -81,14 +335,25 @@
     const curIncludeAutomated = untrack(
       () => analytics.includeAutomated,
     );
+    const curAutomatedScope = untrack(
+      () => analytics.automatedScope,
+    );
 
     let changed = false;
     if (curProject !== headerProject) {
       analytics.project = headerProject;
       changed = true;
     }
+    if (curMachine !== headerMachine) {
+      analytics.machine = headerMachine;
+      changed = true;
+    }
     if (curAgent !== headerAgent) {
       analytics.agent = headerAgent;
+      changed = true;
+    }
+    if (curTermination !== headerTermination) {
+      analytics.termination = headerTermination;
       changed = true;
     }
 
@@ -114,15 +379,128 @@
       analytics.includeAutomated = headerIncludeAutomated;
       changed = true;
     }
+    const headerAutomatedScope = headerIncludeAutomated
+      ? "all"
+      : "human";
+    if (curAutomatedScope !== headerAutomatedScope) {
+      analytics.automatedScope = headerAutomatedScope;
+      changed = true;
+    }
 
-    if (changed) {
+    if (changed && analyticsDateUrlInitComplete) {
       untrack(() => analytics.fetchAll());
     }
   });
 
+  $effect(() => {
+    const route = router.route;
+    const params = router.params;
+    const earliestSession = sync.stats?.earliest_session ?? undefined;
+    untrack(() => {
+      if (route !== "sessions") return;
+
+      const fixedState = sessionParamsToPanelDate(params, {
+        earliest: earliestSession,
+      });
+      const hasDateParams = hasSessionDateParams(params);
+      const windowDays = parseSessionAnalyticsWindowDays(
+        params[SESSION_ANALYTICS_WINDOW_PARAM],
+      );
+      let state: PanelDateState | null = null;
+
+      if (windowDays !== null) {
+        state = rollingPanelDate(windowDays);
+      } else {
+        state = fixedState;
+      }
+
+      const firstRun = !analyticsDateUrlInitRan;
+      const dateSignature = sessionAnalyticsDateUrlSignature(
+        params,
+        state,
+      );
+      const dateChanged = firstRun ||
+        lastAnalyticsDateUrlSignature !== dateSignature;
+
+      if (!state) {
+        if (hasDateParams) {
+          if (firstRun) {
+            analytics.fetchAll();
+          }
+          lastAnalyticsDateUrlSignature = dateSignature;
+          analyticsDateUrlInitRan = true;
+          analyticsDateUrlInitComplete = true;
+          return;
+        }
+        let changed = false;
+        if (firstRun) {
+          const seed = yokedDates.seedForPanel();
+          const retained = seed
+            ? null
+            : analyticsPageDates.restoreWithIntent("sessions");
+          state = seed
+            ? rangeToPanelDate(seed)
+            : retained?.state ?? null;
+          sessionDateIntentEstablished = seed !== null ||
+            retained?.explicitDateIntent === true;
+          if (state) {
+            changed = applyAnalyticsPanelDate(state);
+            if (sessionDateIntentEstablished) {
+              writeSessionDateParams(state);
+            }
+          }
+        } else if (dateChanged && sessionDateFiltersAreClear()) {
+          sessionDateIntentEstablished = false;
+          yokedDates.clear();
+        } else if (dateChanged) {
+          sessionDateIntentEstablished = true;
+          state = rollingPanelDate(analytics.windowDays);
+          if (state) {
+            changed = applyAnalyticsPanelDate(state);
+            const sessionChanged =
+              syncSessionFiltersForDateState(state);
+            yokedDates.updateFromPanel(state);
+            if (sessionChanged) sessions.load();
+          }
+        }
+        if (changed || firstRun) {
+          analytics.fetchAll();
+        }
+        lastAnalyticsDateUrlSignature = dateSignature;
+        analyticsDateUrlInitRan = true;
+        analyticsDateUrlInitComplete = true;
+        return;
+      }
+
+      let changed = false;
+      let sessionChanged = false;
+      if (dateChanged) {
+        sessionDateIntentEstablished = true;
+        changed = applyAnalyticsPanelDate(state);
+        sessionChanged = syncSessionFiltersForDateState(state);
+        yokedDates.updateFromPanel(state);
+      }
+      if (changed || firstRun) {
+        analytics.fetchAll();
+      }
+      if (sessionChanged && !firstRun) {
+        sessions.load();
+      }
+      lastAnalyticsDateUrlSignature = dateSignature;
+      analyticsDateUrlInitRan = true;
+      analyticsDateUrlInitComplete = true;
+    });
+  });
+
   onDestroy(() => {
-    if (refreshTimer !== undefined) {
-      clearInterval(refreshTimer);
+    analytics.cancelInFlightReads();
+    const state = currentAnalyticsPanelDate();
+    if (state) {
+      analyticsPageDates.retain(
+        "sessions",
+        state,
+        sessionDateIntentEstablished,
+      );
     }
     unsubEvents?.();
   });
@@ -130,69 +508,104 @@
 
 <div class="analytics-page">
   <div class="analytics-toolbar">
-    <DateRangePicker />
-    <button
-      class="refresh-btn"
-      onclick={() => analytics.fetchAll()}
-      title="Refresh analytics"
-      aria-label="Refresh analytics"
-    >
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M8 3a5 5 0 00-4.546 2.914.5.5 0 01-.908-.418A6 6 0 0114 8a.5.5 0 01-1 0 5 5 0 00-5-5zm4.546 7.086a.5.5 0 01.908.418A6 6 0 012 8a.5.5 0 011 0 5 5 0 005 5 5 5 0 004.546-2.914z"/>
-      </svg>
-    </button>
+    {#if !ui.sidebarOpen}
+      <div class="toolbar-filter-anchor">
+        <SessionFilterControl
+          showDisplay={false}
+          showStarred={false}
+          align="left"
+        />
+      </div>
+    {/if}
+
+    <RangePicker
+      selection={rangeSelection}
+      busy={analytics.isQuerying}
+      {earliestSession}
+      onSelect={applyRange}
+    />
+    <RefreshControl
+      lastUpdatedAt={analytics.lastUpdatedAt}
+      busy={analytics.isQuerying}
+      onRefresh={refreshAnalytics}
+      label={m.analytics_refresh()}
+    />
+    <FilterDropdown
+      label={m.analytics_model()}
+      items={modelItems}
+      excludedCsv={analytics.model}
+      mode="include"
+      onToggle={(name) => analytics.toggleModel(name)}
+      onSelectAll={() => analytics.clearModel()}
+    />
     <button class="export-btn" onclick={handleExportCSV}>
-      Export CSV
+      {m.analytics_export_csv()}
     </button>
   </div>
 
   <ActiveFilters />
 
-  <div class="analytics-content">
+  <div
+    class="analytics-content"
+    class:querying={analytics.isQuerying}
+    aria-busy={analytics.isQuerying}
+  >
+    {#if analytics.isQuerying}
+      <div class="query-progress" aria-hidden="true"></div>
+    {/if}
+
     <SummaryCards />
 
     <div class="chart-grid">
-      <div class="chart-panel wide">
+      <Card level="default" padding="none" class="chart-panel wide">
         <Heatmap />
-      </div>
+      </Card>
 
-      <div class="chart-panel">
+      <Card level="default" padding="none" class="chart-panel">
         <div class="chart-header">
           <h3 class="chart-title">
-            Activity by Day and Hour
+            {m.analytics_activity_by_day_hour()}
             <span class="tz-label">
               {shortTz(analytics.timezone)}
             </span>
           </h3>
         </div>
-        <ActivityTimeline />
+        <ActivityTimeline onDateRangeChange={handleDateRangeChange} />
         <div class="chart-divider"></div>
         <HourOfWeekHeatmap />
-      </div>
+      </Card>
 
-      <div class="chart-panel">
+      <Card level="default" padding="none" class="chart-panel">
         <TopSessions />
-      </div>
+      </Card>
 
-      <div class="chart-panel wide">
+      <Card level="default" padding="none" class="chart-panel wide">
         <ProjectBreakdown />
-      </div>
+      </Card>
 
-      <div class="chart-panel">
+      <Card level="default" padding="none" class="chart-panel">
         <SessionShape />
-      </div>
+      </Card>
 
-      <div class="chart-panel">
+      <Card level="default" padding="none" class="chart-panel">
         <ToolUsage />
-      </div>
+      </Card>
 
-      <div class="chart-panel wide">
+      <Card level="default" padding="none" class="chart-panel wide">
+        <TopSkills />
+      </Card>
+
+      <Card level="default" padding="none" class="chart-panel wide">
+        <SkillTrend />
+      </Card>
+
+      <Card level="default" padding="none" class="chart-panel wide">
         <VelocityMetrics />
-      </div>
+      </Card>
 
-      <div class="chart-panel wide">
+      <Card level="default" padding="none" class="chart-panel wide">
         <AgentComparison />
-      </div>
+      </Card>
     </div>
 
     <SessionHealthSection />
@@ -217,20 +630,10 @@
     flex-shrink: 0;
   }
 
-  .refresh-btn {
-    width: 28px;
-    height: 28px;
+  .toolbar-filter-anchor {
+    position: relative;
     display: flex;
     align-items: center;
-    justify-content: center;
-    border-radius: var(--radius-sm);
-    color: var(--text-muted);
-    cursor: pointer;
-  }
-
-  .refresh-btn:hover {
-    background: var(--bg-surface-hover);
-    color: var(--text-primary);
   }
 
   .export-btn {
@@ -257,6 +660,37 @@
     display: flex;
     flex-direction: column;
     gap: 16px;
+    position: relative;
+    transition: opacity 0.12s;
+  }
+
+  .analytics-content.querying {
+    opacity: 0.88;
+  }
+
+  .query-progress {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 4;
+    height: 2px;
+    overflow: hidden;
+    background: color-mix(
+      in srgb,
+      var(--accent-blue) 16%,
+      transparent
+    );
+  }
+
+  .query-progress::before {
+    content: "";
+    display: block;
+    width: 38%;
+    height: 100%;
+    background: var(--accent-blue);
+    border-radius: 999px;
+    animation: query-progress 1s ease-in-out infinite;
   }
 
   .chart-grid {
@@ -265,19 +699,21 @@
     gap: 12px;
   }
 
-  .chart-panel {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-muted);
-    border-radius: var(--radius-md);
+  .chart-grid :global(.chart-panel) {
     padding: 12px;
     min-height: 200px;
     min-width: 0;
     overflow-x: hidden;
     display: flex;
     flex-direction: column;
+    gap: 0;
   }
 
-  .chart-panel.wide {
+  .chart-grid :global(.chart-panel > .kit-card__body) {
+    display: contents;
+  }
+
+  .chart-grid :global(.chart-panel.wide) {
     grid-column: 1 / -1;
   }
 
@@ -307,9 +743,18 @@
     margin: 12px 0;
   }
 
-  @media (max-width: 800px) {
+  @media (max-width: 760px) {
     .chart-grid {
       grid-template-columns: 1fr;
+    }
+  }
+
+  @keyframes query-progress {
+    0% {
+      transform: translateX(-105%);
+    }
+    100% {
+      transform: translateX(265%);
     }
   }
 </style>

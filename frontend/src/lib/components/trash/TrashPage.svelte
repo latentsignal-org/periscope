@@ -1,33 +1,57 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { EmptyState } from "@kenn-io/kit-ui";
+  import { m } from "../../i18n/index.js";
+  import { TrashIcon } from "../../icons.js";
+  import { onDestroy, onMount } from "svelte";
   import type { Session } from "../../api/types.js";
-  import * as api from "../../api/client.js";
+  import { SessionsService } from "../../api/generated/index";
+  import {
+    callGenerated,
+    configureGeneratedClient,
+    isAbortError,
+  } from "../../api/runtime.js";
   import { sessions } from "../../stores/sessions.svelte.js";
   import { formatRelativeTime, truncate } from "../../utils/format.js";
-
+  import { normalizeMessagePreview } from "../../utils/messages.js";
+  import { LatestRead } from "../../utils/latest-read.js";
   let trashedSessions: Session[] = $state([]);
   let loading = $state(true);
   let emptying = $state(false);
+  const trashRead = new LatestRead();
+
+  interface TrashResponse {
+    sessions: Session[];
+  }
 
   onMount(() => {
     loadTrash();
   });
 
   async function loadTrash() {
+    const signal = trashRead.begin();
     loading = true;
     try {
-      const res = await api.listTrash();
+      configureGeneratedClient();
+      const res = await callGenerated(
+        () => SessionsService.getApiV1Trash(),
+        signal,
+      ) as unknown as TrashResponse;
+      if (!trashRead.isCurrent(signal)) return;
       trashedSessions = res.sessions ?? [];
-    } catch {
+    } catch (e) {
+      if (isAbortError(e) || !trashRead.isCurrent(signal)) return;
       // Silently ignore — page will show empty state.
     } finally {
-      loading = false;
+      if (trashRead.finish(signal)) loading = false;
     }
   }
 
+  onDestroy(() => trashRead.cancel());
+
   async function restoreSession(id: string) {
     try {
-      await api.restoreSession(id);
+      configureGeneratedClient();
+      await SessionsService.postApiV1SessionsIdRestore({ id });
       trashedSessions = trashedSessions.filter((s) => s.id !== id);
       sessions.clearRecentlyDeleted(id);
       sessions.invalidateFilterCaches();
@@ -39,7 +63,8 @@
 
   async function permanentDelete(id: string) {
     try {
-      await api.permanentDeleteSession(id);
+      configureGeneratedClient();
+      await SessionsService.deleteApiV1SessionsIdPermanent({ id });
       trashedSessions = trashedSessions.filter((s) => s.id !== id);
       sessions.clearRecentlyDeleted(id);
       sessions.invalidateFilterCaches();
@@ -51,7 +76,8 @@
   async function emptyAll() {
     emptying = true;
     try {
-      await api.emptyTrash();
+      configureGeneratedClient();
+      await SessionsService.deleteApiV1Trash();
       trashedSessions = [];
       sessions.clearRecentlyDeleted();
       sessions.invalidateFilterCaches();
@@ -63,47 +89,34 @@
   }
 
   function displayName(s: Session): string {
-    return s.display_name ?? s.first_message
-      ? truncate(s.display_name ?? s.first_message ?? "", 70)
-      : s.project;
+    const raw = s.display_name ?? normalizeMessagePreview(s.first_message);
+    return raw ? truncate(raw, 70) : s.project;
   }
 </script>
 
 <div class="trash-page">
-  <div class="trash-header">
-    <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" class="trash-icon">
-      <path d="M5.5 5.5A.5.5 0 016 6v6a.5.5 0 01-1 0V6a.5.5 0 01.5-.5zm2.5 0a.5.5 0 01.5.5v6a.5.5 0 01-1 0V6a.5.5 0 01.5-.5zm3 .5a.5.5 0 00-1 0v6a.5.5 0 001 0V6z"/>
-      <path fill-rule="evenodd" d="M14.5 3a1 1 0 01-1 1H13v9a2 2 0 01-2 2H5a2 2 0 01-2-2V4h-.5a1 1 0 01-1-1V2a1 1 0 011-1H5.5l1-1h3l1 1h2.5a1 1 0 011 1v1zM4.118 4L4 4.059V13a1 1 0 001 1h6a1 1 0 001-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-    </svg>
-    <h2>Trash</h2>
-    {#if trashedSessions.length > 0}
+  {#if loading}
+    <div class="loading-state">{m.trash_loading()}</div>
+  {:else if trashedSessions.length === 0}
+    <EmptyState title={m.trash_empty()} description={m.trash_empty_desc()}>
+      {#snippet icon()}
+        <TrashIcon size="40" strokeWidth="1.6" aria-hidden="true" />
+      {/snippet}
+    </EmptyState>
+  {:else}
+    <div class="trash-header">
+      <TrashIcon size="18" strokeWidth="2" class="trash-icon" aria-hidden="true" />
+      <h2>{m.trash_title()}</h2>
       <span class="trash-count">{trashedSessions.length}</span>
       <button
         class="empty-all-btn"
         onclick={emptyAll}
         disabled={emptying}
       >
-        {emptying ? "Emptying..." : "Empty Trash"}
+        {emptying ? m.trash_emptying() : m.trash_empty_trash()}
       </button>
-    {/if}
-  </div>
-
-  <p class="trash-desc">
-    Deleted sessions are kept until you permanently delete them or empty the trash.
-  </p>
-
-  {#if loading}
-    <div class="loading-state">Loading trash...</div>
-  {:else if trashedSessions.length === 0}
-    <div class="empty-state">
-      <svg width="40" height="40" viewBox="0 0 16 16" fill="currentColor" class="empty-icon">
-        <path d="M5.5 5.5A.5.5 0 016 6v6a.5.5 0 01-1 0V6a.5.5 0 01.5-.5zm2.5 0a.5.5 0 01.5.5v6a.5.5 0 01-1 0V6a.5.5 0 01.5-.5zm3 .5a.5.5 0 00-1 0v6a.5.5 0 001 0V6z"/>
-        <path fill-rule="evenodd" d="M14.5 3a1 1 0 01-1 1H13v9a2 2 0 01-2 2H5a2 2 0 01-2-2V4h-.5a1 1 0 01-1-1V2a1 1 0 011-1H5.5l1-1h3l1 1h2.5a1 1 0 011 1v1zM4.118 4L4 4.059V13a1 1 0 001 1h6a1 1 0 001-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
-      </svg>
-      <p class="empty-title">Trash is empty</p>
-      <p class="empty-desc-text">Deleted sessions will appear here.</p>
     </div>
-  {:else}
+
     <div class="trash-list">
       {#each trashedSessions as session (session.id)}
         <div class="trash-card">
@@ -112,9 +125,12 @@
             <div class="trash-card-meta">
               <span class="trash-agent">{session.agent}</span>
               <span class="trash-project">{session.project}</span>
-              <span class="trash-msgs">{session.user_message_count} msgs</span>
+              <span class="trash-msgs">{m.trash_msgs({
+                count: session.user_message_count,
+                countLabel: session.user_message_count.toLocaleString(),
+              })}</span>
               {#if session.deleted_at}
-                <span class="trash-deleted">deleted {formatRelativeTime(session.deleted_at)}</span>
+                <span class="trash-deleted">{m.trash_deleted_ago({ time: formatRelativeTime(session.deleted_at) })}</span>
               {/if}
             </div>
           </div>
@@ -122,16 +138,16 @@
             <button
               class="restore-btn"
               onclick={() => restoreSession(session.id)}
-              title="Restore session"
+              title={m.trash_restore_session()}
             >
-              Restore
+              {m.trash_restore()}
             </button>
             <button
               class="perm-delete-btn"
               onclick={() => permanentDelete(session.id)}
-              title="Permanently delete"
+              title={m.trash_permanently_delete()}
             >
-              Delete Forever
+              {m.trash_delete_forever()}
             </button>
           </div>
         </div>
@@ -150,11 +166,11 @@
   .trash-header {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: var(--space-4);
     margin-bottom: 8px;
   }
 
-  .trash-icon {
+  :global(.trash-icon) {
     color: var(--text-muted);
   }
 
@@ -172,12 +188,6 @@
     font-weight: 600;
     padding: 1px 7px;
     border-radius: 10px;
-  }
-
-  .trash-desc {
-    font-size: 12px;
-    color: var(--text-muted);
-    margin-bottom: 24px;
   }
 
   .empty-all-btn {
@@ -202,29 +212,6 @@
     color: var(--text-muted);
     padding: 40px 0;
     font-size: 13px;
-  }
-
-  .empty-state {
-    text-align: center;
-    padding: 60px 20px;
-    color: var(--text-muted);
-  }
-
-  .empty-icon {
-    opacity: 0.15;
-    margin-bottom: 16px;
-  }
-
-  .empty-title {
-    font-size: 16px;
-    font-weight: 500;
-    color: var(--text-secondary);
-    margin: 0 0 6px;
-  }
-
-  .empty-desc-text {
-    font-size: 13px;
-    margin: 0;
   }
 
   .trash-list {

@@ -3,10 +3,9 @@ package server
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
-	"github.com/wesm/agentsview/internal/db"
+	"go.kenn.io/agentsview/internal/db"
 )
 
 // readOnlyUsageSpy stubs the Store interface and returns
@@ -35,6 +34,12 @@ func (readOnlyUsageSpy) GetUsageSessionCounts(
 	return db.UsageSessionCounts{}, db.ErrReadOnly
 }
 
+func (readOnlyUsageSpy) GetUsageMatchingSessionCount(
+	_ context.Context, _ db.UsageFilter,
+) (int, error) {
+	return 0, db.ErrReadOnly
+}
+
 // TestUsageHandlers_ReturnNotImplementedOnReadOnlyStore locks
 // in the Postgres-backend contract: when the underlying Store
 // reports a usage query as unavailable (db.ErrReadOnly), both
@@ -44,39 +49,32 @@ func (readOnlyUsageSpy) GetUsageSessionCounts(
 func TestUsageHandlers_ReturnNotImplementedOnReadOnlyStore(
 	t *testing.T,
 ) {
-	s := &Server{db: readOnlyUsageSpy{}}
+	s := newRoutedTestServerWithStore(t, readOnlyUsageSpy{})
 
 	cases := []struct {
-		name    string
-		path    string
-		handler func(http.ResponseWriter, *http.Request)
+		name string
+		path string
 	}{
 		{
 			name: "summary",
 			path: "/api/v1/usage/summary?" +
 				"from=2024-06-01&to=2024-06-03",
-			handler: s.handleUsageSummary,
 		},
 		{
 			name: "top-sessions",
 			path: "/api/v1/usage/top-sessions?" +
 				"from=2024-06-01&to=2024-06-03",
-			handler: s.handleUsageTopSessions,
+		},
+		{
+			name: "pairwise",
+			path: "/api/v1/usage/pairwise-comparison?" +
+				"from=2024-06-01&to=2024-06-03&left_dimension=model&left_value=claude-sonnet-4-20250514&right_dimension=project&right_value=beta",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(
-				http.MethodGet, tc.path, nil,
-			)
-			w := httptest.NewRecorder()
-			tc.handler(w, req)
-			if w.Code != http.StatusNotImplemented {
-				t.Errorf(
-					"status = %d, want 501; body=%s",
-					w.Code, w.Body.String(),
-				)
-			}
+			w := serveGet(t, s, tc.path)
+			assertRecorderStatus(t, w, http.StatusNotImplemented)
 		})
 	}
 }

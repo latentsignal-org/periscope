@@ -24,17 +24,28 @@ jobs:
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+      - name: Trust git checkout
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git status --short >/dev/null
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version-file: go.mod
 
-      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: "24"
+
+      - name: Download Go modules
+        shell: bash
+        run: bash scripts/retry.sh 3 10 go mod download
 
       - name: Build frontend
         run: npm ci && npm run build
@@ -45,6 +56,9 @@ jobs:
         run: |
           rm -rf internal/web/dist
           cp -r frontend/dist internal/web/dist
+
+      - name: Restore pricing snapshot
+        run: go run ./internal/pricing/cmd/litellm-snapshot -restore
 
       - name: Build
         shell: bash
@@ -57,17 +71,29 @@ jobs:
           COMMIT=${GITHUB_SHA::8}
           BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+          # sqlite-vec's cgo bindings #include "sqlite3.h". The manylinux
+          # image has no SQLite headers, and AlmaLinux 8's sqlite-devel
+          # (3.26) is old enough that sqlite-vec would silently compile out
+          # its vtab_in support. Use the header of the exact amalgamation
+          # bundled and statically linked by mattn/go-sqlite3.
+          # "-O2 -g" restates Go's built-in default, which setting
+          # CGO_CFLAGS would otherwise replace, leaving the SQLite
+          # amalgamation unoptimized (2-3x slower queries).
+          mkdir -p .sqlite-include
+          cp "$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3)/sqlite3-binding.h" .sqlite-include/sqlite3.h
+          export CGO_CFLAGS="-O2 -g -I${PWD}/.sqlite-include"
+
           mkdir -p dist
           LDFLAGS="-s -w -X main.version=v${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}"
           go build -tags fts5 -buildvcs=false -ldflags="$LDFLAGS" -trimpath \
-            -o dist/agentsview ./cmd/agentsview
+            -o dist/periscope ./cmd/periscope
 
           # Smoke test (native builds — no cross-compilation)
-          ./dist/agentsview --version
+          ./dist/periscope --version
 
           # Verify glibc compatibility
           MAX_GLIBC="GLIBC_2.28"
-          HIGHEST=$(objdump -T dist/agentsview | grep -oP 'GLIBC_\d+\.\d+' | sort -t. -k1,1n -k2,2n | tail -1)
+          HIGHEST=$(objdump -T dist/periscope | grep -oP 'GLIBC_\d+\.\d+' | sort -t. -k1,1n -k2,2n | tail -1)
           echo "Highest glibc symbol: $HIGHEST (max allowed: $MAX_GLIBC)"
           if [ "$(printf '%s\n%s' "$MAX_GLIBC" "$HIGHEST" | sort -t. -k1,1n -k2,2n | tail -1)" != "$MAX_GLIBC" ]; then
             echo "ERROR: Binary requires $HIGHEST but wheel claims $MAX_GLIBC"
@@ -75,13 +101,13 @@ jobs:
           fi
 
           cd dist
-          ARCHIVE="agentsview_${VERSION}_linux_${{ matrix.goarch }}.tar.gz"
-          tar czf "$ARCHIVE" agentsview
-          rm agentsview
+          ARCHIVE="periscope_${VERSION}_linux_${{ matrix.goarch }}.tar.gz"
+          tar czf "$ARCHIVE" periscope
+          rm periscope
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: agentsview-linux-${{ matrix.goarch }}
+          name: periscope-linux-${{ matrix.goarch }}
           path: dist/*.tar.gz
 
   build:
@@ -98,20 +124,28 @@ jobs:
           - os: windows-latest
             goos: windows
             goarch: amd64
+          - os: windows-11-arm
+            goos: windows
+            goarch: arm64
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version-file: go.mod
 
-      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f  # v6.3.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: "24"
+
+      - name: Download Go modules
+        shell: bash
+        run: bash scripts/retry.sh 3 10 go mod download
 
       - name: Build frontend
         run: npm ci && npm run build
@@ -123,14 +157,50 @@ jobs:
           rm -rf internal/web/dist
           cp -r frontend/dist internal/web/dist
 
-      - name: Setup MinGW (Windows)
-        if: matrix.goos == 'windows'
-        uses: msys2/setup-msys2@cafece8e6baf9247cf9b1bf95097b0b983cc558d  # v2
+      - name: Restore pricing snapshot
+        run: go run ./internal/pricing/cmd/litellm-snapshot -restore
+
+      - name: Setup MinGW (Windows amd64)
+        if: matrix.goos == 'windows' && matrix.goarch == 'amd64'
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2
         with:
           msystem: MINGW64
           update: false
           install: mingw-w64-x86_64-gcc
           path-type: inherit
+
+      - name: Setup llvm-mingw (Windows arm64)
+        if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
+        shell: pwsh
+        env:
+          # Self-contained aarch64 mingw clang toolchain (clang + runtime +
+          # lld). cgo (mattn/go-sqlite3) needs a C compiler; no Visual
+          # Studio / Windows SDK required. Pinned to a version + SHA256 for
+          # reproducibility and supply-chain integrity.
+          LLVM_MINGW_VERSION: "20260602"
+          LLVM_MINGW_NAME: llvm-mingw-20260602-ucrt-aarch64
+          LLVM_MINGW_SHA256: cb5c20fbe1808e31ada5cbe4efd9daa2fee19c91dac6ec5ca1ac46a9c7247e37
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'llvm-mingw.zip'
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW_VERSION/$env:LLVM_MINGW_NAME.zip"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          # Verify the archive against the pinned SHA256 before extracting or
+          # executing any of it, so a swapped or compromised upstream asset
+          # fails the build instead of producing a trojaned binary.
+          $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash
+          if ($actual -ne $env:LLVM_MINGW_SHA256) {
+            throw "Checksum mismatch for $url`n  expected $env:LLVM_MINGW_SHA256`n  actual   $actual"
+          }
+          # 7-Zip is preinstalled on the runner image and extracts faster
+          # than Expand-Archive for this many files.
+          7z x $zip -o"$env:RUNNER_TEMP" | Out-Null
+          $bin = Join-Path $env:RUNNER_TEMP "$env:LLVM_MINGW_NAME\bin"
+          $cc = Join-Path $bin 'aarch64-w64-mingw32-clang.exe'
+          if (-not (Test-Path $cc)) { throw "CC not found at $cc" }
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+          Add-Content -Path $env:GITHUB_ENV -Value "CC=$cc"
 
       - name: Build
         shell: bash
@@ -149,16 +219,16 @@ jobs:
           mkdir -p dist
           LDFLAGS="-s -w -X main.version=v${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}"
           go build -tags fts5 -ldflags="$LDFLAGS" -trimpath \
-            -o dist/agentsview${EXT} ./cmd/agentsview
+            -o dist/periscope${EXT} ./cmd/periscope
 
           # Smoke test (skip cross-compiled darwin/amd64 on ARM runner)
           if [ "$GOARCH" = "$(go env GOHOSTARCH)" ]; then
-            ./dist/agentsview${EXT} --version
+            ./dist/periscope${EXT} --version
           fi
 
           # Verify macOS deployment target
           if [ "$GOOS" = "darwin" ]; then
-            MINOS=$(otool -l dist/agentsview | grep -A3 LC_BUILD_VERSION | grep minos | awk '{print $2}')
+            MINOS=$(otool -l dist/periscope | grep -A3 LC_BUILD_VERSION | grep minos | awk '{print $2}')
             echo "Minimum macOS version: $MINOS"
             if [ "$MINOS" != "11.0" ]; then
               echo "ERROR: Expected minos 11.0, got $MINOS"
@@ -168,17 +238,17 @@ jobs:
 
           cd dist
           if [ "$GOOS" = "windows" ]; then
-            ARCHIVE="agentsview_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
-            7z a "$ARCHIVE" agentsview${EXT}
+            ARCHIVE="periscope_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+            7z a "$ARCHIVE" periscope${EXT}
           else
-            ARCHIVE="agentsview_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
-            tar czf "$ARCHIVE" agentsview${EXT}
+            ARCHIVE="periscope_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+            tar czf "$ARCHIVE" periscope${EXT}
           fi
-          rm agentsview${EXT}
+          rm periscope${EXT}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: agentsview-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: periscope-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
             dist/*.tar.gz
             dist/*.zip
@@ -189,7 +259,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
 
@@ -229,7 +299,7 @@ jobs:
           fi
 
       - name: Create Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b  # v3.0.1
         with:
           files: |
             artifacts/*.tar.gz
@@ -246,13 +316,13 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
@@ -272,8 +342,9 @@ jobs:
       - name: Smoke test wheel
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          pip install wheels/agentsview-${VERSION}-py3-none-manylinux_2_28_x86_64.whl
-          agentsview --version
+          WHL_VERSION=$(python3 -c "import re,sys; v='${VERSION}'; m=re.match(r'^(\d+\.\d+\.\d+)-(.+)$',v); print(m.group(1)+'+'+m.group(2).replace('-','.')if m else v)")
+          pip install "wheels/periscope_agentsview-${WHL_VERSION}-py3-none-manylinux_2_28_x86_64.whl"
+          periscope --version
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0

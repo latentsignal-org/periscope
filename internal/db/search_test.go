@@ -4,7 +4,132 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestIsSystemPrefixed(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		content string
+		role    string
+		want    bool
+	}{
+		{"plain user message", "fix the build", "user", false},
+		{"continued-session prefix", SystemMsgPrefixes[0] + " from a prior run", "user", true},
+		{"task-notification prefix", "<task-notification>done</task-notification>", "user", true},
+		{"system-reminder only", "<system-reminder>remember</system-reminder>", "user", true},
+		{"consecutive reminders only", "<system-reminder>a</system-reminder><system-reminder>b</system-reminder>", "user", true},
+		{"reminder then task notification", "<system-reminder>remember</system-reminder><task-notification>done</task-notification>", "user", true},
+		{"reminder then goal context", "<system-reminder>remember</system-reminder><goal_context>state</goal_context>", "user", true},
+		{"system-reminder plus prompt", "<system-reminder>remember</system-reminder>\n\nreal prompt", "user", false},
+		{"malformed reminder stays user content", "<system-reminder>remember", "user", false},
+		{"leading whitespace then prefix", "\n\t  <command-name>/foo", "user", true},
+		{"bom then prefix", "\uFEFF<command-message>x", "user", true},
+		{"legacy goal context prefix", "\n\t<goal_context>state</goal_context>", "user", true},
+		{"codex internal goal context prefix", `<codex_internal_context source="goal">state`, "user", true},
+		{"codex goal context with attr before source", `<codex_internal_context foo="bar" source="goal">state`, "user", true},
+		{"codex goal context with attr after source", `<codex_internal_context source="goal" foo="bar">state`, "user", true},
+		{"codex non-goal internal context", `<codex_internal_context source="other">state`, "user", false},
+		{"codex data-source attr is not goal", `<codex_internal_context data-source="goal">state`, "user", false},
+		{"assistant role is never system-prefixed", SystemMsgPrefixes[0], "assistant", false},
+		{"prefix mid-content does not match", "see <task-notification> later", "user", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, IsSystemPrefixed(tc.content, tc.role))
+		})
+	}
+	assert.NotContains(t, SystemMsgPrefixes, "<task-notification-status>")
+}
+
+func TestIsGoalContextPrefixed(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		content string
+		role    string
+		want    bool
+	}{
+		{"legacy wrapper", "<goal_context>state</goal_context>", "user", true},
+		{"legacy wrapper with whitespace", "\n\t<goal_context>state", "user", true},
+		{"current wrapper", `<codex_internal_context source="goal">state`, "user", true},
+		{"current wrapper with extra attrs", `<codex_internal_context foo="bar" source="goal">state`, "user", true},
+		{"current wrapper with attrs after source", `<codex_internal_context source="goal" foo="bar">state`, "user", true},
+		{"current wrapper with newline before source", "<codex_internal_context\nsource=\"goal\">state", "user", true},
+		{"non goal internal context", `<codex_internal_context source="other">state`, "user", false},
+		{"data-source attr is not goal", `<codex_internal_context data-source="goal">state`, "user", false},
+		{"missing closing tag delimiter", `<codex_internal_context source="goal" state`, "user", false},
+		{"non goal prefix", "This session is being continued from a previous run", "user", false},
+		{"assistant role ignored", "<goal_context>state</goal_context>", "assistant", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, IsGoalContextPrefixed(tc.content, tc.role))
+		})
+	}
+}
+
+func TestSystemPrefixSQL(t *testing.T) {
+	postgresSQL := PostgresSystemPrefixSQL("content", "role")
+	assert.Contains(t, postgresSQL, "POSITION('</system-reminder>' IN")
+	assert.Contains(t, postgresSQL, "WITH RECURSIVE reminder_remainder")
+	assert.NotContains(t, postgresSQL, "instr(")
+
+	d := testDB(t)
+	rows, err := d.getReader().QueryContext(context.Background(), `
+		WITH candidates(label, role, content) AS (
+			VALUES
+				('normal', 'user', 'regular message'),
+				('assistant-goal', 'assistant', '<codex_internal_context source="goal">state'),
+				('legacy-goal', 'user', '<goal_context>state</goal_context>'),
+				('current-goal', 'user', '<codex_internal_context source="goal">state'),
+				('attr-before-source', 'user', '<codex_internal_context foo="bar" source="goal">state'),
+				('attr-after-source', 'user', '<codex_internal_context source="goal" foo="bar">state'),
+				('newline-before-source', 'user', '<codex_internal_context
+source="goal">state'),
+				('self-closing-goal', 'user', '<codex_internal_context source="goal"/>state'),
+				('non-goal-internal', 'user', '<codex_internal_context source="other">state'),
+				('data-source', 'user', '<codex_internal_context data-source="goal">state'),
+				('missing-close', 'user', '<codex_internal_context source="goal" state'),
+				('reminder-only', 'user', '<system-reminder>remember</system-reminder>'),
+				('reminder-plus-prompt', 'user', '<system-reminder>remember</system-reminder>
+
+real prompt'),
+				('reminder-reminder-only', 'user', '<system-reminder>a</system-reminder><system-reminder>b</system-reminder>'),
+				('reminder-task', 'user', '<system-reminder>remember</system-reminder><task-notification>done</task-notification>'),
+				('reminder-goal', 'user', '<system-reminder>remember</system-reminder><goal_context>state</goal_context>'),
+				('reminder-ordinary', 'user', '<system-reminder>remember</system-reminder>real prompt'),
+				('reminder-malformed', 'user', '<system-reminder>remember')
+		)
+		SELECT label FROM candidates
+		WHERE `+SystemPrefixSQL("content", "role")+`
+		ORDER BY label`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var got []string
+	for rows.Next() {
+		var label string
+		require.NoError(t, rows.Scan(&label))
+		got = append(got, label)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []string{
+		"assistant-goal",
+		"data-source",
+		"missing-close",
+		"non-goal-internal",
+		"normal",
+		"reminder-malformed",
+		"reminder-ordinary",
+		"reminder-plus-prompt",
+	}, got)
+}
 
 func TestSearch(t *testing.T) {
 	d := testDB(t)
@@ -14,26 +139,26 @@ func TestSearch(t *testing.T) {
 	insertSession(t, d, "s1", "proj-a",
 		func(s *Session) {
 			s.Agent = "claude"
-			s.FirstMessage = Ptr("alpha beta gamma")
-			s.StartedAt = Ptr("2024-01-01T10:00:00Z")
-			s.EndedAt = Ptr("2024-01-01T11:00:00Z")
+			s.FirstMessage = new("alpha beta gamma")
+			s.StartedAt = new("2024-01-01T10:00:00Z")
+			s.EndedAt = new("2024-01-01T11:00:00Z")
 		},
 	)
 	// Session s2: newer ended_at, agent "codex"
 	insertSession(t, d, "s2", "proj-b",
 		func(s *Session) {
 			s.Agent = "codex"
-			s.FirstMessage = Ptr("alpha delta epsilon")
-			s.StartedAt = Ptr("2024-01-02T10:00:00Z")
-			s.EndedAt = Ptr("2024-01-02T11:00:00Z")
+			s.FirstMessage = new("alpha delta epsilon")
+			s.StartedAt = new("2024-01-02T10:00:00Z")
+			s.EndedAt = new("2024-01-02T11:00:00Z")
 		},
 	)
 	// Session s3: system messages only — should be excluded
 	insertSession(t, d, "s3", "proj-c",
 		func(s *Session) {
 			s.Agent = "claude"
-			s.StartedAt = Ptr("2024-01-03T10:00:00Z")
-			s.EndedAt = Ptr("2024-01-03T11:00:00Z")
+			s.StartedAt = new("2024-01-03T10:00:00Z")
+			s.EndedAt = new("2024-01-03T11:00:00Z")
 		},
 	)
 
@@ -51,14 +176,14 @@ func TestSearch(t *testing.T) {
 	sysMsg.IsSystem = true
 	insertMessages(t, d, sysMsg)
 
-	// Session s-sysonly-dn: only display_name matches, system messages only.
+	// Session s-sysonly-dn: only session_name matches, system messages only.
 	insertSession(t, d, "s-sysonly-dn", "proj-sysonly",
 		func(s *Session) {
 			s.Agent = "claude"
-			s.DisplayName = Ptr("sysonlydnterm unique display")
-			s.FirstMessage = Ptr("no match here")
-			s.StartedAt = Ptr("2024-01-04T10:00:00Z")
-			s.EndedAt = Ptr("2024-01-04T11:00:00Z")
+			s.SessionName = new("sysonlydnterm unique display")
+			s.FirstMessage = new("no match here")
+			s.StartedAt = new("2024-01-04T10:00:00Z")
+			s.EndedAt = new("2024-01-04T11:00:00Z")
 		},
 	)
 	sysonlyDN := userMsg("s-sysonly-dn", 0, "irrelevant content")
@@ -69,9 +194,9 @@ func TestSearch(t *testing.T) {
 	insertSession(t, d, "s-sysonly-fm", "proj-sysonly",
 		func(s *Session) {
 			s.Agent = "claude"
-			s.FirstMessage = Ptr("sysonlyfmterm unique first")
-			s.StartedAt = Ptr("2024-01-05T10:00:00Z")
-			s.EndedAt = Ptr("2024-01-05T11:00:00Z")
+			s.FirstMessage = new("sysonlyfmterm unique first")
+			s.StartedAt = new("2024-01-05T10:00:00Z")
+			s.EndedAt = new("2024-01-05T11:00:00Z")
 		},
 	)
 	sysonlyFM := userMsg("s-sysonly-fm", 0, "irrelevant content")
@@ -83,103 +208,92 @@ func TestSearch(t *testing.T) {
 	insertSession(t, d, "s-prefixonly", "proj-prefixonly",
 		func(s *Session) {
 			s.Agent = "claude"
-			s.DisplayName = Ptr("prefixonlydnterm unique display")
-			s.StartedAt = Ptr("2024-01-06T10:00:00Z")
-			s.EndedAt = Ptr("2024-01-06T11:00:00Z")
+			s.SessionName = new("prefixonlydnterm unique display")
+			s.StartedAt = new("2024-01-06T10:00:00Z")
+			s.EndedAt = new("2024-01-06T11:00:00Z")
 		},
 	)
 	insertMessages(t, d, userMsg("s-prefixonly", 0,
 		"This session is being continued from a previous conversation"))
 
+	// Session s-reminderonly: only system-reminder prefix content (is_system=false).
+	// Search fallback must exclude it the same way as other prefix-only sessions.
+	insertSession(t, d, "s-reminderonly", "proj-prefixonly",
+		func(s *Session) {
+			s.Agent = "claude"
+			s.SessionName = new("reminderonlydnterm unique display")
+			s.StartedAt = new("2024-01-07T10:00:00Z")
+			s.EndedAt = new("2024-01-07T11:00:00Z")
+		},
+	)
+	insertMessages(t, d, userMsg("s-reminderonly", 0,
+		"<system-reminder>remember this</system-reminder>"))
+
+	insertSession(t, d, "s-reminderprompt", "proj-prefixonly",
+		func(s *Session) {
+			s.Agent = "claude"
+			s.StartedAt = new("2024-01-08T10:00:00Z")
+			s.EndedAt = new("2024-01-08T11:00:00Z")
+		},
+	)
+	insertMessages(t, d, userMsg("s-reminderprompt", 0,
+		"<system-reminder>remember this</system-reminder>\n\nreminderpromptterm real prompt"))
+
 	t.Run("deduplication: two messages in same session → one result", func(t *testing.T) {
 		page, err := d.Search(context.Background(), SearchFilter{
 			Query: "alpha", Limit: 10,
 		})
-		if err != nil {
-			t.Fatalf("Search: %v", err)
-		}
+		require.NoError(t, err, "Search")
 		// s1 and s2 each have alpha matches; s3 is excluded (system msg)
-		if len(page.Results) != 2 {
-			t.Errorf("got %d results, want 2 (one per session)", len(page.Results))
-		}
+		assert.Len(t, page.Results, 2, "one per session")
 	})
 
 	t.Run("agent field populated from sessions join", func(t *testing.T) {
 		page, err := d.Search(context.Background(), SearchFilter{
 			Query: "alpha beta", Limit: 10,
 		})
-		if err != nil {
-			t.Fatalf("Search: %v", err)
-		}
-		if len(page.Results) == 0 {
-			t.Fatal("expected at least one result")
-		}
-		if page.Results[0].Agent == "" {
-			t.Error("Agent field is empty, want populated")
-		}
-		if page.Results[0].Agent != "claude" {
-			t.Errorf("Agent = %q, want %q", page.Results[0].Agent, "claude")
-		}
+		require.NoError(t, err, "Search")
+		require.NotEmpty(t, page.Results, "expected at least one result")
+		assert.NotEmpty(t, page.Results[0].Agent, "Agent field empty")
+		assert.Equal(t, "claude", page.Results[0].Agent, "Agent")
 	})
 
 	t.Run("session_ended_at populated from COALESCE(ended_at, started_at)", func(t *testing.T) {
 		page, err := d.Search(context.Background(), SearchFilter{
 			Query: "alpha beta", Limit: 10,
 		})
-		if err != nil {
-			t.Fatalf("Search: %v", err)
-		}
-		if len(page.Results) == 0 {
-			t.Fatal("expected at least one result")
-		}
-		if page.Results[0].SessionEndedAt == "" {
-			t.Error("SessionEndedAt is empty, want populated")
-		}
+		require.NoError(t, err, "Search")
+		require.NotEmpty(t, page.Results, "expected at least one result")
+		assert.NotEmpty(t, page.Results[0].SessionEndedAt, "SessionEndedAt")
 	})
 
 	t.Run("sort recency: newer session appears first", func(t *testing.T) {
 		page, err := d.Search(context.Background(), SearchFilter{
 			Query: "alpha", Limit: 10, Sort: "recency",
 		})
-		if err != nil {
-			t.Fatalf("Search: %v", err)
-		}
-		if len(page.Results) < 2 {
-			t.Fatalf("want >= 2 results, got %d", len(page.Results))
-		}
+		require.NoError(t, err, "Search")
+		require.GreaterOrEqual(t, len(page.Results), 2, "want >= 2 results")
 		// s2 has ended_at 2024-01-02, s1 has 2024-01-01 — s2 must be first
-		if page.Results[0].SessionID != "s2" {
-			t.Errorf("recency sort: first result = %q, want %q",
-				page.Results[0].SessionID, "s2")
-		}
+		assert.Equal(t, "s2", page.Results[0].SessionID, "recency sort: first result")
 	})
 
 	t.Run("system messages excluded from results", func(t *testing.T) {
 		page, err := d.Search(context.Background(), SearchFilter{
 			Query: "system hidden", Limit: 10,
 		})
-		if err != nil {
-			t.Fatalf("Search: %v", err)
-		}
-		if len(page.Results) != 0 {
-			t.Errorf("got %d results for system-only session, want 0",
-				len(page.Results))
-		}
+		require.NoError(t, err, "Search")
+		assert.Empty(t, page.Results, "system-only session results")
 	})
 
-	t.Run("name branch excludes system-only sessions via display_name", func(t *testing.T) {
-		// s-sysonly-dn has display_name matching "sysonlydnterm" but only
+	t.Run("name branch excludes system-only sessions via session_name", func(t *testing.T) {
+		// s-sysonly-dn has session_name matching "sysonlydnterm" but only
 		// system messages. The EXISTS guard must prevent it from appearing.
 		page, err := d.Search(context.Background(), SearchFilter{
 			Query: "sysonlydnterm", Limit: 10,
 		})
-		if err != nil {
-			t.Fatalf("Search: %v", err)
-		}
-		if len(page.Results) != 0 {
-			t.Errorf("got %d results for system-only session via display_name, want 0",
-				len(page.Results))
-		}
+		require.NoError(t, err, "Search")
+		assert.Empty(t, page.Results,
+			"system-only session via session_name")
 	})
 
 	t.Run("name branch excludes system-only sessions via first_message", func(t *testing.T) {
@@ -188,29 +302,37 @@ func TestSearch(t *testing.T) {
 		page, err := d.Search(context.Background(), SearchFilter{
 			Query: "sysonlyfmterm", Limit: 10,
 		})
-		if err != nil {
-			t.Fatalf("Search: %v", err)
-		}
-		if len(page.Results) != 0 {
-			t.Errorf("got %d results for system-only session via first_message, want 0",
-				len(page.Results))
-		}
+		require.NoError(t, err, "Search")
+		assert.Empty(t, page.Results,
+			"system-only session via first_message")
 	})
 
 	t.Run("name branch excludes prefix-only sessions", func(t *testing.T) {
-		// s-prefixonly has display_name matching "prefixonlydnterm" but only
+		// s-prefixonly has session_name matching "prefixonlydnterm" but only
 		// prefix-detected system messages (is_system=false). The EXISTS guard
 		// with prefix exclusion must prevent it from appearing.
 		page, err := d.Search(context.Background(), SearchFilter{
 			Query: "prefixonlydnterm", Limit: 10,
 		})
-		if err != nil {
-			t.Fatalf("Search: %v", err)
-		}
-		if len(page.Results) != 0 {
-			t.Errorf("got %d results for prefix-only session, want 0",
-				len(page.Results))
-		}
+		require.NoError(t, err, "Search")
+		assert.Empty(t, page.Results, "prefix-only session")
+	})
+
+	t.Run("name branch excludes system-reminder-only sessions", func(t *testing.T) {
+		page, err := d.Search(context.Background(), SearchFilter{
+			Query: "reminderonlydnterm", Limit: 10,
+		})
+		require.NoError(t, err, "Search")
+		assert.Empty(t, page.Results, "system-reminder-only session")
+	})
+
+	t.Run("content branch keeps reminder-prefixed real prompts", func(t *testing.T) {
+		page, err := d.Search(context.Background(), SearchFilter{
+			Query: "reminderpromptterm", Limit: 10,
+		})
+		require.NoError(t, err, "Search")
+		require.Len(t, page.Results, 1)
+		assert.Equal(t, "s-reminderprompt", page.Results[0].SessionID)
 	})
 
 	t.Run("invalid sort value defaults to relevance (SQL injection guard)", func(t *testing.T) {
@@ -218,9 +340,7 @@ func TestSearch(t *testing.T) {
 		_, err := d.Search(context.Background(), SearchFilter{
 			Query: "alpha", Limit: 10, Sort: "'; DROP TABLE sessions; --",
 		})
-		if err != nil {
-			t.Errorf("invalid Sort caused error: %v", err)
-		}
+		assert.NoError(t, err, "invalid Sort caused error")
 	})
 
 	t.Run("pagination at session level", func(t *testing.T) {
@@ -228,15 +348,9 @@ func TestSearch(t *testing.T) {
 		page, err := d.Search(context.Background(), SearchFilter{
 			Query: "alpha", Limit: 1,
 		})
-		if err != nil {
-			t.Fatalf("Search: %v", err)
-		}
-		if len(page.Results) != 1 {
-			t.Errorf("got %d results with limit=1, want 1", len(page.Results))
-		}
-		if page.NextCursor == 0 {
-			t.Error("NextCursor = 0, want non-zero (more results exist)")
-		}
+		require.NoError(t, err, "Search")
+		assert.Len(t, page.Results, 1, "limit=1 results")
+		assert.NotZero(t, page.NextCursor, "NextCursor (more results exist)")
 	})
 
 	t.Run("multi-word FTS query matches session name via plain text", func(t *testing.T) {
@@ -245,75 +359,51 @@ func TestSearch(t *testing.T) {
 		// The name branch must strip those quotes before LIKE matching.
 		insertSession(t, d, "s6", "proj-f", func(s *Session) {
 			s.Agent = "claude"
-			s.StartedAt = Ptr("2024-01-06T10:00:00Z")
+			s.StartedAt = new("2024-01-06T10:00:00Z")
 		})
-		if err := d.RenameSession("s6", Ptr("unique phrase session")); err != nil {
-			t.Fatalf("RenameSession: %v", err)
-		}
+		require.NoError(t, d.RenameSession("s6", new("unique phrase session")),
+			"RenameSession")
 		insertMessages(t, d, userMsg("s6", 0, "no match here"))
 
 		// Simulate prepareFTSQuery wrapping: multi-word queries get quoted.
 		page, err := d.Search(context.Background(), SearchFilter{
 			Query: `"unique phrase"`, Limit: 10,
 		})
-		if err != nil {
-			t.Fatalf("Search: %v", err)
-		}
-		if len(page.Results) != 1 {
-			t.Fatalf("got %d results for quoted query, want 1", len(page.Results))
-		}
-		if page.Results[0].SessionID != "s6" {
-			t.Errorf("got session %q, want s6", page.Results[0].SessionID)
-		}
-		if page.Results[0].Ordinal != -1 {
-			t.Errorf("ordinal = %d, want -1 (name-only match)", page.Results[0].Ordinal)
-		}
+		require.NoError(t, err, "Search")
+		require.Len(t, page.Results, 1, "quoted query results")
+		assert.Equal(t, "s6", page.Results[0].SessionID, "session")
+		assert.Equal(t, -1, page.Results[0].Ordinal, "ordinal (name-only match)")
 	})
 
 	t.Run("session name match via display_name", func(t *testing.T) {
 		// s4: display_name contains "uniquename", no messages match
 		insertSession(t, d, "s4", "proj-d", func(s *Session) {
 			s.Agent = "claude"
-			s.StartedAt = Ptr("2024-01-04T10:00:00Z")
+			s.StartedAt = new("2024-01-04T10:00:00Z")
 		})
-		if err := d.RenameSession("s4", Ptr("my uniquename session")); err != nil {
-			t.Fatalf("RenameSession: %v", err)
-		}
+		require.NoError(t, d.RenameSession("s4", new("my uniquename session")),
+			"RenameSession")
 		// message that does NOT contain "uniquename"
 		insertMessages(t, d, userMsg("s4", 0, "hello world"))
 
 		page, err := d.Search(context.Background(), SearchFilter{
 			Query: "uniquename", Limit: 10,
 		})
-		if err != nil {
-			t.Fatalf("Search: %v", err)
-		}
-		if len(page.Results) != 1 {
-			t.Fatalf("got %d results, want 1", len(page.Results))
-		}
-		if page.Results[0].SessionID != "s4" {
-			t.Errorf("got session %q, want s4", page.Results[0].SessionID)
-		}
-		if page.Results[0].Ordinal != -1 {
-			t.Errorf("ordinal = %d, want -1 (name-only match)", page.Results[0].Ordinal)
-		}
+		require.NoError(t, err, "Search")
+		require.Len(t, page.Results, 1)
+		assert.Equal(t, "s4", page.Results[0].SessionID, "session")
+		assert.Equal(t, -1, page.Results[0].Ordinal, "ordinal (name-only match)")
 	})
 
 	t.Run("name field populated on message-content match", func(t *testing.T) {
 		page, err := d.Search(context.Background(), SearchFilter{
 			Query: "alpha", Limit: 10,
 		})
-		if err != nil {
-			t.Fatalf("Search: %v", err)
-		}
-		if len(page.Results) == 0 {
-			t.Fatal("expected results")
-		}
+		require.NoError(t, err, "Search")
+		require.NotEmpty(t, page.Results, "expected results")
 		// s1 and s2 have no display_name — name should fall back to first_message
 		for _, r := range page.Results {
-			if r.Name == "" {
-				t.Errorf("result %q has empty Name", r.SessionID)
-			}
+			assert.NotEmpty(t, r.Name, "result %q has empty Name", r.SessionID)
 		}
 	})
 
@@ -321,65 +411,51 @@ func TestSearch(t *testing.T) {
 		// s7: display_name is set to something else; only first_message matches
 		insertSession(t, d, "s7", "proj-g", func(s *Session) {
 			s.Agent = "claude"
-			s.FirstMessage = Ptr("firstmsgonlyterm present here")
-			s.StartedAt = Ptr("2024-01-07T10:00:00Z")
+			s.FirstMessage = new("firstmsgonlyterm present here")
+			s.StartedAt = new("2024-01-07T10:00:00Z")
 		})
-		if err := d.RenameSession("s7", Ptr("unrelated display name")); err != nil {
-			t.Fatalf("RenameSession: %v", err)
-		}
+		require.NoError(t, d.RenameSession("s7", new("unrelated display name")),
+			"RenameSession")
 		// message that does NOT contain the search term
 		insertMessages(t, d, userMsg("s7", 0, "no match content"))
 
 		page, err := d.Search(context.Background(), SearchFilter{
 			Query: "firstmsgonlyterm", Limit: 10,
 		})
-		if err != nil {
-			t.Fatalf("Search: %v", err)
-		}
-		if len(page.Results) != 1 {
-			t.Fatalf("got %d results, want 1", len(page.Results))
-		}
+		require.NoError(t, err, "Search")
+		require.Len(t, page.Results, 1)
 		r := page.Results[0]
-		if r.SessionID != "s7" {
-			t.Errorf("got session %q, want s7", r.SessionID)
-		}
-		if r.Ordinal != -1 {
-			t.Errorf("ordinal = %d, want -1 (name-only match)", r.Ordinal)
-		}
+		assert.Equal(t, "s7", r.SessionID, "session")
+		assert.Equal(t, -1, r.Ordinal, "ordinal (name-only match)")
 		// Snippet must be the first_message (the matching field), not display_name
-		if r.Snippet != "firstmsgonlyterm present here" {
-			t.Errorf("snippet = %q, want first_message text", r.Snippet)
-		}
+		assert.Equal(t, "firstmsgonlyterm present here", r.Snippet,
+			"snippet should be first_message")
 	})
 
 	t.Run("no duplicate when session matches both name and content", func(t *testing.T) {
 		// s5: display_name AND message content both contain "doublehit"
 		insertSession(t, d, "s5", "proj-e", func(s *Session) {
 			s.Agent = "claude"
-			s.StartedAt = Ptr("2024-01-05T10:00:00Z")
+			s.StartedAt = new("2024-01-05T10:00:00Z")
 		})
-		if err := d.RenameSession("s5", Ptr("doublehit session")); err != nil {
-			t.Fatalf("RenameSession: %v", err)
-		}
+		require.NoError(t, d.RenameSession("s5", new("doublehit session")),
+			"RenameSession")
 		insertMessages(t, d, userMsg("s5", 0, "doublehit in message too"))
 
 		page, err := d.Search(context.Background(), SearchFilter{
 			Query: "doublehit", Limit: 10,
 		})
-		if err != nil {
-			t.Fatalf("Search: %v", err)
-		}
+		require.NoError(t, err, "Search")
 		seen := map[string]int{}
 		for _, r := range page.Results {
 			seen[r.SessionID]++
 		}
-		if seen["s5"] != 1 {
-			t.Errorf("s5 appears %d times, want 1", seen["s5"])
-		}
+		assert.Equal(t, 1, seen["s5"], "s5 occurrences")
 		// When matched by both, FTS branch wins — ordinal should not be -1
 		for _, r := range page.Results {
-			if r.SessionID == "s5" && r.Ordinal == -1 {
-				t.Error("expected real ordinal (message match), got -1")
+			if r.SessionID == "s5" {
+				assert.NotEqual(t, -1, r.Ordinal,
+					"expected real ordinal (message match)")
 			}
 		}
 	})
@@ -397,12 +473,194 @@ func TestSearchEmptyQueryGuard(t *testing.T) {
 
 	for _, q := range []string{"", `""`} {
 		page, err := d.Search(context.Background(), SearchFilter{Query: q, Limit: 10})
-		if err != nil {
-			t.Fatalf("Search(%q): unexpected error: %v", q, err)
-		}
-		if len(page.Results) != 0 {
-			t.Errorf("Search(%q): got %d results, want 0", q, len(page.Results))
-		}
+		require.NoError(t, err, "Search(%q)", q)
+		assert.Empty(t, page.Results, "Search(%q) results", q)
+	}
+}
+
+func TestPrepareFTSQuery(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "empty unchanged", raw: "", want: ""},
+		{name: "whitespace only trimmed to empty", raw: "   ", want: ""},
+		{name: "single word quoted", raw: "login", want: `"login"`},
+		{name: "leading/trailing space trimmed", raw: "  login  ", want: `"login"`},
+		{name: "multi-term AND of quoted terms", raw: "fix bug", want: `"fix" "bug"`},
+		{name: "three terms AND", raw: "a b c", want: `"a" "b" "c"`},
+		{name: "single hyphen token quoted literal", raw: "error-401", want: `"error-401"`},
+		{name: "single colon token quoted literal", raw: "status:500", want: `"status:500"`},
+		{name: "embedded quote doubled", raw: `say"hi`, want: `"say""hi"`},
+		{name: "leading quote is passthrough phrase", raw: `"fix bug"`, want: `"fix bug"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, PrepareFTSQuery(tt.raw))
+		})
+	}
+}
+
+func TestFTSTerms(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{name: "empty", in: "", want: nil},
+		{name: "whitespace only", in: "  ", want: nil},
+		{name: "bare single word", in: "login", want: []string{"login"}},
+		{name: "bare multi word", in: "fix bug", want: []string{"fix", "bug"}},
+		{name: "AND of quoted terms", in: `"error" "401"`, want: []string{"error", "401"}},
+		{name: "single quoted operator token", in: `"error-401"`, want: []string{"error-401"}},
+		{name: "exact phrase is one term", in: `"fix bug"`, want: []string{"fix bug"}},
+		{name: "doubled quote is literal quote", in: `"say""hi"`, want: []string{`say"hi`}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, FTSTerms(tt.in))
+		})
+	}
+}
+
+func TestStripFTSQuotes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "no quotes unchanged", in: "login", want: "login"},
+		{name: "bare multi word unchanged", in: "fix bug", want: "fix bug"},
+		{name: "AND of quoted terms rejoined", in: `"error" "401"`, want: "error 401"},
+		{name: "single quoted operator token", in: `"error-401"`, want: "error-401"},
+		{name: "exact phrase rejoined", in: `"fix bug"`, want: "fix bug"},
+		{name: "empty phrase collapses to empty", in: `""`, want: ""},
+		{name: "doubled quote is literal quote", in: `"say""hi"`, want: `say"hi`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, StripFTSQuotes(tt.in))
+		})
+	}
+}
+
+// TestSearchOperatorTokenNoError is the regression for the FTS 500: a single
+// token containing FTS5 operator characters (hyphen, colon) must, once run
+// through PrepareFTSQuery as the HTTP handler does, match content and not raise
+// a malformed-query error.
+func TestSearchOperatorTokenNoError(t *testing.T) {
+	t.Parallel()
+	d := testDB(t)
+	requireFTS(t, d)
+
+	insertSession(t, d, "s1", "proj", func(s *Session) {
+		s.Agent = "claude"
+		s.UserMessageCount = 2
+		s.StartedAt = new("2024-01-01T10:00:00Z")
+	})
+	insertMessages(t, d,
+		userMsg("s1", 0, "encountered error-401 from the api"),
+		asstMsg("s1", 1, "the status:500 response also appeared"),
+	)
+
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "hyphen token", raw: "error-401"},
+		{name: "colon token", raw: "status:500"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			page, err := d.Search(context.Background(), SearchFilter{
+				Query: PrepareFTSQuery(tt.raw), Limit: 10,
+			})
+			require.NoError(t, err, "Search(%q)", tt.raw)
+			require.Len(t, page.Results, 1, "results for %q", tt.raw)
+			assert.Equal(t, "s1", page.Results[0].SessionID, "session")
+		})
+	}
+}
+
+func TestSearchNormalizesRawOperatorToken(t *testing.T) {
+	t.Parallel()
+	d := testDB(t)
+	requireFTS(t, d)
+
+	insertSession(t, d, "s1", "proj", func(s *Session) {
+		s.Agent = "claude"
+		s.UserMessageCount = 1
+		s.StartedAt = new("2024-01-01T10:00:00Z")
+	})
+	insertMessages(t, d,
+		userMsg("s1", 0, "encountered error-401 from the api"),
+	)
+
+	page, err := d.Search(context.Background(), SearchFilter{
+		Query: "error-401", Limit: 10,
+	})
+	require.NoError(t, err, "Search should normalize raw FTS input")
+	require.Len(t, page.Results, 1)
+	assert.Equal(t, "s1", page.Results[0].SessionID)
+}
+
+// TestSearchMultiTermAND verifies multi-term queries match a session only when
+// every term is present somewhere in its content (FTS5 implicit AND), not as a
+// contiguous phrase.
+func TestSearchMultiTermAND(t *testing.T) {
+	t.Parallel()
+	d := testDB(t)
+	requireFTS(t, d)
+
+	insertSession(t, d, "both", "proj", func(s *Session) {
+		s.Agent = "claude"
+		s.UserMessageCount = 2
+		s.StartedAt = new("2024-01-01T10:00:00Z")
+	})
+	insertMessages(t, d, userMsg("both", 0, "the quick brown fox jumps"))
+
+	insertSession(t, d, "one", "proj", func(s *Session) {
+		s.Agent = "claude"
+		s.UserMessageCount = 2
+		s.StartedAt = new("2024-01-02T10:00:00Z")
+	})
+	insertMessages(t, d, userMsg("one", 0, "only quick here"))
+
+	page, err := d.Search(context.Background(), SearchFilter{
+		Query: PrepareFTSQuery("quick fox"), Limit: 10,
+	})
+	require.NoError(t, err, "Search")
+	require.Len(t, page.Results, 1, "only the session with both terms")
+	assert.Equal(t, "both", page.Results[0].SessionID, "session")
+}
+
+// TestSearchContentFTSOperatorToken is the content-search counterpart of the
+// FTS 500 regression: fts mode must accept a single hyphen/colon token.
+func TestSearchContentFTSOperatorToken(t *testing.T) {
+	t.Parallel()
+	d := testDB(t)
+	requireFTS(t, d)
+	seedSearchSession(t, d, "s1", "proj", [][2]string{
+		{"user", "saw error-401 then a status:500 page"},
+		{"assistant", "ack"},
+	})
+
+	for _, raw := range []string{"error-401", "status:500"} {
+		got, err := d.SearchContent(context.Background(), ContentSearchFilter{
+			Pattern: raw, Mode: "fts",
+			Sources: []string{"messages"}, Limit: 50,
+		})
+		require.NoError(t, err, "SearchContent(%q)", raw)
+		require.Len(t, got.Matches, 1, "matches for %q", raw)
+		assert.Equal(t, "s1", got.Matches[0].SessionID, "session for %q", raw)
 	}
 }
 
@@ -418,8 +676,8 @@ func TestSearchDeduplicationManyMessages(t *testing.T) {
 
 	insertSession(t, d, "s1", "proj", func(s *Session) {
 		s.Agent = "claude"
-		s.StartedAt = Ptr("2024-01-01T10:00:00Z")
-		s.EndedAt = Ptr("2024-01-01T11:00:00Z")
+		s.StartedAt = new("2024-01-01T10:00:00Z")
+		s.EndedAt = new("2024-01-01T11:00:00Z")
 	})
 
 	// Insert enough messages to force multiple FTS5 internal segments.
@@ -434,11 +692,10 @@ func TestSearchDeduplicationManyMessages(t *testing.T) {
 	// insert additional matching messages in a separate batch. This creates a
 	// second segment, reproducing the multi-segment state that caused the outer
 	// JOIN to return duplicate rows before the MATCH clause was added.
-	if _, err := d.getWriter().Exec(
+	_, err := d.getWriter().Exec(
 		"INSERT INTO messages_fts(messages_fts) VALUES('optimize')",
-	); err != nil {
-		t.Fatalf("fts optimize: %v", err)
-	}
+	)
+	require.NoError(t, err, "fts optimize")
 	extra := make([]Message, 20)
 	for i := range extra {
 		extra[i] = userMsg("s1", n+i,
@@ -449,12 +706,9 @@ func TestSearchDeduplicationManyMessages(t *testing.T) {
 	page, err := d.Search(context.Background(), SearchFilter{
 		Query: "needle", Limit: 10,
 	})
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	if len(page.Results) != 1 {
-		t.Errorf("got %d results for single session with %d matching messages, want 1",
-			len(page.Results), n)
+	require.NoError(t, err, "Search")
+	if !assert.Len(t, page.Results, 1,
+		"single session with %d matching messages", n) {
 		for i, r := range page.Results {
 			t.Logf("  result[%d]: session_id=%q ordinal=%d", i, r.SessionID, r.Ordinal)
 		}
@@ -483,16 +737,10 @@ func TestSearchTieBreak(t *testing.T) {
 	page, err := d.Search(context.Background(), SearchFilter{
 		Query: "tiebreak unique phrase alpha", Limit: 10,
 	})
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	if len(page.Results) != 1 {
-		t.Fatalf("got %d results, want 1", len(page.Results))
-	}
-	if page.Results[0].Ordinal != 0 {
-		t.Errorf("tie-break: ordinal = %d, want 0 (lower ordinal wins)",
-			page.Results[0].Ordinal)
-	}
+	require.NoError(t, err, "Search")
+	require.Len(t, page.Results, 1)
+	assert.Equal(t, 0, page.Results[0].Ordinal,
+		"tie-break: lower ordinal wins")
 }
 
 func TestSearchSession(t *testing.T) {
@@ -687,20 +935,12 @@ func TestSearchSession(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := d.SearchSession(context.Background(), tt.sessionID, tt.query)
-			if err != nil {
-				t.Fatalf("SearchSession(%q, %q): unexpected error: %v", tt.sessionID, tt.query, err)
-			}
+			require.NoError(t, err, "SearchSession(%q, %q)", tt.sessionID, tt.query)
 			if got == nil {
 				got = []int{}
 			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("SearchSession(%q, %q) = %v, want %v", tt.sessionID, tt.query, got, tt.want)
-			}
-			for i, ord := range got {
-				if ord != tt.want[i] {
-					t.Errorf("ordinal[%d] = %d, want %d", i, ord, tt.want[i])
-				}
-			}
+			assert.Equal(t, tt.want, got,
+				"SearchSession(%q, %q)", tt.sessionID, tt.query)
 		})
 	}
 }
@@ -715,8 +955,8 @@ func TestSearchPaginationStability(t *testing.T) {
 	for _, id := range []string{"stab-a", "stab-b", "stab-c"} {
 		insertSession(t, d, id, "proj-stab", func(s *Session) {
 			s.Agent = "claude"
-			s.StartedAt = Ptr("2024-06-01T12:00:00Z")
-			s.EndedAt = Ptr("2024-06-01T13:00:00Z")
+			s.StartedAt = new("2024-06-01T12:00:00Z")
+			s.EndedAt = new("2024-06-01T13:00:00Z")
 		})
 		insertMessages(t, d, userMsg(id, 0, "stability test keyword"))
 	}
@@ -731,26 +971,18 @@ func TestSearchPaginationStability(t *testing.T) {
 			Limit:  1,
 			Cursor: cursor,
 		})
-		if err != nil {
-			t.Fatalf("page %d: %v", i, err)
-		}
-		if len(page.Results) != 1 {
-			t.Fatalf("page %d: got %d results, want 1",
-				i, len(page.Results))
-		}
+		require.NoError(t, err, "page %d", i)
+		require.Len(t, page.Results, 1, "page %d", i)
 		allIDs = append(allIDs, page.Results[0].SessionID)
 		cursor = page.NextCursor
 	}
 
 	// Verify no duplicates and ascending session_id order (tie-breaker).
 	for i := 1; i < len(allIDs); i++ {
-		if allIDs[i] == allIDs[i-1] {
-			t.Errorf("duplicate session at pages %d-%d: %s",
-				i-1, i, allIDs[i])
-		}
-		if allIDs[i] < allIDs[i-1] {
-			t.Errorf("unstable order: page %d=%s, page %d=%s",
-				i-1, allIDs[i-1], i, allIDs[i])
-		}
+		assert.NotEqual(t, allIDs[i-1], allIDs[i],
+			"duplicate session at pages %d-%d: %s", i-1, i, allIDs[i])
+		assert.GreaterOrEqual(t, allIDs[i], allIDs[i-1],
+			"unstable order: page %d=%s, page %d=%s",
+			i-1, allIDs[i-1], i, allIDs[i])
 	}
 }

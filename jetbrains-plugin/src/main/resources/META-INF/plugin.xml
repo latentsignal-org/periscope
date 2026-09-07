@@ -9,7 +9,14 @@
     <resource-bundle>messages.MyBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
-        <toolWindow factoryClass="org.latentsignal.sampleplugin.toolWindow.MyToolWindowFactory" id="Periscope"/>
+        <toolWindow factoryClass="org.latentsignal.sampleplugin.toolWindow.MyToolWindowFactory"
+                    id="Periscope"
+                    anchor="right"
+                    canCloseContents="false"
+                    icon="AllIcons.Toolwindows.ToolWindowStructure"/>
         <postStartupActivity implementation="org.latentsignal.sampleplugin.startup.MyProjectActivity" />
+        <notificationGroup id="Periscope"
+                           displayType="BALLOON"
+                           key="notification.group.periscope"/>
     </extensions>
 </idea-plugin>

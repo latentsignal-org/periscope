@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import { formatMessageForCopy } from "./copy-message.js";
 import type { Message } from "../api/types/core.js";
 
@@ -12,6 +12,7 @@ describe("formatMessageForCopy", () => {
       content: "Here is the edit",
       timestamp: "",
       has_thinking: false,
+      thinking_text: "",
       has_tool_use: true,
       content_length: 16,
       model: "",
@@ -47,6 +48,7 @@ describe("formatMessageForCopy", () => {
       content: "Creating file",
       timestamp: "",
       has_thinking: false,
+      thinking_text: "",
       has_tool_use: true,
       content_length: 13,
       model: "",
@@ -74,7 +76,7 @@ describe("formatMessageForCopy", () => {
     const msg = {
       id: 3, session_id: "s1", ordinal: 3, role: "assistant",
       content: "Updating config", timestamp: "",
-      has_thinking: false, has_tool_use: true, content_length: 15,
+      has_thinking: false, thinking_text: "", has_tool_use: true, content_length: 15,
       model: "", context_tokens: 0, output_tokens: 0, is_system: false,
       tool_calls: [{
         tool_name: "Edit", category: "Edit",

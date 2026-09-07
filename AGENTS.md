@@ -1,87 +1,250 @@
 # AGENTS.md
 
-Instructions and project context for autonomous coding agents working in this
-repository. This is the single source of truth — other agent instruction files
-(e.g. `CLAUDE.md`) defer here.
+Instructions for autonomous coding agents working in this repository.
 
 ## Scope
 
 - Applies to all agent-driven work in this repo.
 - If multiple instruction files exist, follow the most specific one for the
   files you are editing.
+- Requests to review, analyze, or explain are read-only unless the user also
+  asks for changes.
+- `AGENTS.md` is the source of truth for standing rules; keep `CLAUDE.md` as a
+  symlink to it and record new durable rules here.
+
+## Roborev
+
+- Never invoke the `roborev review` CLI command in any form unless the user
+  explicitly asks for it. Use all other `roborev` CLI commands normally when
+  they are appropriate for interacting with roborev. Never invoke a roborev
+  skill (including `roborev-fix` or `roborev-design-review-branch`) unless the
+  user explicitly asks for that skill.
+
+## Required Git Rules
+
+1. Do not commit after every turn; wait for explicit user review and approval
+   before committing changes.
+1. Do not make empty commits. If a turn is read-only or only changes ignored
+   files, state that no commit was made.
+1. Do not amend, squash, or rebase commits unless explicitly requested.
+1. Do not change branches without explicit user permission.
+1. Deliver changes through pull requests from feature branches.
+1. Do not merge pull requests. Open them and report status; merging is always
+   the user's decision, even when checks are green and the change is urgent.
+
+## Commit Expectations
+
+- Keep commits focused and related to the requested task.
+- Use clear conventional commit messages.
+- Do not push, pull, or rebase unless explicitly requested.
+- Do not include generated-with lines, attribution blocks, validation footers,
+  or command transcripts in commit messages.
+
+## Content Hygiene
+
+- Keep private project names, hostnames, personal identities, infrastructure
+  details, and absolute user paths out of code, tests, fixtures, docs, commit
+  messages, and pull request text. Run the private-data scrub before
+  publishing.
+- Keep pull request titles and descriptions synchronized with the current diff.
+- Do not post pull request or issue comments unless explicitly requested.
+
+## Validation
+
+- Run relevant tests before committing when practical.
+- If tests cannot be run, state that clearly in the handoff.
+- After Go code changes, run `go fmt ./...` and `go vet ./...` before
+  committing.
+
+## Background Memory
+
+- Keep passive daemon memory within a few hundred megabytes on macOS, Linux, and
+  Windows. Treat sustained growth beyond that range as a regression.
+- Background watcher, polling, and sync work must be bounded by the changed
+  batch, not by total archive size. Do not scan or materialize every stored
+  session for each filesystem event.
+- Declare expensive scheduling inputs as provider capabilities and compute them
+  only for providers that observably consume them. Default new capabilities to
+  unsupported.
+- Add cardinality-scaling regressions for background paths: compare small and
+  large archives and assert that unchanged per-event work remains bounded.
+  Preserve deletion, tombstone, and persistent-archive behavior in the same
+  tests.
+- Diagnose long-running memory with allocation and CPU profiles plus live heap,
+  forced-GC heap, and operating-system physical/dirty memory. Raw RSS alone is
+  not proof of live memory because it includes clean reclaimable mappings.
+- Profile branch binaries only against isolated production-scale database and
+  source clones. Never point profiling workloads at live archives or live
+  agent transcripts.
+- Include a retention observation long enough to reproduce the reported growth
+  window. On macOS record `vmmap` physical footprint and dirty memory; use
+  portable Go allocation and heap metrics for Linux and Windows.
+
+## Backend Parity
+
+- Preserve behavior and query-shape parity between supported storage backends
+  whenever practical. SQLite and PostgreSQL/Cockroach queries, indexes,
+  aggregations, filtering, and ordering should match until there is a
+  concrete, documented reason for them to differ.
+- Do not implement a performance or correctness fix for only one backend and
+  call the problem solved unless the user explicitly scopes the work to that
+  backend, for example "this is only for PostgreSQL". If one backend needs a
+  different implementation, explain why and keep the observable behavior the
+  same.
+
+## DuckDB Mirror
+
+- DuckDB is a disposable read mirror of the SQLite archive, never a system of
+  record. Backend Parity above applies to SQLite and PostgreSQL only; DuckDB
+  is derived data and must stay rebuildable from SQLite at any time.
+- The mirror has no in-place schema migrations. A mirror schema or source
+  data-version change bumps `internal/duckdb.SchemaVersion` and forces a full
+  rebuild into a fresh file that is validated and atomically swapped in. Do
+  not add ALTER-style migrations, version-bridging reads, or compatibility
+  shims for old mirror files.
+- All DuckDB push state (cutoff, revisions, scope, machine, versions) lives in
+  the mirror's own `sync_metadata`. Never store DuckDB sync cursors in SQLite;
+  deleting the mirror file must lose nothing.
+- Incremental updates are whole-session replace only, gated by per-session
+  fingerprints. Do not add per-table, per-column, or diff-based incremental
+  sync to the mirror.
+- Quack is read-side only. `duckdb push` writes the local mirror file; there is
+  no remote DuckDB push and none should be added.
+- Never overwrite an existing file that is not positively identified as an
+  agentsview DuckDB mirror; unrecognized destinations fail closed.
+
+## Provider Format Provenance
+
+When adding a provider, changing its format or usage/cost accounting, or
+investigating a provider release, new artifact generation, parser bug, or usage
+discrepancy, consult `docs/internal/session-format-sources.md` and reverify or
+update its evidence entry in the same change. Grok remains temporarily excluded
+only until its separately owned format-alignment work lands.
+
+## Localization
+
+- Keep frontend message catalogs synchronized. When adding, removing, or
+  renaming user-facing message keys in `frontend/messages/*.json`, update
+  every locale listed in `frontend/project.inlang/settings.json` in the same
+  turn and keep the key sets identical across locales.
+- After message catalog or localized component changes, run
+  `npm run i18n:compile` and `npm run check` from `frontend/` when practical.
+
+## Test Style
+
+- Go tests use `github.com/stretchr/testify` for assertions. Use `require.X`
+  when a failed check should abort the test (setup, nil receivers, length
+  checks before indexing) and `assert.X` for independent checks that should
+  keep running. Don't write `if got != want { t.Fatalf(...) }` in new tests.
+- Domain-specific helpers are fine, but they must use testify internally rather
+  than stdlib comparisons.
+
+## Safety
+
+- Do not revert user-authored or unrelated local changes unless explicitly
+  requested.
+- Avoid destructive git commands unless explicitly requested.
+- Never install over a live binary, run migrations against a production
+  database, or write to live data directories without explicit permission.
+  Point branch builds and profiling runs at isolated scratch data.
+- For login or OAuth flows, give the user the exact command to run rather than
+  driving the interactive authentication flow.
+- The SQLite database is a persistent archive. Never delete, drop, truncate, or
+  recreate it to handle data version changes. Schema changes use
+  non-destructive migrations such as `ALTER TABLE` and `UPDATE`; parser
+  changes trigger a full resync that builds a fresh DB, syncs files, copies
+  orphaned sessions from the old DB, and swaps atomically. Existing session
+  data must be preserved even when source files no longer exist on disk.
 
 ## Project Overview
 
 agentsview is a local web viewer for AI agent sessions. It syncs session data
-from disk into SQLite (with FTS5 full-text search), serves a Svelte 5 SPA via an
+from disk into SQLite with FTS5 full-text search, serves a Svelte 5 SPA via an
 embedded Go HTTP server, and provides real-time updates via SSE. See
 `internal/parser/types.go` for the full list of supported agents.
 
 ## Architecture
 
-```
-CLI (agentsview) → Config → DB (SQLite/FTS5)
-                  ↓              ↓
-              File Watcher → Sync Engine → Parsers (per agent)
-                  ↓              ↓
-              HTTP Server → REST API + SSE + Embedded SPA
-                                 ↓
-                           PG Push Sync → PostgreSQL (optional)
-                                 ↑
-              HTTP Server (pg serve) ← PostgreSQL
+```text
+CLI (agentsview) -> Config -> DB (SQLite/FTS5)
+                  |           |
+                  v           v
+              File Watcher -> Sync Engine -> Parsers (per agent)
+                  |           |
+                  v           v
+              HTTP Server -> REST API + SSE + Embedded SPA
+                              |
+                              v
+                           PG Push Sync -> PostgreSQL (optional)
+                              ^
+                              |
+              HTTP Server (pg serve) <- PostgreSQL
 ```
 
-- **Server**: HTTP server with auto-port discovery (default 8080)
-- **Storage**: SQLite with WAL mode, FTS5 for full-text search; optional
-  PostgreSQL for multi-machine shared access
-- **Sync**: File watcher + periodic sync (15min) for session directories
-- **PG Sync**: On-demand push sync from SQLite to PostgreSQL via `pg push`
-- **Frontend**: Svelte 5 SPA embedded in the Go binary at build time
-- **Config**: `AGENT_VIEWER_DATA_DIR` plus per-agent directory overrides (see
-  `EnvVar` on each entry in `internal/parser/types.go`) and CLI flags
+- Server: HTTP server with auto-port discovery, defaulting to 8080.
+- Storage: SQLite with WAL mode, FTS5 for full-text search, and optional
+  PostgreSQL for multi-machine shared access.
+- Sync: file watcher plus periodic sync every 15 minutes for session
+  directories.
+- PG sync: on-demand push sync from SQLite to PostgreSQL via `pg push`.
+- Frontend: Svelte 5 SPA embedded in the Go binary at build time.
+- Config: `AGENTSVIEW_DATA_DIR` plus per-agent directory overrides and CLI
+  flags. Per-agent env vars are listed on each entry in
+  `internal/parser/types.go`.
 
 ## Project Structure
 
-- `cmd/agentsview/` - Go server entrypoint
-- `cmd/testfixture/` - Test data generator for E2E tests
-- `internal/config/` - Config loading (TOML, JSON migration), flag registration
-- `internal/db/` - SQLite operations (sessions, messages, search, analytics)
-- `internal/postgres/` - PostgreSQL support: push sync, read-only store, schema,
-  connection helpers
-- `internal/parser/` - Per-agent session file parsers and content extraction
-- `internal/server/` - HTTP handlers, SSE, middleware, search, export
-- `internal/sync/` - Sync engine, file watcher, discovery, hashing
-- `internal/timeutil/` - Time parsing utilities
-- `internal/web/` - Embedded frontend (dist/ copied at build time)
-- `frontend/` - Svelte 5 SPA (Vite, TypeScript)
-- `scripts/` - Utility scripts (E2E server, changelog)
+- `cmd/agentsview/` - Go server entrypoint.
+- `cmd/testfixture/` - Test data generator for E2E tests.
+- `internal/config/` - Config loading, JSON migration, and flag registration.
+- `internal/db/` - SQLite sessions, messages, search, analytics, and schema.
+- `internal/postgres/` - PostgreSQL push sync, read-only store, schema, and
+  connection helpers.
+- `internal/duckdb/` - Disposable DuckDB read mirror: probe, rebuild-and-swap,
+  session-replace push, and the Quack read backend (see DuckDB Mirror above).
+- `internal/parser/` - Per-agent session file parsers and content extraction.
+- `internal/server/` - HTTP handlers, SSE, middleware, search, and export.
+- `internal/sync/` - Sync engine, file watcher, discovery, and hashing.
+- `internal/vector/` - Semantic search: embeddings encoder, `vectors.db`
+  mirror/index, build orchestration, and semantic/hybrid search.
+- `internal/timeutil/` - Time parsing utilities.
+- `internal/web/` - Embedded frontend copied from `frontend/dist/` at build
+  time.
+- `frontend/` - Svelte 5 SPA with Vite and TypeScript.
+- `scripts/` - Utility scripts for E2E server setup and changelog work.
 
 ## Key Files
 
-| Path                             | Purpose                                       |
-| -------------------------------- | --------------------------------------------- |
-| `cmd/agentsview/main.go`         | CLI entry point, server startup, file watcher |
-| `cmd/agentsview/pg.go`           | pg command group (push, status, serve)        |
-| `internal/server/server.go`      | HTTP router and handler setup                 |
-| `internal/server/sessions.go`    | Session list/detail API handlers              |
-| `internal/server/search.go`      | Full-text search API                          |
-| `internal/server/events.go`      | SSE event streaming                           |
-| `internal/db/db.go`              | Database open, migrations, schema             |
-| `internal/db/sessions.go`        | Session CRUD queries                          |
-| `internal/db/search.go`          | FTS5 search queries                           |
-| `internal/sync/engine.go`        | Sync orchestration                            |
-| `internal/parser/types.go`       | Agent registry (one `AgentDef` per agent)     |
-| `internal/parser/*.go`           | Per-agent session parsers                     |
-| `internal/postgres/connect.go`   | Connection setup, SSL checks, DSN helpers     |
-| `internal/postgres/schema.go`    | PG DDL, schema management                     |
-| `internal/postgres/push.go`      | Push logic, fingerprinting                    |
-| `internal/postgres/sync.go`      | Push sync lifecycle                           |
-| `internal/postgres/store.go`     | PostgreSQL read-only store                    |
-| `internal/postgres/sessions.go`  | PG session queries (read side)                |
-| `internal/postgres/messages.go`  | PG message queries, ILIKE search              |
-| `internal/postgres/analytics.go` | PG analytics queries                          |
-| `internal/postgres/time.go`      | Timestamp conversion helpers                  |
-| `internal/config/config.go`      | Config loading, flag registration             |
+| Path                             | Purpose                                                   |
+| -------------------------------- | --------------------------------------------------------- |
+| `cmd/agentsview/main.go`         | CLI entry point, server startup, file watcher             |
+| `cmd/agentsview/pg.go`           | `pg` command group: push, status, serve                   |
+| `cmd/agentsview/embeddings.go`   | `embeddings` command group: build, list, activate, retire |
+| `internal/server/server.go`      | HTTP router and handler setup                             |
+| `internal/server/sessions.go`    | Session list/detail API handlers                          |
+| `internal/server/search.go`      | Full-text search API                                      |
+| `internal/server/events.go`      | SSE event streaming                                       |
+| `internal/db/db.go`              | Database open, migrations, schema                         |
+| `internal/db/sessions.go`        | Session CRUD queries                                      |
+| `internal/db/search.go`          | FTS5 search queries                                       |
+| `internal/vector/index.go`       | `vectors.db` schema, generations, staleness gate          |
+| `internal/vector/search.go`      | Semantic + hybrid search, RRF merge                       |
+| `internal/sync/engine.go`        | Sync orchestration                                        |
+| `internal/parser/types.go`       | Agent registry with one `AgentDef` per agent              |
+| `internal/parser/*.go`           | Per-agent session parsers                                 |
+| `internal/postgres/connect.go`   | Connection setup, SSL checks, DSN helpers                 |
+| `internal/postgres/schema.go`    | PG DDL and schema management                              |
+| `internal/postgres/push.go`      | Push logic and fingerprinting                             |
+| `internal/postgres/sync.go`      | Push sync lifecycle                                       |
+| `internal/postgres/store.go`     | PostgreSQL read-only store                                |
+| `internal/postgres/sessions.go`  | PG session queries on the read side                       |
+| `internal/postgres/messages.go`  | PG message queries and ILIKE search                       |
+| `internal/postgres/analytics.go` | PG analytics queries                                      |
+| `internal/postgres/time.go`      | Timestamp conversion helpers                              |
+| `internal/duckdb/probe.go`       | Read-only mirror probe and rebuild triggers               |
+| `internal/duckdb/rebuild.go`     | Full rebuild into a temp file, validate, atomic swap      |
+| `internal/duckdb/sync.go`        | Push entry point and session-replace incremental          |
+| `internal/config/config.go`      | Config loading and flag registration                      |
 
 ## Development
 
@@ -89,28 +252,44 @@ CLI (agentsview) → Config → DB (SQLite/FTS5)
 make build          # Build binary with embedded frontend
 make dev            # Run Go server in dev mode
 make frontend       # Build frontend SPA only
-make frontend-dev   # Run Vite dev server (use alongside make dev)
+make frontend-dev   # Run Vite dev server, use alongside make dev
 make install        # Build and install to ~/.local/bin or GOPATH
-make install-hooks  # Install pre-commit git hooks
+make install-hooks  # Install pre-commit and pre-push git hooks
 ```
-
-After making Go code changes, always run `go fmt ./...` and `go vet ./...`
-before committing.
 
 ## Testing
 
-**All new features and bug fixes must include unit tests.** Run tests before
+All new features and bug fixes must include unit tests. Run tests before
 committing:
 
 ```bash
-make test       # Go tests (CGO_ENABLED=1 -tags fts5)
-make test-short # Fast tests only (-short flag)
+make test       # Go tests with CGO_ENABLED=1 and -tags "fts5"
+make test-short # Fast tests only with -short
 make e2e        # Playwright E2E tests
-make lint       # golangci-lint
+make lint       # golangci-lint plus NilAway
 make vet        # go vet
 ```
 
-### PostgreSQL Integration Tests
+## Test Style
+
+- Prefer table-driven tests for Go code.
+- Go tests use `github.com/stretchr/testify` for assertions.
+- Use `require.X` when a failed check should abort the test, including setup
+  errors, nil receivers, and length checks before indexing.
+- Use `assert.X` for independent checks that should keep running.
+- Do not write `if got != want { t.Fatalf(...) }` in new tests.
+- Domain-specific helpers are fine, but they must use testify internally rather
+  than stdlib comparisons.
+- Use the existing `testDB(t)` helper for database tests.
+- Frontend tests are colocated `*.test.ts` files, with Playwright specs in
+  `frontend/e2e/`.
+- All tests use `t.TempDir()` for temp directories.
+- Shell script tests must exercise observable behavior by running the script
+  against controlled inputs and asserting outputs, side effects, or exit
+  codes. Do not write tautological tests that read a shell script and assert
+  that it contains a specific implementation line, flag, or snippet.
+
+## PostgreSQL Integration Tests
 
 PG integration tests require a real PostgreSQL instance and the `pgtest` build
 tag. The easiest way to run them is with docker-compose:
@@ -128,65 +307,61 @@ TEST_PG_URL="postgres://user:pass@host:5432/dbname?sslmode=disable" \
 ```
 
 Tests create and drop the `agentsview` schema, so use a dedicated database or
-one where schema changes are acceptable.
-
-The CI pipeline runs these tests automatically via a GitHub Actions service
-container (see `.github/workflows/ci.yml`, `integration` job).
-
-### Test Guidelines
-
-- Table-driven tests for Go code
-- Use `testDB(t)` helper for database tests
-- Frontend: colocated `*.test.ts` files, Playwright specs in `frontend/e2e/`
-- All tests use `t.TempDir()` for temp directories
+one where schema changes are acceptable. The CI pipeline runs these tests via a
+GitHub Actions service container in `.github/workflows/ci.yml`.
 
 ## Build Requirements
 
-- **CGO_ENABLED=1** required (sqlite3 driver)
-- **Build tag**: `-tags fts5` required for full-text search
-- **Frontend**: Node.js + npm for Svelte build, embedded via
-  `internal/web/dist/`
+- `CGO_ENABLED=1` is required for the sqlite3 driver.
+- The `fts5` build tag is required for full-text search.
+- `go test` does not need kit's `kit_posthog_disabled` build tag. The telemetry
+  reporter already short-circuits to a disabled no-op under
+  `testing.Testing()`, so tests never send PostHog events. Binaries built for
+  e2e tests (`make e2e`, the CI pre-build of `agentsview`/`testfixture`) do
+  use the tag, because they run as real processes where the test guard does
+  not apply.
+- Node.js and npm are required to build the Svelte frontend embedded under
+  `internal/web/dist/`.
+- The frontend depends on `@kenn-io/kit-ui` as a git dependency pinned to a
+  commit (`git+https://github.com/kenn-io/kit-ui.git#<commit>` in
+  `frontend/package.json`). The repository is public, so `npm ci`/
+  `npm install` clone it anonymously over HTTPS with no credentials; the only
+  requirement is git on PATH. The lockfile records the dependency as
+  `git+ssh://git@github.com/...` — that is npm's canonical form for
+  GitHub-hosted git deps and cannot be changed, but npm still fetches over
+  anonymous HTTPS (verified with SSH disabled and a cold cache); do not "fix"
+  it. Bump the dependency by changing the commit hash in `frontend/package.json`
+  and running `npm install`.
 
 ## Conventions
 
 - Prefer stdlib over external dependencies.
 - Tests should be fast and isolated.
 - No emojis in code or output.
-- **Markdown formatting**: Use `mdformat --wrap 80` to format Markdown files.
-  Requires the `mdformat-tables` plugin
-  (`uv tool install mdformat --with mdformat-tables`).
+- For frontend UI work, read `DESIGN.md` before adding or changing controls,
+  styling, or reusable components.
+- Use `mdformat --wrap 80` to format Markdown files when mdformat and
+  `mdformat-tables` are available.
 
-## Git Rules
+## Pull Requests
 
-1. Do not commit after every turn; wait for explicit user review and approval
-   before committing changes.
-1. Do not amend commits — always create new commits for fixes.
-1. Do not change branches (create, switch, delete) without explicit user
-   permission.
-1. Do not push, pull, or rebase unless explicitly requested.
+- Do not poll or watch GitHub Actions checks unless the developer explicitly
+  requests it.
+- Do not use `gh api` to watch CI jobs unless the user explicitly requests it.
+- PR descriptions should be summaries only, with no test plans or checklists. Do
+  not add a "Tests", "Testing", "Verification", or "Test plan" section. CI
+  runs the tests, so the description must not restate the suite, list test
+  commands, or describe how the change was verified.
+- Describe what the code does now, why it changed, tradeoffs, limitations, and
+  where reviewers should look.
 
-### Commit Expectations
+## Cursor Cloud: git commits
 
-- Keep commits focused and related to the requested task.
-- Use conventional commit messages.
-- Run relevant tests before committing when practical. If tests cannot be run,
-  state that clearly in the handoff.
+periscope is **excluded** from orama attribution-guard scripts (`commit-clean.sh`,
+`sync-attribution-guard-scripts.sh`, etc.). Use standard `git commit` per the Git
+Rules section above. PT and AlphaClaw in the same cloud workspace run
+`bash ../orama-system/scripts/git/apply-attribution-guard-all-repos.sh` from their
+repos (periscope is skipped automatically).
 
-### Pull Requests
-
-- PR descriptions: summary only, no test plans or checklists. Describe what the
-  code does now, not how to test it.
-
-## Safety
-
-- Do not revert user-authored or unrelated local changes unless explicitly
-  requested.
-- Avoid destructive git commands unless explicitly requested.
-
-## Data Safety
-
-The SQLite database is a persistent archive. Never delete or recreate it to
-handle data version changes. Schema changes use ALTER TABLE; parser changes
-trigger a full resync (build fresh DB, sync files, copy orphaned sessions from
-old DB, atomic swap). Existing session data must be preserved even when source
-files no longer exist on disk.
+**Fork policy:** integration branch is `merged`. Open agent PRs from
+`cursor/*` branches → `merged` (never → `main`).

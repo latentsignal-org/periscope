@@ -7,95 +7,132 @@
   padding: 0;
 }
 
-/* Light theme (default) — cool, high-contrast, readable */
+/*
+ * Shared design tokens (backgrounds, text, borders, the core accent set,
+ * shadows, radii, fonts, type scale, spacing ladder, chrome heights, and the
+ * high-contrast overrides) come from @kenn-io/kit-ui/theme.css, imported in
+ * main.ts before this file. Only agentsview-specific tokens and deliberate
+ * overrides live here.
+ */
+
+/* Light theme (default) — app-specific tokens */
 :root {
-  --bg-primary: #f5f6f8;
-  --bg-surface: #ffffff;
-  --bg-surface-hover: #f0f1f4;
-  --bg-inset: #ecedf2;
-  --border-default: #d8dae2;
-  --border-muted: #e4e6ec;
-  --text-primary: #181b24;
-  --text-secondary: #555b6e;
-  --text-muted: #878ea0;
-  --accent-blue: #2563eb;
-  --accent-rose: #e11d48;
-  --accent-purple: #7c3aed;
-  --accent-amber: #d97706;
-  --accent-green: #059669;
-  --accent-coral: #f34e3f;
-  --accent-black: #2d2d2d;
-  --accent-teal: #0d9488;
-  --accent-red: #dc2626;
-  --accent-indigo: #6366f1;
-  --accent-teal: #0d9488;
-  --accent-orange: #e09040;
-  --accent-sky: #0284c7;
-  --accent-pink: #ec4899;
-  --accent-lime: #65a30d;
-  --user-bg: #eef2ff;
-  --assistant-bg: #faf9ff;
-  --thinking-bg: #f5f3ff;
-  --tool-bg: #fffbf0;
-  --code-bg: #1e1e2e;
-  --code-text: #cdd6f4;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.08);
-  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.1);
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --font-sans: "Inter", -apple-system, BlinkMacSystemFont,
-    "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
-  --font-mono: "JetBrains Mono", "SF Mono", "Fira Code",
-    "Fira Mono", Menlo, Consolas, monospace;
-  --viewport-indicator: rgba(0, 0, 0, 0.08);
-  --overlay-bg: rgba(0, 0, 0, 0.3);
-  --header-height: 40px;
-  --status-bar-height: 24px;
-  color-scheme: light;
+  /* Deliberate override: kit-ui's --accent-teal is cyan-leaning,
+     which would collide with --accent-cyan below. agentsview uses teal and
+     cyan as distinct agent-identity hues, so keep the greener teal. */
+  --accent-teal: #0d9488; /* kit-ui-check-ignore: app token definition */
+  /* Extra identity accents beyond kit-ui's core set */
+  --accent-rose: #e11d48; /* kit-ui-check-ignore: app token definition */
+  --accent-coral: #f34e3f; /* kit-ui-check-ignore: app token definition */
+  --accent-black: #2d2d2d; /* kit-ui-check-ignore: app token definition */
+  --accent-indigo: #6366f1; /* kit-ui-check-ignore: app token definition */
+  --accent-orange: #e09040; /* kit-ui-check-ignore: app token definition */
+  --accent-sky: #0284c7; /* kit-ui-check-ignore: app token definition */
+  --accent-pink: #ec4899; /* kit-ui-check-ignore: app token definition */
+  --accent-lime: #65a30d; /* kit-ui-check-ignore: app token definition */
+  --accent-cyan: #0891b2; /* kit-ui-check-ignore: app token definition */
+  --accent-violet: #7c3aed; /* kit-ui-check-ignore: app token definition */
+  /* ALL --accent-*-foreground pairs are agentsview-owned, including the
+     ones for kit-ui's core accents (blue/purple/amber/green/red/teal):
+     kit-ui defines no foreground tokens, and these inks are tuned for the
+     agent-identity badge fills. Anyone changing a kit-ui core accent must
+     re-check the matching foreground here for contrast. */
+  --accent-blue-foreground: #ffffff; /* kit-ui-check-ignore: app token definition */
+  --accent-rose-foreground: #ffffff; /* kit-ui-check-ignore: app token definition */
+  --accent-purple-foreground: #ffffff; /* kit-ui-check-ignore: app token definition */
+  --accent-amber-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-green-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-coral-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-black-foreground: #ffffff; /* kit-ui-check-ignore: app token definition */
+  --accent-teal-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-red-foreground: #ffffff; /* kit-ui-check-ignore: app token definition */
+  --accent-indigo-foreground: #000000; /* kit-ui-check-ignore: app token definition */
+  --accent-orange-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-sky-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-pink-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-lime-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-cyan-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-violet-foreground: #ffffff; /* kit-ui-check-ignore: app token definition */
+  /* Tool-category color map (see internal/parser/taxonomy.go for normalized values) */
+  --cat-read:  #4a7ba8; /* Read, Grep, Glob */ /* kit-ui-check-ignore: app token definition */
+  --cat-edit:  #5a8b3a; /* Edit, Write */ /* kit-ui-check-ignore: app token definition */
+  --cat-bash:  #d4a35a; /* Bash */ /* kit-ui-check-ignore: app token definition */
+  --cat-task:  #c45a5a; /* Task / sub-agents */ /* kit-ui-check-ignore: app token definition */
+  --cat-tool:  #7a5fa8; /* Tool: Skills, MCP, misc */ /* kit-ui-check-ignore: app token definition */
+  --cat-other: #888888; /* Other */ /* kit-ui-check-ignore: app token definition */
+  --cat-mixed: #4a4a4a; /* Mixed: parallel-group rail, no-dominant */ /* kit-ui-check-ignore: app token definition */
+  /* Categorical chart series (skill trend and similar stacked charts).
+     Fixed slot order, validated as a set for CVD separation and contrast
+     against the light surface. "other" is the deliberate de-emphasis gray
+     for the folded tail, not a series hue. */
+  --chart-series-1: #2a78d6; /* kit-ui-check-ignore: app token definition */
+  --chart-series-2: #1baf7a; /* kit-ui-check-ignore: app token definition */
+  --chart-series-3: #eda100; /* kit-ui-check-ignore: app token definition */
+  --chart-series-4: #008300; /* kit-ui-check-ignore: app token definition */
+  --chart-series-5: #4a3aa7; /* kit-ui-check-ignore: app token definition */
+  --chart-series-6: #e34948; /* kit-ui-check-ignore: app token definition */
+  --chart-series-other: #898781; /* kit-ui-check-ignore: app token definition */
+  /* Duration UX state colors */
+  --slow-fg:    #f29070; /* kit-ui-check-ignore: app token definition */
+  --slow-bg:    rgba(242, 144, 112, 0.12); /* kit-ui-check-ignore: app token definition */
+  --slow-ring:  rgba(242, 144, 112, 0.20); /* kit-ui-check-ignore: app token definition */
+  --running-fg: #6ad0a8; /* kit-ui-check-ignore: app token definition */
+  --running-bg: rgba(106, 208, 168, 0.12); /* kit-ui-check-ignore: app token definition */
+  --running-ring: rgba(106, 208, 168, 0.22); /* kit-ui-check-ignore: app token definition */
+  --user-bg: #eef2ff; /* kit-ui-check-ignore: app token definition */
+  --assistant-bg: #faf9ff; /* kit-ui-check-ignore: app token definition */
+  --thinking-bg: #f5f3ff; /* kit-ui-check-ignore: app token definition */
+  --tool-bg: #fffbf0; /* kit-ui-check-ignore: app token definition */
+  --code-bg: #1e1e2e; /* kit-ui-check-ignore: app token definition */
+  --code-text: #cdd6f4; /* kit-ui-check-ignore: app token definition */
+  --viewport-indicator: rgba(0, 0, 0, 0.08); /* kit-ui-check-ignore: app token definition */
 }
 
-/* Dark theme */
+/* Dark theme — app-specific tokens */
 :root.dark {
-  --bg-primary: #0d0d12;
-  --bg-surface: #16161e;
-  --bg-surface-hover: #1f1f2a;
-  --bg-inset: #111116;
-  --border-default: #2b2b38;
-  --border-muted: #232330;
-  --text-primary: #e4e6eb;
-  --text-secondary: #9ea5b4;
-  --text-muted: #6c7385;
-  --accent-blue: #60a5fa;
-  --accent-rose: #fb7185;
-  --accent-purple: #a78bfa;
-  --accent-amber: #fbbf24;
-  --accent-green: #34d399;
-  --accent-coral: #f34e3f;
-  --accent-black: #b0b0b0;
-  --accent-teal: #2dd4bf;
-  --accent-red: #f87171;
-  --accent-indigo: #818cf8;
-  --accent-teal: #2dd4bf;
-  --accent-orange: #f0a050;
-  --accent-sky: #38bdf8;
-  --accent-pink: #f472b6;
-  --accent-lime: #a3e635;
-  --user-bg: #111827;
-  --assistant-bg: #141220;
-  --thinking-bg: #1a1530;
-  --tool-bg: #1a1508;
-  --code-bg: #0d0d14;
-  --code-text: #cdd6f4;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
-  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.35);
-  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.4);
-  --viewport-indicator: rgba(255, 255, 255, 0.08);
-  --overlay-bg: rgba(0, 0, 0, 0.6);
-  --header-height: 40px;
-  --status-bar-height: 24px;
-  color-scheme: dark;
+  --accent-teal: #2dd4bf; /* kit-ui-check-ignore: app token definition */
+  --accent-rose: #fb7185; /* kit-ui-check-ignore: app token definition */
+  --accent-coral: #f34e3f; /* kit-ui-check-ignore: app token definition */
+  --accent-black: #b0b0b0; /* kit-ui-check-ignore: app token definition */
+  --accent-indigo: #818cf8; /* kit-ui-check-ignore: app token definition */
+  --accent-orange: #f0a050; /* kit-ui-check-ignore: app token definition */
+  --accent-sky: #38bdf8; /* kit-ui-check-ignore: app token definition */
+  --accent-pink: #f472b6; /* kit-ui-check-ignore: app token definition */
+  --accent-lime: #a3e635; /* kit-ui-check-ignore: app token definition */
+  --accent-cyan: #22d3ee; /* kit-ui-check-ignore: app token definition */
+  --accent-violet: #a78bfa; /* kit-ui-check-ignore: app token definition */
+  --accent-blue-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-rose-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-purple-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-amber-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-green-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-coral-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-black-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-teal-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-red-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-indigo-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-orange-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-sky-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-pink-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-lime-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-cyan-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  --accent-violet-foreground: #07111f; /* kit-ui-check-ignore: app token definition */
+  /* Same series hues stepped for the dark surface, not an automatic flip;
+     validated as a set against the dark surface. */
+  --chart-series-1: #3987e5; /* kit-ui-check-ignore: app token definition */
+  --chart-series-2: #199e70; /* kit-ui-check-ignore: app token definition */
+  --chart-series-3: #c98500; /* kit-ui-check-ignore: app token definition */
+  --chart-series-4: #008300; /* kit-ui-check-ignore: app token definition */
+  --chart-series-5: #9085e9; /* kit-ui-check-ignore: app token definition */
+  --chart-series-6: #e66767; /* kit-ui-check-ignore: app token definition */
+  --chart-series-other: #898781; /* kit-ui-check-ignore: app token definition */
+  --user-bg: #111827; /* kit-ui-check-ignore: app token definition */
+  --assistant-bg: #141220; /* kit-ui-check-ignore: app token definition */
+  --thinking-bg: #1a1530; /* kit-ui-check-ignore: app token definition */
+  --tool-bg: #1a1508; /* kit-ui-check-ignore: app token definition */
+  --code-bg: #0d0d14; /* kit-ui-check-ignore: app token definition */
+  --code-text: #cdd6f4; /* kit-ui-check-ignore: app token definition */
+  --viewport-indicator: rgba(255, 255, 255, 0.08); /* kit-ui-check-ignore: app token definition */
 }
 
 html,
@@ -103,7 +140,6 @@ body {
   height: 100%;
   overflow: hidden;
   font-family: var(--font-sans);
-  font-size: 13px;
   line-height: 1.5;
   color: var(--text-primary);
   background: var(--bg-primary);
@@ -111,6 +147,10 @@ body {
   -moz-osx-font-smoothing: grayscale;
   font-feature-settings: "cv11", "ss01";
   text-rendering: optimizeLegibility;
+}
+
+body {
+  font-size: var(--font-size-root);
 }
 
 #app {
@@ -141,12 +181,12 @@ body {
 /* Selection */
 ::selection {
   background: var(--accent-blue);
-  color: white;
+  color: var(--accent-blue-foreground);
 }
 
 /* Focus visible */
 :focus-visible {
-  outline: 2px solid var(--accent-blue);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -160,7 +200,7 @@ button {
 }
 
 button:disabled {
-  opacity: 0.5;
+  opacity: var(--opacity-disabled);
   cursor: not-allowed;
 }
 
@@ -175,25 +215,12 @@ select {
 code,
 pre {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--font-size-md);
 }
 
 pre {
   white-space: pre-wrap;
   word-wrap: break-word;
-}
-
-/* Utility: visually hidden */
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
 }
 
 /* Mark tag (search highlights) */
@@ -219,119 +246,7 @@ mark.search-highlight--current {
   outline-offset: 1px;
 }
 
-/* Modal shared styles */
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--overlay-bg);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-}
-
-.modal-panel {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-md);
-  overflow: hidden;
-}
-
-.modal-panel .modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border-default);
-}
-
-.modal-panel .modal-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.modal-panel .modal-close {
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 16px;
-  color: var(--text-muted);
-  border-radius: var(--radius-sm);
-}
-
-.modal-panel .modal-close:hover {
-  background: var(--bg-surface-hover);
-  color: var(--text-primary);
-}
-
-.modal-panel .modal-body {
-  padding: 16px;
-}
-
-.modal-panel .modal-btn {
-  height: 28px;
-  padding: 0 12px;
-  border-radius: var(--radius-sm);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  background: var(--bg-surface-hover);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-default);
-}
-
-.modal-panel .modal-btn:hover {
-  background: var(--bg-inset);
-  color: var(--text-primary);
-}
-
-.modal-panel .modal-btn-primary {
-  background: var(--accent-blue);
-  color: white;
-  border-color: var(--accent-blue);
-}
-
-.modal-panel .modal-btn-primary:hover {
-  opacity: 0.9;
-}
-
-.modal-panel .modal-btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.modal-panel .modal-error {
-  font-size: 12px;
-  color: var(--accent-red, #f85149);
-  background: var(--bg-inset);
-  padding: 8px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--accent-red, #f85149);
-  word-break: break-word;
-}
-
-.modal-panel .modal-spinner {
-  width: 24px;
-  height: 24px;
-  border: 2px solid var(--border-default);
-  border-top-color: var(--accent-blue);
-  border-radius: 50%;
-  animation: modal-spin 0.8s linear infinite;
-}
-
-@keyframes modal-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-/* Enlarge header on touch devices so layout offsets stay in sync */
-@media (pointer: coarse) {
-  :root {
-    --header-height: 44px;
-  }
+@keyframes duration-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
 }

@@ -3,6 +3,8 @@ package signals
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestClassifyOutcome(t *testing.T) {
@@ -205,12 +207,7 @@ func TestClassifyOutcome(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := ClassifyOutcome(tt.input)
-			if got != tt.wantResult {
-				t.Errorf(
-					"ClassifyOutcome() = %+v, want %+v",
-					got, tt.wantResult,
-				)
-			}
+			assert.Equal(t, tt.wantResult, got)
 		})
 	}
 }

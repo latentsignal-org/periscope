@@ -1,102 +1,576 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { m } from "../../i18n/index.js";
+  import { onMount, onDestroy, untrack } from "svelte";
+  import { analytics } from "../../stores/analytics.svelte.js";
+  import { analyticsPageDates } from "../../stores/analyticsPageDates.js";
   import { insights } from "../../stores/insights.svelte.js";
+  import { ui } from "../../stores/ui.svelte.js";
+  import { getBasePath, router } from "../../stores/router.svelte.js";
   import { sessions } from "../../stores/sessions.svelte.js";
+  import { sync } from "../../stores/sync.svelte.js";
+  import { events } from "../../stores/events.svelte.js";
+  import { downloadInsightExport } from "../../api/client.js";
+  import { copyToClipboard } from "../../utils/clipboard.js";
+  import {
+    yokedDates,
+    panelDateState,
+    panelStateToRange,
+    rangeToInsightParams,
+    rangeToPanelDate,
+    type PanelDateState,
+  } from "../../stores/yokedDates.svelte.js";
   import { renderMarkdown } from "../../utils/markdown.js";
-  import type { InsightType, AgentName } from "../../api/types.js";
+  import { rollingRange } from "../../utils/dates.js";
+  import { scoreToGrade } from "../../utils/grade.js";
+  import { agentLabel } from "../../utils/agents.js";
+  import { AnalyticsService } from "../../api/generated/index.js";
+  import { callGenerated, isAbortError } from "../../api/runtime.js";
+  import { LatestRead } from "../../utils/latest-read.js";
+  import type {
+    AgentName,
+    AutomatedScope,
+    CannedInsightKind,
+    InsightGenerationFilters,
+    InsightType,
+    SignalCalibration,
+    SignalSessionExample,
+  } from "../../api/types.js";
+  import { Button, Card, CopyButton, IconButton, Typeahead } from "@kenn-io/kit-ui";
   import ProjectTypeahead from "../layout/ProjectTypeahead.svelte";
+  import RangePicker from "../shared/RangePicker.svelte";
+  import {
+    resolveRange,
+    selectionFromWindow,
+    type RangeSelection,
+  } from "../shared/rangeSelection.js";
+  import {
+    buildQualityPatterns,
+    buildQualitySummary,
+    buildRuleBasedRecommendations,
+    type QualityPatternSeverity,
+    type QualityPatternView,
+  } from "./qualityPatterns.js";
 
-  type UIMode =
-    | "daily_activity"
-    | "range_activity"
-    | "agent_analysis";
+  const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+  const INSIGHTS_WINDOW_PARAM = "window_days";
+  const INSIGHTS_DATE_PARAM_KEYS = [
+    INSIGHTS_WINDOW_PARAM,
+    "date_from",
+    "date_to",
+  ] as const;
+  type AnalyticsParams = Parameters<
+    typeof AnalyticsService.getApiV1AnalyticsSignals
+  >[0];
 
-  let promptExpanded = $state(false);
+  let refreshTimer: ReturnType<typeof setInterval> | undefined;
+  let unsubEvents: (() => void) | undefined;
+  let copiedInsightLinkId: number | null = $state(null);
+  let copiedInsightLinkTimer:
+    | ReturnType<typeof setTimeout>
+    | undefined;
+  let selectedSignalId: string | null = $state(null);
+  let signalExamples: SignalSessionExample[] = $state([]);
+  let signalExamplesLoading = $state(false);
+  let signalExamplesError: string | null = $state(null);
+  let signalExamplesFilterKey: string | null = $state(null);
+  let signalExamplesRequest = 0;
+  const signalEvidenceRead = new LatestRead();
+  // A materialized page default is not date intent. Only picker input, a
+  // dated URL, or a shared seed may serialize dates back into the URL.
+  let insightDateIntentEstablished = false;
 
-  const uiMode: UIMode = $derived.by(() => {
-    if (insights.type === "agent_analysis") {
-      return "agent_analysis";
-    }
-    if (insights.dateFrom !== insights.dateTo) {
-      return "range_activity";
-    }
-    return "daily_activity";
+  const signals = $derived(analytics.signals);
+  const summary = $derived(buildQualitySummary(signals));
+  const patterns = $derived(buildQualityPatterns(signals));
+  const recommendations = $derived(
+    buildRuleBasedRecommendations(patterns),
+  );
+  const loading = $derived(analytics.loading.signals);
+  const error = $derived(analytics.errors.signals);
+  const insightGenerationAvailable = $derived(
+    sync.serverVersion?.insight_generation_available === true ||
+      sync.serverVersion?.read_only !== true,
+  );
+  const generationUnavailable = $derived(
+    sync.serverVersion === null || !insightGenerationAvailable,
+  );
+  const earliestSession = $derived(sync.stats?.earliest_session ?? null);
+  const rangeSelection = $derived(
+    selectionFromWindow({
+      isPinned: analytics.isPinned,
+      windowDays: analytics.windowDays,
+      from: analytics.from,
+      to: analytics.to,
+      earliestSession,
+    }),
+  );
+  const hasData = $derived(
+    summary.totalSessions > 0 || summary.computedQualitySessions > 0,
+  );
+  const maxGradeCount = $derived(
+    Math.max(
+      1,
+      ...summary.scoreDistribution.map((bucket) => bucket.count),
+    ),
+  );
+  const generationAgentNames = [
+    "claude",
+    "codex",
+    "copilot",
+    "gemini",
+    "kiro",
+  ] satisfies AgentName[];
+  const agentOptions = $derived.by(() => {
+    const opts = [...sessions.agents]
+      .sort((a, b) => b.session_count - a.session_count)
+      .map((agent) => ({
+        name: agent.name,
+        label: `${agentLabel(agent.name)} (${agent.session_count})`,
+        displayLabel: agentLabel(agent.name),
+        count: agent.session_count,
+      }));
+    return [
+      {
+        name: "",
+        label: m.insights_page_all_agents(),
+        displayLabel: m.insights_page_all_agents(),
+        count: 0,
+      },
+      ...opts,
+    ];
   });
+  const generationAgentOptions = generationAgentNames.map((name) => ({
+    name,
+    label: agentLabel(name),
+    displayLabel: agentLabel(name),
+  }));
+  const templateOptions = $derived([
+    { name: "prompt_maturity_review", label: m.insights_page_template_prompt_maturity() },
+    { name: "context_setup_review", label: m.insights_page_template_context_setup() },
+    { name: "workflow_hygiene_review", label: m.insights_page_template_workflow_hygiene() },
+    { name: "tool_reliability_review", label: m.insights_page_template_tool_reliability() },
+    { name: "model_cost_review", label: m.insights_page_template_model_cost() },
+    {
+      name: "instruction_opportunity_review",
+      label: m.insights_page_template_instruction_opportunities(),
+    },
+  ]);
+  const scopeOptions = $derived([
+    { name: "human", label: m.insights_page_scope_no_automated() },
+    { name: "all", label: m.insights_page_scope_both() },
+    { name: "automated", label: m.insights_page_scope_only_automated() },
+  ]);
 
-  function isRangeMode(mode: UIMode): boolean {
-    return mode === "range_activity";
-  }
-
-  function handleModeChange(e: Event) {
-    const select = e.target as HTMLSelectElement;
-    const mode = select.value as UIMode;
-    if (mode === "range_activity") {
-      insights.setType("daily_activity");
-      if (insights.dateFrom === insights.dateTo) {
-        const d = new Date(
-          insights.dateFrom + "T00:00:00",
-        );
-        d.setDate(d.getDate() + 6);
-        insights.setDateTo(localDateStr(d));
-      }
+  function applyRange(sel: RangeSelection) {
+    let state: PanelDateState | null = null;
+    if (sel.mode === "relative" && sel.days > 0) {
+      analytics.setRollingWindow(sel.days);
+      state = panelDateState(analytics.from, analytics.to, {
+        mode: "rolling",
+        windowDays: sel.days,
+      });
     } else {
-      insights.setType(
-        mode === "agent_analysis"
-          ? "agent_analysis"
-          : "daily_activity",
-      );
-      insights.setDateTo(insights.dateFrom);
+      const range = resolveRange(sel, earliestSession);
+      analytics.setDateRange(range.from, range.to);
+      state = panelDateState(range.from, range.to, { mode: "fixed" });
+    }
+    updateYokeFromInsights(state);
+  }
+
+  function parseInsightWindowDays(raw: string | undefined): number | null {
+    if (!raw) return null;
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isInteger(n) || n <= 0 || String(n) !== raw) {
+      return null;
+    }
+    return n;
+  }
+
+  function insightParamsToPanelDate(
+    params: Record<string, string>,
+  ): PanelDateState | null {
+    const windowDays = parseInsightWindowDays(params[INSIGHTS_WINDOW_PARAM]);
+    if (windowDays !== null) {
+      const range = rollingRange(windowDays);
+      return panelDateState(range.from, range.to, {
+        mode: "rolling",
+        windowDays,
+      });
+    }
+    return panelDateState(
+      params.date_from ?? "",
+      params.date_to ?? "",
+      { mode: "fixed" },
+    );
+  }
+
+  function hasInsightDateParams(
+    params: Record<string, string>,
+  ): boolean {
+    return !!params.date_from || !!params.date_to ||
+      !!params[INSIGHTS_WINDOW_PARAM];
+  }
+
+  function applyInsightPanelDate(state: PanelDateState): boolean {
+    const before = JSON.stringify({
+      from: analytics.from,
+      to: analytics.to,
+      isPinned: analytics.isPinned,
+      windowDays: analytics.windowDays,
+    });
+    if (state.mode === "rolling" && state.windowDays) {
+      analytics.applyRollingWindow(state.windowDays);
+    } else {
+      analytics.applyDateRange(state.from, state.to);
+    }
+    const after = JSON.stringify({
+      from: analytics.from,
+      to: analytics.to,
+      isPinned: analytics.isPinned,
+      windowDays: analytics.windowDays,
+    });
+    return before !== after;
+  }
+
+  function currentInsightPanelDate(): PanelDateState | null {
+    if (!analytics.isPinned) {
+      return panelDateState(analytics.from, analytics.to, {
+        mode: "rolling",
+        windowDays: analytics.windowDays,
+      });
+    }
+    return panelDateState(analytics.from, analytics.to, {
+      mode: "fixed",
+    });
+  }
+
+  function paramsWithInsightDate(
+    state: PanelDateState | null = insightDateIntentEstablished
+      ? currentInsightPanelDate()
+      : null,
+    extra: Record<string, string> = {},
+  ): Record<string, string> {
+    const nextParams = { ...router.params };
+    for (const key of INSIGHTS_DATE_PARAM_KEYS) {
+      delete nextParams[key];
+    }
+    if (state) {
+      const range = panelStateToRange(state, Date.now());
+      if (range) {
+        Object.assign(nextParams, rangeToInsightParams(range));
+      }
+    }
+    return { ...nextParams, ...extra };
+  }
+
+  function writeInsightDateParams(state: PanelDateState): void {
+    router.replaceParams(paramsWithInsightDate(state));
+  }
+
+  function updateYokeFromInsights(state: PanelDateState | null): void {
+    if (!state) return;
+    insightDateIntentEstablished = true;
+    yokedDates.updateFromPanel(state);
+    writeInsightDateParams(state);
+  }
+
+  function seedInsightsYoke(): void {
+    const urlState = insightParamsToPanelDate(router.params);
+    if (urlState) {
+      insightDateIntentEstablished = true;
+      applyInsightPanelDate(urlState);
+      yokedDates.updateFromPanel(urlState);
+      return;
+    }
+    if (hasInsightDateParams(router.params)) return;
+
+    const seed = yokedDates.seedForPanel();
+    const retained = seed
+      ? null
+      : analyticsPageDates.restoreWithIntent("insights");
+    const state = seed
+      ? rangeToPanelDate(seed)
+      : retained?.state ?? null;
+    if (!state) return;
+    if (retained) {
+      insightDateIntentEstablished = retained.explicitDateIntent;
+    }
+    applyInsightPanelDate(state);
+    if (retained?.explicitDateIntent) {
+      yokedDates.updateFromPanel(state);
+    }
+    if (seed || retained?.explicitDateIntent) {
+      insightDateIntentEstablished = true;
+      writeInsightDateParams(state);
     }
   }
 
-  function handleDateChange(e: Event) {
-    const input = e.target as HTMLInputElement;
-    insights.setDateFrom(input.value);
-    insights.setDateTo(input.value);
-  }
-
-  function handleDateFromChange(e: Event) {
-    const input = e.target as HTMLInputElement;
-    insights.setDateFrom(input.value);
-    if (input.value > insights.dateTo) {
-      insights.setDateTo(input.value);
+  function fetchInsightSignals() {
+    analytics.fetchSignalsForInsights();
+    const state = currentInsightPanelDate();
+    if (state?.mode === "rolling" && insightDateIntentEstablished) {
+      if (yokedDates.range !== null) {
+        yokedDates.updateFromPanel(state);
+      }
+      writeInsightDateParams(state);
     }
-  }
-
-  function handleDateToChange(e: Event) {
-    const input = e.target as HTMLInputElement;
-    insights.setDateTo(input.value);
-    if (input.value < insights.dateFrom) {
-      insights.setDateFrom(input.value);
-    }
-  }
-
-  function setPreset(days: number) {
-    const today = new Date();
-    const from = new Date(today);
-    from.setDate(from.getDate() - days);
-    insights.setDateFrom(localDateStr(from));
-    insights.setDateTo(localDateStr(today));
-  }
-
-  function localDateStr(d: Date): string {
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    return `${y}-${m}-${day}`;
   }
 
   function handleProjectChange(value: string) {
-    insights.setProject(value);
+    analytics.project = value;
+    fetchInsightSignals();
   }
 
-  function handleAgentChange(e: Event) {
-    const select = e.target as HTMLSelectElement;
-    insights.setAgent(select.value as AgentName);
+  function handleAgentChange(value: string) {
+    analytics.agent = value;
+    fetchInsightSignals();
   }
 
-  function handleGenerate() {
+  function handleInsightAgentChange(value: string) {
+    insights.setAgent(value as AgentName);
+  }
+
+  function handleCannedKindChange(value: string) {
+    insights.setCannedKind(value as CannedInsightKind);
+  }
+
+  function handleAutomatedScopeChange(value: string) {
+    const scope = value as AutomatedScope;
+    analytics.automatedScope = scope;
+    analytics.includeAutomated = scope !== "human";
+    fetchInsightSignals();
+  }
+
+  function handlePromptChange(e: Event) {
+    const textarea = e.target as HTMLTextAreaElement;
+    insights.promptText = textarea.value;
+  }
+
+  function effectiveAutomatedScope(): AutomatedScope {
+    if (!analytics.includeAutomated) return "human";
+    if (analytics.automatedScope === "human") return "all";
+    return analytics.automatedScope;
+  }
+
+  function currentInsightFilters(): InsightGenerationFilters {
+    const filters: InsightGenerationFilters = {
+      timezone: analytics.timezone,
+      include_one_shot: analytics.includeOneShot,
+      automated_scope: effectiveAutomatedScope(),
+    };
+    if (analytics.machine) filters.machine = analytics.machine;
+    if (analytics.agent) filters.agent = analytics.agent;
+    if (analytics.termination) {
+      filters.termination = analytics.termination;
+    }
+    if (analytics.minUserMessages > 0) {
+      filters.min_user_messages = analytics.minUserMessages;
+    }
+    if (analytics.recentlyActive) {
+      filters.active_since = new Date(
+        Date.now() - 24 * 60 * 60 * 1000,
+      ).toISOString();
+    }
+    return filters;
+  }
+
+  function handleGenerateCanned() {
+    if (generationUnavailable) return;
+    const filters = currentInsightFilters();
+    insights.setType("llm_canned");
+    insights.setDateFrom(analytics.from);
+    insights.setDateTo(analytics.to);
+    insights.setProject(analytics.project);
+    insights.setAutomatedScope(filters.automated_scope ?? "human");
+    insights.setSessionFilters(filters);
     insights.generate();
+  }
+
+  function handleRefresh() {
+    fetchInsightSignals();
+    insights.load();
+  }
+
+  function signalEvidenceKey(
+    signal: string,
+    params: AnalyticsParams,
+  ): string {
+    const entries = Object.entries(params)
+      .filter(([, value]) => value !== undefined && value !== "")
+      .sort(([a], [b]) => a.localeCompare(b));
+    return JSON.stringify({ signal, params: Object.fromEntries(entries) });
+  }
+
+  async function openSignalEvidence(signal: string) {
+    const params = analytics.signalEvidenceParams();
+    const requestKey = signalEvidenceKey(signal, params);
+    const request = ++signalExamplesRequest;
+    const requestSignal = signalEvidenceRead.begin();
+    selectedSignalId = signal;
+    signalExamplesFilterKey = requestKey;
+    signalExamplesLoading = true;
+    signalExamplesError = null;
+    try {
+      const response = await callGenerated(
+        () => AnalyticsService.getApiV1AnalyticsSignalSessions({
+          ...params,
+          signal,
+          limit: 8,
+        }),
+        requestSignal,
+      );
+      if (
+        signalEvidenceRead.isCurrent(requestSignal) &&
+        selectedSignalId === signal &&
+        signalExamplesFilterKey === requestKey &&
+        signalExamplesRequest === request
+      ) {
+        signalExamples = response.sessions ?? [];
+      }
+    } catch (err) {
+      if (
+        isAbortError(err) ||
+        !signalEvidenceRead.isCurrent(requestSignal)
+      ) return;
+      if (
+        selectedSignalId === signal &&
+        signalExamplesFilterKey === requestKey &&
+        signalExamplesRequest === request
+      ) {
+        signalExamples = [];
+        signalExamplesError =
+          err instanceof Error ? err.message : m.insights_page_could_not_load_examples();
+      }
+    } finally {
+      if (
+        signalEvidenceRead.finish(requestSignal) &&
+        selectedSignalId === signal &&
+        signalExamplesFilterKey === requestKey &&
+        signalExamplesRequest === request
+      ) {
+        signalExamplesLoading = false;
+      }
+    }
+  }
+
+  function openEvidenceSession(
+    example: SignalSessionExample,
+    event: MouseEvent,
+  ) {
+    event.preventDefault();
+    const params = evidenceSessionParams(example);
+    // Route-first: App's deep-link effect owns selection and
+    // hydration once the URL commits (#1190).
+    router.navigateToSession(example.session_id, params);
+    if (example.message_ordinal != null) {
+      ui.scrollToOrdinal(example.message_ordinal, example.session_id);
+    }
+  }
+
+  function openEvidenceListSession(event: MouseEvent) {
+    if (
+      !(event.target instanceof Element) ||
+      !(event.currentTarget instanceof HTMLElement)
+    ) return;
+    const link = event.target.closest<HTMLAnchorElement>("a.evidence-row");
+    if (!link) return;
+    const links = Array.from(
+      event.currentTarget.querySelectorAll<HTMLAnchorElement>(
+        "a.evidence-row",
+      ),
+    );
+    const example = signalExamples[links.indexOf(link)];
+    if (!example) return;
+    openEvidenceSession(example, event);
+  }
+
+  function delegateEvidenceClicks(node: HTMLElement) {
+    const handleClick = (event: MouseEvent) => {
+      openEvidenceListSession(event);
+    };
+    node.addEventListener("click", handleClick);
+    return {
+      destroy() {
+        node.removeEventListener("click", handleClick);
+      },
+    };
+  }
+
+  function evidenceSessionParams(
+    example: SignalSessionExample,
+  ): Record<string, string> {
+    return example.message_ordinal == null
+      ? {}
+      : { msg: String(example.message_ordinal) };
+  }
+
+  function insightLinkPath(id: number): string {
+    const params = new URLSearchParams();
+    const dateParams = paramsWithInsightDate();
+    if (Object.hasOwn(router.params, "desktop")) {
+      params.set("desktop", router.params.desktop ?? "");
+    }
+    for (const [key, value] of Object.entries(dateParams)) {
+      if (key !== "desktop" && key !== "insight") {
+        params.set(key, value);
+      }
+    }
+    params.set("insight", String(id));
+    return `${getBasePath()}/insights?${params.toString()}`;
+  }
+
+  function insightLinkUrl(id: number): string {
+    return new URL(
+      insightLinkPath(id),
+      window.location.origin,
+    ).toString();
+  }
+
+  async function handleCopyInsightLink(id: number) {
+    const ok = await copyToClipboard(insightLinkUrl(id));
+    if (!ok) return;
+    copiedInsightLinkId = id;
+    clearTimeout(copiedInsightLinkTimer);
+    copiedInsightLinkTimer = setTimeout(() => {
+      copiedInsightLinkId = null;
+    }, 1500);
+  }
+
+  function selectGeneratedInsight(id: number) {
+    insights.select(id);
+    router.replaceParams(
+      paramsWithInsightDate(undefined, {
+        insight: String(id),
+      }),
+    );
+  }
+
+  function selectGeneratedTask(clientId: string) {
+    insights.selectTask(clientId);
+    const params = paramsWithInsightDate();
+    delete params.insight;
+    router.replaceParams(params);
+  }
+
+  function selectedInsightFromRoute(): number | null {
+    const raw = router.params.insight;
+    if (!raw) return null;
+    const id = Number.parseInt(raw, 10);
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+    return id;
+  }
+
+  function formatDateRange(from: string, to: string): string {
+    if (from === to) return formatDate(from);
+    return m.insights_page_date_range({ from: formatDate(from), to: formatDate(to) });
+  }
+
+  function formatDate(date: string): string {
+    const d = new Date(date + "T00:00:00");
+    return d.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+    });
   }
 
   function formatTime(iso: string): string {
@@ -107,1100 +581,1510 @@
     });
   }
 
-  function formatDate(date: string): string {
-    const d = new Date(date + "T00:00:00");
-    return d.toLocaleDateString(undefined, {
-      weekday: "short",
-      month: "short",
-      day: "numeric",
-    });
+  function severityLabel(severity: QualityPatternSeverity): string {
+    switch (severity) {
+      case "critical":
+        return m.insights_page_severity_critical();
+      case "warning":
+        return m.insights_page_severity_warning();
+      case "watch":
+        return m.insights_page_severity_watch();
+      case "clear":
+        return m.insights_page_severity_clear();
+      case "unavailable":
+        return m.insights_page_severity_unavailable();
+    }
   }
 
-  function formatDateShort(date: string): string {
-    const d = new Date(date + "T00:00:00");
-    return d.toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-    });
+  function affectedLabel(pattern: QualityPatternView): string {
+    if (pattern.totalSessions === 0) return m.insights_page_no_computed_sessions();
+    return m.insights_page_affected_sessions({ affected: pattern.affectedSessions, total: pattern.totalSessions });
   }
 
-  function formatDateRange(
-    from: string,
-    to: string,
+  function pct(count: number, total: number): number {
+    if (total <= 0) return 0;
+    return Math.round((count / total) * 100);
+  }
+
+  function maxTrend(pattern: QualityPatternView): number {
+    return Math.max(1, ...pattern.trend.map((p) => p.value));
+  }
+
+  function calibrationFor(signal: string): SignalCalibration | null {
+    return signals?.calibration?.[signal] ?? null;
+  }
+
+  function calibrationLabel(signal: string): string {
+    if (signal.startsWith("outcome_")) {
+      return m.insights_page_calibration_outcome_cohort();
+    }
+    const calibration = calibrationFor(signal);
+    if (!calibration) {
+      return m.insights_page_calibration_examples_only();
+    }
+    if (calibration.affected_sessions === 0) {
+      return m.insights_page_calibration_no_affected();
+    }
+    if (calibration.incomplete_lift == null) {
+      return m.insights_page_calibration_incomplete_rate({ rate: calibration.affected_incomplete_rate });
+    }
+    return m.insights_page_calibration_incomplete_lift({ lift: calibration.incomplete_lift.toFixed(1) });
+  }
+
+  function selectedSignalLabel(): string {
+    if (!selectedSignalId) return m.insights_page_signal_examples();
+    for (const pattern of patterns) {
+      const found = pattern.drivers.find(
+        (driver) => driver.id === selectedSignalId,
+      );
+      if (found) return found.label;
+    }
+    return selectedSignalId;
+  }
+
+  function qualityBadge(example: SignalSessionExample): string {
+    if (example.health_grade) return m.insights_page_grade_badge({ grade: example.health_grade });
+    if (example.health_score != null) return String(example.health_score);
+    return m.insights_page_unscored();
+  }
+
+  function cannedKindLabel(
+    kind: CannedInsightKind | "" | undefined,
   ): string {
-    if (from === to) return formatDateShort(from);
-    return `${formatDateShort(from)} – ${formatDateShort(to)}`;
+    switch (kind) {
+      case "prompt_maturity_review":
+        return m.insights_page_template_prompt_maturity();
+      case "context_setup_review":
+        return m.insights_page_template_context_setup();
+      case "workflow_hygiene_review":
+        return m.insights_page_template_workflow_hygiene();
+      case "tool_reliability_review":
+        return m.insights_page_template_tool_reliability();
+      case "model_cost_review":
+        return m.insights_page_template_model_cost();
+      case "instruction_opportunity_review":
+        return m.insights_page_template_instruction_opportunities();
+      default:
+        return m.insights_page_generated_recommendation();
+    }
   }
 
-  function typeLabel(
+  function insightTypeLabel(
     type: InsightType,
-    from: string,
-    to: string,
+    kind: CannedInsightKind | "" | undefined,
   ): string {
-    if (type === "agent_analysis") return "Agent Analysis";
-    return from === to
-      ? "Daily Activity"
-      : "Date Range Activity";
+    if (type === "llm_canned") return cannedKindLabel(kind);
+    if (type === "agent_analysis") return m.insights_page_agent_analysis();
+    return m.insights_page_activity();
   }
 
-  function typeShort(
-    type: InsightType,
-    from: string,
-    to: string,
-  ): string {
-    if (type === "agent_analysis") return "Analysis";
-    return from === to ? "Daily" : "Range";
+  function cacheStatusLabel(status: string | undefined): string {
+    if (status === "hit") return m.insights_page_cache_hit();
+    if (status === "fresh") return m.insights_page_fresh();
+    return "";
+  }
+
+  async function handleInsightExport() {
+    if (!insights.selectedItem) return;
+    try {
+      await downloadInsightExport(insights.selectedItem.id);
+    } catch (error) {
+      console.error("Insight export failed:", error);
+    }
+  }
+
+  function openInsightPublish(secret: boolean) {
+    if (!insights.selectedItem) return;
+    ui.publishSecret = secret;
+    ui.setPublishTarget({
+      kind: "insight",
+      id: insights.selectedItem.id,
+    });
+    ui.activeModal = "publish";
   }
 
   onMount(() => {
+    seedInsightsYoke();
     sessions.loadProjects();
+    sessions.loadAgents();
+    fetchInsightSignals();
     insights.load();
+    refreshTimer = setInterval(
+      () => fetchInsightSignals(),
+      REFRESH_INTERVAL_MS,
+    );
+    unsubEvents = events.subscribeDebounced(() => {
+      fetchInsightSignals();
+    });
+  });
+
+  $effect(() => {
+    const headerProject = sessions.filters.project;
+    const headerMachine = sessions.filters.machine;
+    const headerAgent = sessions.filters.agent;
+    const headerTermination = sessions.filters.termination;
+    const headerRecentlyActive = sessions.filters.recentlyActive;
+    const headerMinUserMessages =
+      sessions.filters.minUserMessages;
+    const headerIncludeOneShot =
+      sessions.filters.includeOneShot;
+    const headerIncludeAutomated =
+      sessions.filters.includeAutomated;
+    const headerAutomatedScope = headerIncludeAutomated
+      ? "all"
+      : "human";
+
+    const changed =
+      untrack(() => analytics.project) !== headerProject ||
+      untrack(() => analytics.machine) !== headerMachine ||
+      untrack(() => analytics.agent) !== headerAgent ||
+      untrack(() => analytics.termination) !== headerTermination ||
+      untrack(() => analytics.recentlyActive) !==
+        headerRecentlyActive ||
+      untrack(() => analytics.minUserMessages) !==
+        (headerMinUserMessages > 0 ? headerMinUserMessages : 0) ||
+      untrack(() => analytics.includeOneShot) !==
+        headerIncludeOneShot ||
+      untrack(() => analytics.includeAutomated) !==
+        headerIncludeAutomated ||
+      untrack(() => analytics.automatedScope) !==
+        headerAutomatedScope;
+
+    if (changed) {
+      analytics.project = headerProject;
+      analytics.machine = headerMachine;
+      analytics.agent = headerAgent;
+      analytics.termination = headerTermination;
+      analytics.recentlyActive = headerRecentlyActive;
+      analytics.minUserMessages =
+        headerMinUserMessages > 0 ? headerMinUserMessages : 0;
+      analytics.includeOneShot = headerIncludeOneShot;
+      analytics.includeAutomated = headerIncludeAutomated;
+      analytics.automatedScope = headerAutomatedScope;
+      untrack(() => fetchInsightSignals());
+    }
+  });
+
+  onDestroy(() => {
+    insights.cancelInFlightReads();
+    analytics.cancelInFlightReads();
+    signalEvidenceRead.cancel();
+    const state = currentInsightPanelDate();
+    if (state) {
+      analyticsPageDates.retain(
+        "insights",
+        state,
+        insightDateIntentEstablished,
+      );
+    }
+    if (refreshTimer !== undefined) clearInterval(refreshTimer);
+    clearTimeout(copiedInsightLinkTimer);
+    unsubEvents?.();
+  });
+
+  $effect(() => {
+    const signal = selectedSignalId;
+    if (!signal) return;
+    const params = analytics.signalEvidenceParams();
+    const nextKey = signalEvidenceKey(signal, params);
+    if (signalExamplesFilterKey === nextKey) return;
+    signalExamples = [];
+    signalExamplesError = null;
+    untrack(() => void openSignalEvidence(signal));
+  });
+
+  $effect(() => {
+    if (router.route !== "insights") return;
+    const id = selectedInsightFromRoute();
+    if (id === null || insights.selectedId === id) return;
+    if (!insights.items.some((item) => item.id === id)) return;
+    insights.select(id);
   });
 </script>
 
 <div class="insights-page">
-  <div class="sidebar-panel">
-    <div class="controls">
-      <select
-        class="ctrl mode-ctrl"
-        value={uiMode}
-        onchange={handleModeChange}
-      >
-        <option value="daily_activity">Daily Activity</option>
-        <option value="range_activity">Date Range Activity</option>
-        <option value="agent_analysis">Agent Analysis</option>
-      </select>
+  <header class="toolbar">
+    <RangePicker
+      selection={rangeSelection}
+      busy={loading}
+      {earliestSession}
+      onSelect={applyRange}
+    />
 
-      {#if isRangeMode(uiMode)}
-        <div class="date-range-group">
-          <div class="controls-row">
-            <label class="date-label">
-              <span class="date-label-text">From</span>
-              <input
-                type="date"
-                class="ctrl date-ctrl"
-                value={insights.dateFrom}
-                onchange={handleDateFromChange}
-              />
-            </label>
-            <label class="date-label">
-              <span class="date-label-text">To</span>
-              <input
-                type="date"
-                class="ctrl date-ctrl"
-                value={insights.dateTo}
-                onchange={handleDateToChange}
-              />
-            </label>
-          </div>
-          <div class="presets-row">
-            <button class="preset-btn" onclick={() => setPreset(6)}>Last 7 days</button>
-            <button class="preset-btn" onclick={() => setPreset(29)}>Last 30 days</button>
-          </div>
-        </div>
-      {:else}
-        <input
-          type="date"
-          class="ctrl date-ctrl"
-          value={insights.dateFrom}
-          onchange={handleDateChange}
+    <div class="filter-group">
+      <ProjectTypeahead
+        projects={sessions.projects}
+        value={analytics.project}
+        onselect={handleProjectChange}
+      />
+      <Typeahead
+        options={agentOptions}
+        value={analytics.agent}
+        fallbackLabel={analytics.agent
+          ? agentLabel(analytics.agent)
+          : m.insights_page_all_agents()}
+        placeholder={m.insights_page_filter_agents()}
+        title={m.insights_page_filter_by_agent()}
+        emptyLabel={m.insights_page_no_matching_agents()}
+        onselect={handleAgentChange}
+      />
+      <label class="toolbar-scope">
+        <span>{m.insights_page_session_scope()}</span>
+        <Typeahead
+          options={scopeOptions}
+          value={analytics.automatedScope}
+          fallbackLabel={m.insights_page_scope_no_automated()}
+          placeholder={m.insights_page_filter_scopes()}
+          title={m.insights_page_filter_by_scope()}
+          emptyLabel={m.insights_page_no_matching_scopes()}
+          onselect={handleAutomatedScopeChange}
         />
-      {/if}
-
-      <div class="controls-row">
-        <ProjectTypeahead
-          projects={sessions.projects}
-          value={insights.project}
-          onselect={handleProjectChange}
-        />
-        <select
-          class="ctrl agent-ctrl"
-          value={insights.agent}
-          onchange={handleAgentChange}
-        >
-          <option value="claude">Claude</option>
-          <option value="codex">Codex</option>
-          <option value="copilot">Copilot</option>
-          <option value="gemini">Gemini</option>
-          <option value="kiro">Kiro</option>
-        </select>
-      </div>
-
-      {#if promptExpanded}
-        <textarea
-          class="prompt-area"
-          placeholder="Steer the insight with additional context..."
-          bind:value={insights.promptText}
-          rows="3"
-        ></textarea>
-      {/if}
-
-      <div class="action-row">
-        <button
-          class="prompt-toggle"
-          onclick={() => promptExpanded = !promptExpanded}
-          title={promptExpanded ? "Hide prompt" : "Add custom prompt"}
-        >
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M12.146.146a.5.5 0 01.708 0l3 3a.5.5 0 010 .708l-10 10a.5.5 0 01-.168.11l-5 2a.5.5 0 01-.65-.65l2-5a.5.5 0 01.11-.168l10-10zM11.207 2.5L13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 01.5.5v.5h.5a.5.5 0 01.5.5v.5h.293l6.5-6.5zm-9.761 5.175l-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 015.5 13H5v-.5a.5.5 0 00-.5-.5H4v-.5a.5.5 0 00-.468-.498z"/>
-          </svg>
-          {promptExpanded ? "Hide" : "Prompt"}
-        </button>
-        <button
-          class="generate-btn"
-          onclick={handleGenerate}
-          disabled={insights.loading}
-        >
-          <svg
-            class="generate-icon"
-            width="12"
-            height="12"
-            viewBox="0 0 16 16"
-            fill="currentColor"
-          >
-            <path d="M8 1a.5.5 0 01.5.5V6h4.5a.5.5 0 010 1H8.5v4.5a.5.5 0 01-1 0V7H3a.5.5 0 010-1h4.5V1.5A.5.5 0 018 1z" transform="translate(0, 2)"/>
-          </svg>
-          Generate
-        </button>
-      </div>
+      </label>
     </div>
 
-    <div class="list-area">
-      {#if insights.tasks.length > 0}
-        <div class="list-section-header">
-          <span class="section-title">
-            {#if insights.generatingCount > 0}
-              <span class="live-dot"></span>
-            {/if}
-            Tasks
-            <span class="active-count">{insights.tasks.length}</span>
-          </span>
-          {#if insights.generatingCount > 1}
-            <button
-              class="cancel-all"
-              onclick={() => insights.cancelAll()}
-            >
-              Stop all
-            </button>
-          {/if}
+    <IconButton
+      class="toolbar-refresh"
+      onclick={handleRefresh}
+      title={m.insights_page_refresh()}
+      ariaLabel={m.insights_page_refresh()}
+    >
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M8 3a5 5 0 00-4.546 2.914.5.5 0 01-.908-.418A6 6 0 0114 8a.5.5 0 01-1 0 5 5 0 00-5-5zm4.546 7.086a.5.5 0 01.908.418A6 6 0 012 8a.5.5 0 011 0 5 5 0 005 5 5 5 0 004.546-2.914z"/>
+      </svg>
+    </IconButton>
+  </header>
+
+  <main class="content">
+    <section class="section-block" aria-labelledby="actions-title">
+      <div class="section-heading compact">
+        <div>
+          <div class="eyebrow">
+            <span class="badge rule">{m.insights_page_rule_based()}</span>
+            <span>{m.insights_page_next_actions()}</span>
+          </div>
+          <h2 id="actions-title">{m.insights_page_deterministic_recommendations()}</h2>
         </div>
-        {#each insights.tasks as task (task.clientId)}
-          <div
-            class="task-item"
-            class:task-error={task.status === "error"}
-            class:selected={insights.selectedTaskId === task.clientId}
-            role="button"
-            tabindex="0"
-            onclick={() => insights.selectTask(task.clientId)}
-            onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) insights.selectTask(task.clientId); }}
+        <p class="insights-help">
+          {m.insights_page_insights_help_intro()}
+          <a
+            href="https://www.agentsview.io/insights/"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="insights-help-link"
           >
-            <div class="task-indicator">
-              {#if task.status === "generating"}
-                <span class="spinner"></span>
-              {:else}
-                <span class="error-pip"></span>
-              {/if}
+            {m.insights_page_insights_help_docs()}
+          </a>
+        </p>
+      </div>
+
+      {#if recommendations.length === 0}
+        <Card level="default" padding="none" class="state-panel compact-state">
+          <strong>{m.insights_page_no_rule_actions()}</strong>
+          <span>
+            {m.insights_page_patterns_clear()}
+          </span>
+        </Card>
+      {:else}
+        <div class="recommendation-list">
+          {#each recommendations as rec}
+            <Card level="default" padding="none" class="recommendation">
+              <article class="recommendation-content">
+                <span class="badge rule">{m.insights_page_rule_based()}</span>
+                <strong>{rec.label}</strong>
+                <p>{rec.rationale}</p>
+              </article>
+            </Card>
+          {/each}
+        </div>
+      {/if}
+    </section>
+
+    <section class="section-block" aria-labelledby="facts-title">
+      <div class="section-heading">
+        <div>
+          <div class="eyebrow">
+            <span class="badge rule">{m.insights_page_rule_based()}</span>
+            <span>{m.insights_page_scored_facts()}</span>
+          </div>
+          <h2 id="facts-title">{m.insights_page_quality_patterns()}</h2>
+        </div>
+        <p>
+          {m.insights_page_deterministic_counts({ range: formatDateRange(analytics.from, analytics.to) })}
+        </p>
+      </div>
+
+      {#if loading && !signals}
+        <div class="summary-grid" aria-live="polite">
+          {#each Array(4) as _}
+            <div class="skeleton-card"></div>
+          {/each}
+        </div>
+        <div class="pattern-grid">
+          {#each Array(4) as _}
+            <Card level="default" padding="none" class="skeleton-pattern"></Card>
+          {/each}
+        </div>
+      {:else if error && !signals}
+        <Card level="default" padding="none" class="state-panel error">
+          <div class="state-panel-alert" role="alert">
+            <strong>{m.insights_page_could_not_load()}</strong>
+            <span>{error}</span>
+            <button onclick={fetchInsightSignals}>
+              {m.insights_page_retry()}
+            </button>
+          </div>
+        </Card>
+      {:else if !hasData}
+        <Card level="default" padding="none" class="state-panel">
+          <strong>{m.insights_page_no_scored_data()}</strong>
+          <span>
+            {m.insights_page_no_scored_data_hint()}
+          </span>
+        </Card>
+      {:else}
+        {#if error}
+          <Card level="default" padding="none" class="inline-warning">
+            <div role="status">
+              {m.insights_page_cached_warning({ error })}
             </div>
-            <div class="task-body">
-              <div class="task-main">
-                <span class="task-label">
-                  {typeShort(task.type, task.dateFrom, task.dateTo)}
-                  <span class="task-date">
-                    {formatDateRange(task.dateFrom, task.dateTo)}
-                  </span>
-                </span>
-                <span class="task-scope">
-                  {task.project || "global"}
+          </Card>
+        {/if}
+
+        <div class="summary-grid">
+          <Card level="default" padding="none" class="summary-card">
+            <article class="summary-card-content">
+              <span class="label">{m.insights_page_average_score()}</span>
+              <strong>
+                {summary.avgHealthScore == null
+                  ? "--"
+                  : Math.round(summary.avgHealthScore)}
+              </strong>
+              <span>
+                {summary.avgHealthScore == null
+                  ? m.insights_page_no_scored_sessions()
+                  : m.insights_page_grade_badge({ grade: scoreToGrade(summary.avgHealthScore) })}
+              </span>
+            </article>
+          </Card>
+          <Card level="default" padding="none" class="summary-card">
+            <article class="summary-card-content">
+              <span class="label">{m.insights_page_scored_sessions()}</span>
+              <strong>{summary.scoredSessions}</strong>
+              <span>{m.insights_page_unscored_count({ count: summary.unscoredSessions })}</span>
+            </article>
+          </Card>
+          <Card level="default" padding="none" class="summary-card">
+            <article class="summary-card-content">
+              <span class="label">{m.insights_page_low_quality()}</span>
+              <strong>{summary.lowQualitySessions}</strong>
+              <span>{m.insights_page_df_graded()}</span>
+            </article>
+          </Card>
+          <Card level="default" padding="none" class="summary-card">
+            <article class="summary-card-content">
+              <span class="label">{m.insights_page_prompt_signals()}</span>
+              <strong>{summary.computedQualitySessions}</strong>
+              <span>{m.insights_page_sessions_computed()}</span>
+            </article>
+          </Card>
+        </div>
+
+        <Card
+          level="default"
+          padding="none"
+          class="distribution-row"
+          ariaLabel={m.insights_page_score_distribution()}
+        >
+          {#each summary.scoreDistribution as bucket}
+            <div class="grade-bar">
+              <span>{bucket.grade}</span>
+              <div class="bar-track">
+                <div
+                  class="bar-fill"
+                  style:width={`${(bucket.count / maxGradeCount) * 100}%`}
+                ></div>
+              </div>
+              <strong>{bucket.count}</strong>
+            </div>
+          {/each}
+        </Card>
+
+        <div class="pattern-grid">
+          {#each patterns as pattern}
+            <Card
+              level="default"
+              padding="none"
+              class={`pattern-card severity-${pattern.severity}`}
+            >
+              <article
+                class="pattern-card-content"
+                aria-labelledby={`${pattern.id}-title`}
+              >
+              <div class="pattern-head">
+                <div>
+                  <h3 id={`${pattern.id}-title`}>
+                    {pattern.title}
+                  </h3>
+                  <p>{pattern.summary}</p>
+                </div>
+                <span class="severity">
+                  {severityLabel(pattern.severity)}
                 </span>
               </div>
-              {#if task.status === "error"}
-                <span class="task-error-msg">{task.error}</span>
-              {:else}
-                <span class="task-phase">{task.phase}</span>
+
+              <div class="affected">
+                <strong>{affectedLabel(pattern)}</strong>
+                <span>
+                  {m.insights_page_pct_affected({ pct: pct(pattern.affectedSessions, pattern.totalSessions) })}
+                </span>
+              </div>
+
+              <div class="driver-list">
+                {#each pattern.drivers as driver}
+                  <button
+                    class="driver-row"
+                    class:active={selectedSignalId === driver.id}
+                    type="button"
+                    onclick={() => openSignalEvidence(String(driver.id))}
+                  >
+                    <span>{driver.label}</span>
+                    <strong>
+                      {driver.total}{driver.unit ?? ""}
+                    </strong>
+                    <em>{m.insights_page_driver_sessions({
+                      count: driver.sessions,
+                      countLabel: driver.sessions.toLocaleString(),
+                    })}</em>
+                    <small>{calibrationLabel(String(driver.id))}</small>
+                  </button>
+                {/each}
+              </div>
+
+              <div
+                class="sparkline"
+                aria-label={`${pattern.title}: ${pattern.trendLabel}`}
+              >
+                <span class="trend-caption">{pattern.trendLabel}</span>
+                {#each pattern.trend.slice(-16) as point}
+                  <span
+                    title={`${formatDate(point.date)}: ${point.value} ${point.label}`}
+                    style:height={`${Math.max(8, (point.value / maxTrend(pattern)) * 32)}px`}
+                  ></span>
+                {/each}
+              </div>
+              <p class="severity-note">{pattern.severityDescription}</p>
+
+              {#if pattern.examples.length > 0}
+                <div class="examples">
+                  <span class="examples-label">{pattern.examplesLabel}</span>
+                  {#each pattern.examples as example}
+                    <div class="example-row">
+                      <span>{example.label}</span>
+                      <em>{example.detail}</em>
+                    </div>
+                  {/each}
+                </div>
               {/if}
-            </div>
-            <span class="task-agent">{task.agent}</span>
-            <button
-              class="task-dismiss"
-              onclick={(e) => {
-                e.stopPropagation();
-                if (task.status === "error") {
-                  insights.dismissTask(task.clientId);
-                } else {
-                  insights.cancelTask(task.clientId);
-                }
-              }}
-              title={task.status === "error" ? "Dismiss" : "Cancel"}
-            >
-              <svg width="8" height="8" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 01-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"/>
-              </svg>
-            </button>
-            {#if task.status === "generating"}
-              <div class="shimmer-bar"></div>
-            {/if}
-          </div>
-        {/each}
+              </article>
+            </Card>
+          {/each}
+        </div>
+
+        {#if selectedSignalId}
+          <Card level="default" padding="none" class="evidence-panel">
+            <section class="evidence-panel-live" aria-live="polite">
+              <div class="evidence-head">
+              <div>
+                <span class="examples-label">{m.insights_page_session_evidence()}</span>
+                <h3>{selectedSignalLabel()}</h3>
+              </div>
+              <button
+                class="text-btn"
+                type="button"
+                onclick={() => {
+                  signalEvidenceRead.cancel();
+                  selectedSignalId = null;
+                  signalExamples = [];
+                  signalExamplesLoading = false;
+                  signalExamplesError = null;
+                  signalExamplesFilterKey = null;
+                }}
+              >
+                {m.insights_page_close()}
+              </button>
+              </div>
+              {#if signalExamplesLoading}
+                <p class="evidence-state">{m.insights_page_loading_examples()}</p>
+              {:else if signalExamplesError}
+                <p class="evidence-state error">{signalExamplesError}</p>
+              {:else if signalExamples.length === 0}
+                <p class="evidence-state">
+                  {m.insights_page_no_triggering_sessions()}
+                </p>
+              {:else}
+                <div class="evidence-list" use:delegateEvidenceClicks>
+                  {#each signalExamples as example}
+                    <Card
+                      level="inset"
+                      padding="none"
+                      class="evidence-row"
+                      href={router.buildSessionHref(
+                      example.session_id,
+                      evidenceSessionParams(example),
+                    )}
+                    >
+                      <span class="evidence-main">
+                        <strong>{example.project || m.insights_page_unassigned_project()}</strong>
+                        <em>{example.excerpt || m.insights_page_no_excerpt()}</em>
+                      </span>
+                      <span class="evidence-meta">
+                        <span>{agentLabel(example.agent)}</span>
+                        <span>{example.outcome || m.insights_page_unknown()}</span>
+                        <span>{qualityBadge(example)}</span>
+                        <span>{m.insights_page_failures({ count: example.failure_signals })}</span>
+                      </span>
+                    </Card>
+                  {/each}
+                </div>
+              {/if}
+            </section>
+          </Card>
+        {/if}
       {/if}
+    </section>
+
+    <section
+      class="section-block generated-block"
+      aria-labelledby="generated-title"
+    >
+      <div class="section-heading">
+        <div>
+          <div class="eyebrow">
+            <span class="badge generated">{m.insights_page_generated()}</span>
+            <span>{m.insights_page_separate_from_facts()}</span>
+          </div>
+          <h2 id="generated-title">{m.insights_page_generated_archive()}</h2>
+        </div>
+        <p>
+          {m.insights_page_generated_archive_hint()}
+        </p>
+      </div>
+
+      <Card level="default" padding="none" class="generated-controls">
+        <label class="generated-control">
+          <span>{m.insights_page_template_label()}</span>
+          <Typeahead
+            options={templateOptions}
+            value={insights.cannedKind}
+            fallbackLabel={cannedKindLabel(insights.cannedKind)}
+            placeholder={m.insights_page_filter_templates()}
+            title={m.insights_page_select_template()}
+            emptyLabel={m.insights_page_no_matching_templates()}
+            onselect={handleCannedKindChange}
+          />
+        </label>
+
+        <label class="generated-control">
+          <span>{m.insights_page_generator_label()}</span>
+          <Typeahead
+            options={generationAgentOptions}
+            value={insights.agent}
+            fallbackLabel={agentLabel(insights.agent)}
+            placeholder={m.insights_page_filter_generators()}
+            title={m.insights_page_select_generator()}
+            emptyLabel={m.insights_page_no_matching_generators()}
+            onselect={handleInsightAgentChange}
+          />
+        </label>
+
+        <label class="generated-control focus-control">
+          <span>{m.insights_page_optional_focus()}</span>
+          <textarea
+            class="generated-focus"
+            value={insights.promptText}
+            maxlength="1200"
+            rows="2"
+            placeholder={m.insights_page_focus_placeholder()}
+            oninput={handlePromptChange}
+          ></textarea>
+        </label>
+
+        <button
+          class="generate-action"
+          disabled={generationUnavailable}
+          title={sync.serverVersion !== null && !insightGenerationAvailable
+            ? m.insights_page_generate_disabled()
+            : m.insights_page_generate_title()}
+          onclick={handleGenerateCanned}
+        >
+          {m.insights_page_generate()}
+        </button>
+      </Card>
 
       {#if insights.loading}
-        <div class="list-status">Loading...</div>
+        <Card level="default" padding="none" class="state-panel compact-state">{m.insights_page_loading_archive()}</Card>
       {:else if insights.items.length === 0 && insights.tasks.length === 0}
-        <div class="empty-state">
-          <div class="empty-glyph">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
-            </svg>
-          </div>
-          <span class="empty-text">
-            Generate an insight to analyze your sessions
+        <Card level="default" padding="none" class="state-panel compact-state">
+          <strong>{m.insights_page_no_generated_saved()}</strong>
+          <span>
+            {m.insights_page_no_generated_hint()}
           </span>
-        </div>
+        </Card>
       {:else}
-        {#if insights.tasks.length > 0}
-          <div class="list-section-header completed-header">
-            <span class="section-title">Completed</span>
+        <div class="generated-layout">
+          <div class="generated-list">
+            {#each insights.tasks as task (task.clientId)}
+              <Card
+                level="default"
+                padding="none"
+                class={task.status === "error" ? "error-task" : ""}
+                selected={insights.selectedTaskId === task.clientId}
+                onclick={() => selectGeneratedTask(task.clientId)}
+              >
+                <span>{task.status === "error" ? m.insights_page_error() : m.insights_page_running()}</span>
+                <strong>{task.project || m.insights_page_global()}</strong>
+                <em>
+                  {task.kind ? cannedKindLabel(task.kind) : task.phase}
+                </em>
+              </Card>
+            {/each}
+            {#each insights.items as item (item.id)}
+              <Card
+                level="default"
+                padding="none"
+                selected={insights.selectedId === item.id}
+                onclick={() => selectGeneratedInsight(item.id)}
+              >
+                <span>
+                  {insightTypeLabel(item.type, item.kind)}
+                </span>
+                <strong>{item.project || m.insights_page_global()}</strong>
+                <em>
+                  {formatDateRange(item.date_from, item.date_to)}
+                  · {formatTime(item.created_at)}
+                </em>
+              </Card>
+            {/each}
           </div>
-        {/if}
-        {#each insights.items as s (s.id)}
-          <button
-            class="insight-row"
-            class:selected={insights.selectedId === s.id}
-            onclick={() => insights.select(s.id)}
-          >
-            <span
-              class="type-pip"
-              class:pip-blue={s.type === "daily_activity"}
-              class:pip-purple={s.type === "agent_analysis"}
-            ></span>
-            <span class="row-body">
-              <span class="row-title">
-                {typeShort(s.type, s.date_from, s.date_to)}
-                <span class="row-scope">
-                  {s.project || "global"}
-                </span>
-              </span>
-              <span class="row-meta">
-                {formatDateRange(s.date_from, s.date_to)}
-                <span class="row-time">
-                  {formatTime(s.created_at)}
-                </span>
-              </span>
-            </span>
-            <span class="row-agent">{s.agent}</span>
-          </button>
-        {/each}
-      {/if}
-    </div>
-  </div>
 
-  <main class="content-panel">
-    {#if insights.selectedTask}
-      {@const task = insights.selectedTask}
-      <div class="reading-area">
-        <header class="insight-header">
-          <div class="header-top">
-            <span
-              class="header-badge"
-              class:badge-red={task.status === "error"}
-              class:badge-blue={task.status !== "error"}
-            >
-              {task.status === "error" ? "Error" : "Generating"}
-            </span>
-            <span class="header-date">
-              {typeShort(task.type, task.dateFrom, task.dateTo)}
-              {formatDateRange(task.dateFrom, task.dateTo)}
-            </span>
-            <button
-              class="delete-btn"
-              onclick={() => task.status === "error"
-                ? insights.dismissTask(task.clientId)
-                : insights.cancelTask(task.clientId)}
-              title={task.status === "error" ? "Dismiss" : "Cancel"}
-            >
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 01-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"/>
-              </svg>
-            </button>
-          </div>
-          <div class="header-details">
-            {#if task.project}
-              <span class="detail-chip">{task.project}</span>
-            {:else}
-              <span class="detail-chip muted">global</span>
-            {/if}
-            <span class="detail-text">{task.agent}</span>
-          </div>
-        </header>
-        {#if task.status === "error" && task.error}
-          <div class="task-error-banner">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M8.982 1.566a1.13 1.13 0 00-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 01-1.1 0L7.1 5.995A.905.905 0 018 5zm.002 6a1 1 0 110 2 1 1 0 010-2z"/>
-            </svg>
-            <span>{task.error}</span>
-          </div>
-        {/if}
-        {#if task.logs.length > 0}
-          <div class="task-detail-logs" role="log">
-            <div class="task-detail-logs-header">
-              Execution Log
-              <span class="log-count">{task.logs.length} lines</span>
-            </div>
-            <div class="task-detail-logs-body">
-              {#each task.logs as entry}
-                <div
-                  class="task-log-line"
-                  class:log-stderr={entry.stream === "stderr"}
-                >
-                  <span class="task-log-stream">{entry.stream}</span>
-                  <span class="task-log-text">{entry.line}</span>
-                </div>
-              {/each}
-            </div>
-          </div>
-        {:else if task.status === "generating"}
-          <div class="content-generating" style="margin-top: 48px">
-            <div class="gen-orbit">
-              <span class="orbit-ring"></span>
-              <span class="orbit-dot"></span>
-            </div>
-            <span class="gen-label">Waiting for {task.agent}...</span>
-          </div>
-        {/if}
-      </div>
-    {:else if insights.selectedItem}
-      <div class="reading-area">
-        <header class="insight-header">
-          <div class="header-top">
-            <span
-              class="header-badge"
-              class:badge-blue={insights.selectedItem.type === "daily_activity"}
-              class:badge-purple={insights.selectedItem.type === "agent_analysis"}
-            >
-              {typeLabel(insights.selectedItem.type, insights.selectedItem.date_from, insights.selectedItem.date_to)}
-            </span>
-            <span class="header-date">
-              {#if insights.selectedItem.date_from === insights.selectedItem.date_to}
-                {formatDate(insights.selectedItem.date_from)}
+          <Card level="default" padding="none" class="generated-detail">
+            <article>
+            {#if insights.selectedTask}
+              <div class="generated-detail-head">
+                <span class="badge generated">
+                  {insights.selectedTask.status === "error"
+                    ? m.insights_page_generation_error()
+                    : m.insights_page_generating()}
+                </span>
+                {#if insights.selectedTask.status === "error"}
+                  <div class="generated-actions">
+                    <button
+                      class="text-btn"
+                      type="button"
+                      onclick={() =>
+                        insights.retryTask(
+                          insights.selectedTask!.clientId,
+                        )}
+                    >
+                      {m.insights_page_retry()}
+                    </button>
+                    <IconButton
+                      class="icon-action"
+                      size="sm"
+                      tone="danger"
+                      onclick={() =>
+                        insights.dismissTask(
+                          insights.selectedTask!.clientId,
+                        )}
+                      title={m.insights_page_dismiss_failed()}
+                      ariaLabel={m.insights_page_dismiss_failed()}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                        <path d="M5.5 5.5A.5.5 0 016 6v6a.5.5 0 01-1 0V6a.5.5 0 01.5-.5zm2.5 0a.5.5 0 01.5.5v6a.5.5 0 01-1 0V6a.5.5 0 01.5-.5zm3 .5a.5.5 0 00-1 0v6a.5.5 0 001 0V6z"/>
+                        <path fill-rule="evenodd" d="M14.5 3a1 1 0 01-1 1H13v9a2 2 0 01-2 2H5a2 2 0 01-2-2V4h-.5a1 1 0 01-1-1V2a1 1 0 011-1H5.5l1-1h3l1 1h2.5a1 1 0 011 1v1zM4.118 4L4 4.059V13a1 1 0 001 1h6a1 1 0 001-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                      </svg>
+                    </IconButton>
+                  </div>
+                {/if}
+              </div>
+              {#if insights.selectedTask.error}
+                <p>{insights.selectedTask.error}</p>
               {:else}
-                {formatDateShort(insights.selectedItem.date_from)} – {formatDateShort(insights.selectedItem.date_to)}
+                <p>{insights.selectedTask.phase}</p>
               {/if}
-            </span>
-            <button
-              class="delete-btn"
-              onclick={() => {
-                if (insights.selectedItem) {
-                  insights.deleteItem(insights.selectedItem.id);
-                }
-              }}
-              title="Delete this insight"
-            >
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M6.5 1h3a.5.5 0 01.5.5v1H6v-1a.5.5 0 01.5-.5zM11 2.5v-1A1.5 1.5 0 009.5 0h-3A1.5 1.5 0 005 1.5v1H1.5a.5.5 0 000 1h.538l.853 10.66A2 2 0 004.885 16h6.23a2 2 0 001.994-1.84l.853-10.66h.538a.5.5 0 000-1H11zm1.958 1l-.846 10.58a1 1 0 01-.997.92h-6.23a1 1 0 01-.997-.92L3.042 3.5h9.916zM5.5 5.5A.5.5 0 016 6v8a.5.5 0 01-1 0V6a.5.5 0 01.5-.5zm2.5 0a.5.5 0 01.5.5v8a.5.5 0 01-1 0V6a.5.5 0 01.5-.5zm3 .5a.5.5 0 00-1 0v8a.5.5 0 001 0V6z"/>
-              </svg>
-            </button>
-          </div>
-          <div class="header-details">
-            {#if insights.selectedItem.project}
-              <span class="detail-chip">{insights.selectedItem.project}</span>
+            {:else if insights.selectedItem}
+              <div class="generated-detail-head">
+                <div class="generated-meta">
+                  <span class="badge generated">
+                    {insightTypeLabel(
+                      insights.selectedItem.type,
+                      insights.selectedItem.kind,
+                    )}
+                  </span>
+                  {#if insights.selectedItem.type === "llm_canned"}
+                    {#if cacheStatusLabel(insights.selectedItem.cache_status)}
+                      <span class="detail-chip muted">
+                        {cacheStatusLabel(insights.selectedItem.cache_status)}
+                      </span>
+                    {/if}
+                    {#if insights.selectedItem.template_version}
+                      <span class="detail-chip muted">
+                        {m.insights_page_template_version({ version: insights.selectedItem.template_version })}
+                      </span>
+                    {/if}
+                    {#if insights.selectedItem.aggregate_hash}
+                      <span class="detail-chip muted">
+                        {m.insights_page_aggregate_hash({ hash: insights.selectedItem.aggregate_hash.slice(0, 12) })}
+                      </span>
+                    {/if}
+                  {/if}
+                </div>
+                <div class="generated-actions">
+                  <Button
+                    class="header-action"
+                    size="sm"
+                    onclick={handleInsightExport}
+                  >
+                    Export
+                  </Button>
+                  <Button
+                    class="header-action"
+                    size="sm"
+                    onclick={() => openInsightPublish(false)}
+                  >
+                    Publish
+                  </Button>
+                  <Button
+                    class="header-action subtle"
+                    size="sm"
+                    onclick={() => openInsightPublish(true)}
+                  >
+                    Secret
+                  </Button>
+                  <CopyButton
+                    class="insight-link-copy"
+                    copied={copiedInsightLinkId === insights.selectedItem.id}
+                    ariaLabel={m.insights_page_copy_link()}
+                    copiedAriaLabel={m.insights_page_copied_link()}
+                    title={m.insights_page_copy_link_title()}
+                    copiedTitle={m.insights_page_copied_link_short()}
+                    onclick={() =>
+                      handleCopyInsightLink(insights.selectedItem!.id)}
+                  />
+                  <IconButton
+                    class="icon-action"
+                    size="sm"
+                    tone="danger"
+                    onclick={() => {
+                      if (insights.selectedItem) {
+                        insights.deleteItem(insights.selectedItem.id);
+                        const params = paramsWithInsightDate();
+                        delete params.insight;
+                        router.replaceParams(params);
+                      }
+                    }}
+                    title={m.insights_page_delete_insight()}
+                    ariaLabel={m.insights_page_delete_insight()}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                      <path d="M5.5 5.5A.5.5 0 016 6v6a.5.5 0 01-1 0V6a.5.5 0 01.5-.5zm2.5 0a.5.5 0 01.5.5v6a.5.5 0 01-1 0V6a.5.5 0 01.5-.5zm3 .5a.5.5 0 00-1 0v6a.5.5 0 001 0V6z"/>
+                      <path fill-rule="evenodd" d="M14.5 3a1 1 0 01-1 1H13v9a2 2 0 01-2 2H5a2 2 0 01-2-2V4h-.5a1 1 0 01-1-1V2a1 1 0 011-1H5.5l1-1h3l1 1h2.5a1 1 0 011 1v1zM4.118 4L4 4.059V13a1 1 0 001 1h6a1 1 0 001-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/>
+                    </svg>
+                  </IconButton>
+                </div>
+              </div>
+              <div class="markdown-body">
+                {@html renderMarkdown(insights.selectedItem.content)}
+              </div>
             {:else}
-              <span class="detail-chip muted">global</span>
+              <p>{m.insights_page_select_to_read()}</p>
             {/if}
-            <span class="detail-text">
-              {insights.selectedItem.agent}
-              {#if insights.selectedItem.model}
-                <span class="model-name">{insights.selectedItem.model}</span>
-              {/if}
-            </span>
-            <span class="detail-time">
-              {formatTime(insights.selectedItem.created_at)}
-            </span>
-          </div>
-        </header>
-        <article class="markdown-body">
-          {@html renderMarkdown(insights.selectedItem.content)}
-        </article>
-      </div>
-    {:else}
-      <div class="content-empty">
-        {#if insights.items.length > 0}
-          <div class="empty-prompt">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M15 15l-2 5L9 9l11 4-5 2zm2 2l4 4"/>
-            </svg>
-            <span>Select an insight to view</span>
-          </div>
-        {:else if insights.tasks.length > 0}
-          <div class="content-generating">
-            <div class="gen-orbit">
-              <span class="orbit-ring"></span>
-              <span class="orbit-dot"></span>
-            </div>
-            <span class="gen-label">Generating insight...</span>
-          </div>
-        {:else}
-          <div class="empty-prompt">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
-            </svg>
-            <span>Generate an insight to get started</span>
-          </div>
-        {/if}
-      </div>
-    {/if}
+            </article>
+          </Card>
+        </div>
+      {/if}
+    </section>
   </main>
 </div>
 
 <style>
-  /* ── Layout ── */
   .insights-page {
-    display: grid;
-    grid-template-columns: 280px 1fr;
-    height: calc(100vh - 40px - 24px);
-    height: calc(100dvh - 40px - 24px);
-    overflow: hidden;
-  }
-
-  /* ── Sidebar ── */
-  .sidebar-panel {
+    flex: 1;
     display: flex;
     flex-direction: column;
-    border-right: 1px solid var(--border-default);
+    min-height: 0;
+    background: var(--bg-primary);
+  }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 8px 16px;
     background: var(--bg-surface);
-    overflow: hidden;
-  }
-
-  /* ── Controls ── */
-  .controls {
-    padding: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    border-bottom: 1px solid var(--border-default);
+    border-bottom: 1px solid var(--border-muted);
     flex-shrink: 0;
+    min-height: 45px;
   }
 
-  .controls-row {
+  .filter-group {
     display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    flex: 1 1 560px;
+    min-width: 0;
+    max-width: 720px;
+  }
+
+  .toolbar-scope {
+    display: flex;
+    align-items: center;
     gap: 6px;
+    flex: 0 0 220px;
+    min-width: 220px;
   }
 
-  .ctrl {
-    flex: 1;
-    height: 26px;
-    padding: 0 6px;
-    background: var(--bg-inset);
-    border: 1px solid var(--border-muted);
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    color: var(--text-secondary);
-    min-width: 0;
-    transition: border-color 0.15s;
-  }
-
-  .ctrl:focus {
-    outline: none;
-    border-color: var(--accent-blue);
-  }
-
-  .mode-ctrl {
-    width: 100%;
-    flex: none;
-  }
-
-  .date-ctrl {
-    flex: 1;
-  }
-
-  .date-range-group {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .date-label {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-  }
-
-  .date-label-text {
-    font-size: 10px;
+  .toolbar-scope span {
     color: var(--text-muted);
-    padding-left: 2px;
-  }
-
-  .presets-row {
-    display: flex;
-    gap: 4px;
-  }
-
-  .preset-btn {
-    height: 22px;
-    padding: 0 8px;
-    border-radius: var(--radius-sm);
     font-size: 10px;
-    color: var(--text-muted);
-    background: var(--bg-inset);
-    border: 1px solid var(--border-muted);
-    transition: background 0.1s, color 0.1s;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
     white-space: nowrap;
   }
 
-  .preset-btn:hover {
-    background: var(--bg-surface-hover);
-    color: var(--text-secondary);
-  }
-
-  .prompt-area {
+  .filter-group :global(.kit-typeahead),
+  .toolbar-scope :global(.kit-typeahead),
+  .generated-control :global(.kit-typeahead) {
+    min-width: 0;
+    max-width: none;
     width: 100%;
-    padding: 6px 8px;
-    background: var(--bg-inset);
-    border: 1px solid var(--border-muted);
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    color: var(--text-primary);
-    font-family: var(--font-sans);
-    resize: vertical;
-    min-height: 48px;
-    line-height: 1.4;
-    transition: border-color 0.15s;
   }
 
-  .prompt-area:focus {
-    outline: none;
-    border-color: var(--accent-blue);
+  /* The kit-ui Typeahead list pins to the trigger width, so size the
+     trigger itself (the old --typeahead-list-min-width knob is retired). */
+  .filter-group > :global(.kit-typeahead:first-child) {
+    flex: 0 1 220px;
+    min-width: 180px;
+    max-width: 260px;
   }
 
-  .prompt-area::placeholder {
-    color: var(--text-muted);
+  .filter-group > :global(.kit-typeahead:nth-child(2)) {
+    flex: 0 0 120px;
   }
 
-  .action-row {
-    display: flex;
-    gap: 6px;
-    align-items: center;
+  .toolbar-scope :global(.kit-typeahead) {
+    flex: 0 0 128px;
+    width: 128px;
   }
 
-  .prompt-toggle {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    height: 26px;
-    padding: 0 8px;
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    color: var(--text-muted);
-    transition: background 0.1s, color 0.1s;
+  :global(.toolbar-refresh.kit-icon-button) {
+    margin-left: auto;
   }
 
-  .prompt-toggle:hover {
-    background: var(--bg-surface-hover);
-    color: var(--text-secondary);
-  }
-
-  .generate-btn {
+  .content {
     flex: 1;
-    height: 28px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 5px;
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    font-weight: 600;
-    background: var(--accent-blue);
-    color: white;
-    letter-spacing: 0.01em;
-    transition: opacity 0.12s, transform 0.1s,
-      box-shadow 0.12s;
-    box-shadow: 0 1px 2px rgba(37, 99, 235, 0.2);
-  }
-
-  .generate-btn:hover:not(:disabled) {
-    opacity: 0.92;
-    box-shadow: 0 2px 6px rgba(37, 99, 235, 0.3);
-  }
-
-  .generate-btn:active:not(:disabled) {
-    transform: scale(0.98);
-    box-shadow: none;
-  }
-
-  .generate-btn:disabled {
-    opacity: 0.45;
-    box-shadow: none;
-  }
-
-  .generate-icon {
-    opacity: 0.9;
-  }
-
-  /* ── List Area ── */
-  .list-area {
-    flex: 1;
+    min-height: 0;
     overflow-y: auto;
-    overflow-x: hidden;
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
   }
 
-  .list-section-header {
+  .section-block {
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .section-heading {
+    display: flex;
+    align-items: flex-end;
     justify-content: space-between;
-    padding: 8px 14px 6px;
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    background: var(--bg-surface);
+    gap: 16px;
   }
 
-  .section-title {
+  .section-heading.compact {
+    align-items: center;
+  }
+
+  .section-heading p.insights-help {
+    max-width: 58ch;
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 4px;
+    text-align: right;
+    line-height: 1.35;
+  }
+
+  .insights-help-link {
+    color: var(--accent-blue);
+  }
+
+  .insights-help-link:hover {
+    color: color-mix(in srgb, var(--accent-blue) 70%, var(--text-primary));
+    text-underline-offset: 2px;
+  }
+
+  .section-heading h2 {
+    margin-top: 2px;
+    font-size: 18px;
+    line-height: 1.2;
+    color: var(--text-primary);
+  }
+
+  .section-heading p {
+    max-width: 56ch;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.4;
+    text-align: right;
+  }
+
+  .eyebrow {
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-size: 10px;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: 11px;
     font-weight: 600;
-    color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.04em;
   }
 
-  .live-dot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--accent-green);
-    animation: blink 1.6s ease-in-out infinite;
-  }
-
-  .active-count {
-    font-variant-numeric: tabular-nums;
-    color: var(--text-muted);
-    font-weight: 500;
-  }
-
-  .cancel-all {
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    height: 18px;
+    padding: 0 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border-muted);
     font-size: 10px;
-    color: var(--text-muted);
-    transition: color 0.1s;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
   }
 
-  .cancel-all:hover {
-    color: var(--accent-red);
-  }
-
-  .completed-header {
-    border-top: 1px solid var(--border-muted);
-  }
-
-  /* ── Task Items (generating) ── */
-  .task-item {
-    position: relative;
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    min-height: 42px;
-    padding: 8px 14px 10px;
-    overflow: hidden;
-    width: 100%;
-    text-align: left;
-    border-left: 2px solid transparent;
-    transition: background 0.1s;
-    cursor: pointer;
-  }
-
-  .task-item:hover {
-    background: var(--bg-surface-hover);
-  }
-
-  .task-item.selected {
-    background: var(--bg-surface-hover);
-    border-left-color: var(--accent-blue);
-  }
-
-  .task-item.selected.task-error {
-    border-left-color: var(--accent-red);
-  }
-
-  .task-error {
+  .badge.rule {
+    color: var(--accent-blue);
     background: color-mix(
       in srgb,
-      var(--accent-red) 6%,
+      var(--accent-blue) 9%,
+      var(--bg-surface)
+    );
+    border-color: color-mix(
+      in srgb,
+      var(--accent-blue) 22%,
+      var(--border-muted)
+    );
+  }
+
+  .badge.generated {
+    color: var(--accent-purple);
+    background: color-mix(
+      in srgb,
+      var(--accent-purple) 9%,
+      var(--bg-surface)
+    );
+    border-color: color-mix(
+      in srgb,
+      var(--accent-purple) 22%,
+      var(--border-muted)
+    );
+  }
+
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: var(--space-5);
+  }
+
+  .summary-grid :global(.summary-card) {
+    min-height: 92px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    justify-content: space-between;
+  }
+
+  .summary-grid :global(.summary-card > .kit-card__body) {
+    display: contents;
+  }
+
+  .summary-card-content {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 0;
+    justify-content: space-between;
+    min-width: 0;
+  }
+
+  .summary-grid :global(.summary-card .label) {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .summary-grid :global(.summary-card strong) {
+    font-size: 28px;
+    line-height: 1;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .summary-grid :global(.summary-card span:last-child) {
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+
+  .content :global(.distribution-row) {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .content :global(.distribution-row > .kit-card__body) {
+    display: contents;
+  }
+
+  .grade-bar {
+    display: grid;
+    grid-template-columns: 18px 1fr minmax(22px, auto);
+    gap: 8px;
+    align-items: center;
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+
+  .grade-bar strong {
+    text-align: right;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .bar-track {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--bg-inset);
+    overflow: hidden;
+  }
+
+  .bar-fill {
+    height: 100%;
+    min-width: 2px;
+    background: var(--accent-blue);
+  }
+
+  .pattern-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .pattern-grid :global(.pattern-card) {
+    min-height: 310px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .pattern-grid :global(.pattern-card > .kit-card__body) {
+    display: contents;
+  }
+
+  .pattern-card-content {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .pattern-head {
+    display: flex;
+    gap: 12px;
+    justify-content: space-between;
+    align-items: flex-start;
+  }
+
+  .pattern-head h3 {
+    font-size: 14px;
+    margin-bottom: 3px;
+  }
+
+  .pattern-head p {
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .severity {
+    flex-shrink: 0;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    border: 1px solid var(--border-muted);
+  }
+
+  .pattern-grid :global(.severity-critical .severity) {
+    color: var(--accent-red);
+    background: color-mix(
+      in srgb,
+      var(--accent-red) 9%,
       transparent
     );
   }
 
-  .task-indicator {
-    flex-shrink: 0;
-    width: 14px;
-    margin-top: 2px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+  .pattern-grid :global(.severity-warning .severity),
+  .pattern-grid :global(.severity-watch .severity) {
+    color: var(--accent-amber);
+    background: color-mix(
+      in srgb,
+      var(--accent-amber) 11%,
+      transparent
+    );
   }
 
-  .spinner {
-    width: 10px;
-    height: 10px;
-    border: 1.5px solid var(--accent-blue);
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
+  .pattern-grid :global(.severity-clear .severity) {
+    color: var(--accent-green);
+    background: color-mix(
+      in srgb,
+      var(--accent-green) 10%,
+      transparent
+    );
   }
 
-  .error-pip {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent-red);
+  .pattern-grid :global(.severity-unavailable .severity) {
+    color: var(--text-muted);
+    background: var(--bg-inset);
   }
 
-  .task-body {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
-    line-height: 1.35;
-  }
-
-  .task-main {
-    width: 100%;
+  .affected {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .task-label {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-
-  .task-date {
-    font-weight: 400;
-    color: var(--text-muted);
-    margin-left: 4px;
-  }
-
-  .task-scope {
-    font-size: 10px;
-    color: var(--text-muted);
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    overflow: hidden;
-    max-width: 45%;
-  }
-
-  .task-phase {
-    width: 100%;
-    font-size: 10px;
-    color: var(--accent-blue);
-    font-family: var(--font-mono);
-    letter-spacing: -0.02em;
-    word-break: break-word;
-  }
-
-  .task-error-msg {
-    width: 100%;
-    font-size: 10px;
-    color: var(--accent-red);
-    word-break: break-word;
-  }
-
-  /* ── Task Detail (main pane) ── */
-  .task-error-banner {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 12px 16px;
-    border-radius: var(--radius-md);
-    background: color-mix(
-      in srgb,
-      var(--accent-red) 8%,
-      var(--bg-inset)
-    );
-    border: 1px solid color-mix(
-      in srgb,
-      var(--accent-red) 25%,
-      var(--border-muted)
-    );
-    color: var(--accent-red);
-    font-size: 13px;
-    line-height: 1.5;
-    margin-bottom: 20px;
-  }
-
-  .task-error-banner svg {
-    flex-shrink: 0;
-    margin-top: 2px;
-    opacity: 0.8;
-  }
-
-  .task-detail-logs {
-    border: 1px solid var(--border-muted);
-    border-radius: var(--radius-md);
-    overflow: hidden;
-  }
-
-  .task-detail-logs-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 14px;
+    gap: var(--space-4);
+    padding: 10px;
+    border-radius: var(--radius-sm);
     background: var(--bg-inset);
-    border-bottom: 1px solid var(--border-muted);
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-secondary);
   }
 
-  .log-count {
-    font-weight: 400;
+  .affected strong {
+    color: var(--text-primary);
+    font-size: 13px;
+  }
+
+  .affected span {
     color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .driver-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .driver-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    gap: var(--space-4);
+    align-items: baseline;
+    width: 100%;
+    min-height: 24px;
+    padding: 2px 4px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    text-align: left;
+  }
+
+  .driver-row:hover,
+  .driver-row.active {
+    background: var(--bg-surface-hover);
+  }
+
+  .driver-row span {
+    color: var(--text-secondary);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .driver-row strong {
+    color: var(--text-primary);
     font-variant-numeric: tabular-nums;
   }
 
-  .task-detail-logs-body {
-    max-height: 50vh;
-    overflow-y: auto;
-    padding: 8px 14px;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    line-height: 1.5;
+  .driver-row em {
+    color: var(--text-muted);
+    font-style: normal;
+    font-variant-numeric: tabular-nums;
   }
 
-  .task-log-line {
-    display: grid;
-    grid-template-columns: 48px 1fr;
-    gap: 8px;
-    color: var(--text-secondary);
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-
-  .task-log-stream {
-    text-transform: uppercase;
+  .driver-row small {
     color: var(--text-muted);
     font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 
-  .task-log-text {
+  .sparkline {
+    height: 42px;
+    display: flex;
+    align-items: end;
+    gap: var(--space-1);
+    padding: 6px 0 2px;
+    border-top: 1px solid var(--border-muted);
+    position: relative;
+  }
+
+  .sparkline span:not(.trend-caption) {
+    width: 100%;
+    min-width: 3px;
+    max-width: 16px;
+    background: color-mix(
+      in srgb,
+      var(--accent-blue) 48%,
+      var(--border-muted)
+    );
+    border-radius: 2px 2px 0 0;
+  }
+
+  .trend-caption {
+    align-self: start;
+    width: auto;
+    min-width: 118px;
+    max-width: none;
+    height: auto !important;
+    margin-right: 8px;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: transparent;
+  }
+
+  .severity-note {
+    margin-top: -4px;
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
+  .examples {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: auto;
+  }
+
+  .examples-label {
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .example-row {
+    display: grid;
+    grid-template-columns: minmax(90px, 0.35fr) 1fr;
+    gap: var(--space-4);
+    font-size: 12px;
+  }
+
+  .example-row span {
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .example-row em {
+    color: var(--text-muted);
+    font-style: normal;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .content :global(.evidence-panel) {
+    display: grid;
+    gap: var(--space-5);
+    padding: 12px;
+  }
+
+  .content :global(.evidence-panel > .kit-card__body) {
+    display: contents;
+  }
+
+  .evidence-panel-live {
+    display: grid;
+    gap: var(--space-5);
     min-width: 0;
   }
 
-  .log-stderr .task-log-stream,
-  .log-stderr .task-log-text {
+  .evidence-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .evidence-head h3 {
+    margin-top: 2px;
+    color: var(--text-primary);
+    font-size: 14px;
+  }
+
+  .evidence-state {
+    color: var(--text-secondary);
+    font-size: 12px;
+  }
+
+  .evidence-state.error {
     color: var(--accent-red);
   }
 
-  .task-agent {
-    flex-shrink: 0;
-    font-size: 10px;
-    color: var(--text-muted);
-    font-family: var(--font-mono);
-    letter-spacing: -0.02em;
-    white-space: nowrap;
-    margin-top: 2px;
+  .evidence-list {
+    display: grid;
+    gap: 6px;
   }
 
-  .task-dismiss {
-    flex-shrink: 0;
-    width: 18px;
-    height: 18px;
-    display: flex;
+  .evidence-list :global(.evidence-row) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
     align-items: center;
-    justify-content: center;
-    border-radius: var(--radius-sm);
-    color: var(--text-muted);
-    opacity: 0;
-    margin-top: 1px;
-    transition: opacity 0.15s, background 0.1s, color 0.1s;
+    padding: 9px 10px;
+    text-decoration: none;
   }
 
-  .task-item:hover .task-dismiss,
-  .task-dismiss:focus-visible {
-    opacity: 1;
+  .evidence-list :global(.evidence-row > .kit-card__body) {
+    display: contents;
   }
 
-  @media (hover: none) {
-    .task-dismiss {
-      opacity: 0.7;
-    }
-  }
-
-  .task-dismiss:hover {
-    background: var(--bg-surface-hover);
-    color: var(--text-primary);
-  }
-
-  .shimmer-bar {
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    height: 1px;
-    background: linear-gradient(
-      90deg,
-      transparent 0%,
-      var(--accent-blue) 50%,
-      transparent 100%
-    );
-    background-size: 200% 100%;
-    animation: shimmer 1.8s ease-in-out infinite;
-  }
-
-  /* ── Insight Rows (completed) ── */
-  .insight-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    width: 100%;
-    height: 42px;
-    padding: 0 14px;
-    text-align: left;
-    border-left: 2px solid transparent;
-    transition: background 0.1s;
-  }
-
-  .insight-row:hover {
+  .evidence-list :global(.evidence-row:hover) {
+    border-color: var(--border-default);
     background: var(--bg-surface-hover);
   }
 
-  .insight-row.selected {
-    background: var(--bg-surface-hover);
-    border-left-color: var(--accent-blue);
-  }
-
-  .type-pip {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .pip-blue {
-    background: var(--accent-blue);
-  }
-
-  .pip-purple {
-    background: var(--accent-purple);
-  }
-
-  .row-body {
-    flex: 1;
+  .evidence-main {
+    display: grid;
+    gap: 2px;
     min-width: 0;
-    display: flex;
-    flex-direction: column;
   }
 
-  .row-title {
-    font-size: 12px;
-    font-weight: 450;
+  .evidence-main strong {
     color: var(--text-primary);
-    line-height: 1.3;
-    white-space: nowrap;
+    font-size: 12px;
+  }
+
+  .evidence-main em {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-style: normal;
     overflow: hidden;
     text-overflow: ellipsis;
-    letter-spacing: -0.005em;
-  }
-
-  .row-scope {
-    color: var(--text-muted);
-    margin-left: 4px;
-    font-weight: 400;
-  }
-
-  .row-meta {
-    font-size: 10px;
-    color: var(--text-muted);
-    line-height: 1.3;
-  }
-
-  .row-time {
-    margin-left: 4px;
-    opacity: 0.7;
-  }
-
-  .row-agent {
-    flex-shrink: 0;
-    font-size: 10px;
-    color: var(--text-muted);
-    font-family: var(--font-mono);
-    letter-spacing: -0.02em;
     white-space: nowrap;
-    max-width: 60px;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 
-  .list-status {
-    padding: 16px 12px;
+  .evidence-meta {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+    color: var(--text-muted);
     font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .recommendation-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-5);
+  }
+
+  .recommendation-list :global(.recommendation) {
+    padding: 12px;
+    display: grid;
+    gap: var(--space-3);
+  }
+
+  .recommendation-list :global(.recommendation > .kit-card__body) {
+    display: contents;
+  }
+
+  .recommendation-content {
+    display: grid;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
+  .recommendation-list :global(.recommendation strong) {
+    color: var(--text-primary);
+    font-size: 13px;
+  }
+
+  .recommendation-list :global(.recommendation p) {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+
+  .generated-block {
+    border-top: 1px solid var(--border-muted);
+    padding-top: 18px;
+  }
+
+  /* The generated-archive grids have hard minimum column widths (controls:
+     180+130+240px; layout: a 240px list rail), so they collapse on available
+     CONTENT width via a container query (declared after both base grid rules
+     — same specificity, so it must win on source order) rather than the
+     viewport-width media gate below — with the sidebar open, a ~950px
+     viewport leaves far less room than a viewport breakpoint assumes. */
+  .generated-block {
+    container-type: inline-size;
+  }
+
+  .generated-block :global(.generated-controls) {
+    display: grid;
+    grid-template-columns:
+      minmax(180px, 220px) minmax(130px, 160px)
+      minmax(240px, 1fr) auto;
+    gap: var(--space-5);
+    align-items: end;
+    padding: 12px;
+  }
+
+  .generated-block :global(.generated-controls > .kit-card__body) {
+    display: contents;
+  }
+
+  .generated-control {
+    display: grid;
+    gap: var(--space-2);
+    min-width: 0;
+  }
+
+  .generated-control span {
     color: var(--text-muted);
-    text-align: center;
-  }
-
-  /* ── Empty State ── */
-  .empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-    padding: 32px 16px;
-    text-align: center;
-  }
-
-  .empty-glyph {
-    color: var(--text-muted);
-    opacity: 0.4;
-  }
-
-  .empty-text {
-    font-size: 11px;
-    color: var(--text-muted);
-    line-height: 1.5;
-    max-width: 180px;
-  }
-
-  /* ── Content Panel ── */
-  .content-panel {
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-    background: var(--bg-primary);
-  }
-
-  .reading-area {
-    flex: 1;
-    overflow-y: auto;
-    padding: 28px 36px 48px;
-  }
-
-  .insight-header {
-    margin-bottom: 24px;
-    padding-bottom: 16px;
-    border-bottom: 1px solid var(--border-muted);
-  }
-
-  .header-top {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
-  }
-
-  .header-badge {
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 700;
-    padding: 3px 8px;
-    border-radius: 10px;
-    color: white;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
@@ -1225,15 +2109,108 @@
   }
 
   .delete-btn {
-    margin-left: auto;
     width: 28px;
     height: 28px;
     display: flex;
     align-items: center;
     justify-content: center;
     border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 12px;
+  }
+
+  .generated-focus {
+    width: 100%;
+    min-height: 30px;
+    max-height: 76px;
+    border: 1px solid var(--border-muted);
+    background: var(--bg-inset);
+    padding: 7px 8px;
+    resize: vertical;
+    line-height: 1.35;
+  }
+
+  .generate-action {
+    height: 30px;
+    padding: 0 12px;
+    background: var(--accent-purple);
+    color: var(--accent-purple-foreground);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .generate-action:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  .generated-layout {
+    display: grid;
+    grid-template-columns: minmax(240px, 320px) 1fr;
+    gap: 12px;
+    align-items: start;
+  }
+
+  @container (max-width: 760px) {
+    .generated-block :global(.generated-controls),
+    .generated-layout {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .generated-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .generated-list :global(.kit-card) {
+    min-height: 54px;
+    padding: 9px 10px;
+    display: grid;
+    gap: 2px;
+    text-align: left;
+  }
+
+  .generated-list :global(.kit-card > .kit-card__body) {
+    display: contents;
+  }
+
+  .generated-list :global(.kit-card span) {
+    color: var(--accent-purple);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .generated-list :global(.kit-card strong) {
+    color: var(--text-primary);
+    font-size: 12px;
+  }
+
+  .generated-list :global(.kit-card em) {
     color: var(--text-muted);
-    transition: background 0.12s, color 0.12s;
+    font-size: 11px;
+    font-style: normal;
+  }
+
+  .generated-list :global(.kit-card.error-task span) {
+    color: var(--accent-red);
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  :global(.header-action.kit-button) {
+    font-weight: 600;
+  }
+
+  :global(.header-action.subtle.kit-button) {
+    color: var(--text-muted);
   }
 
   .delete-btn:hover {
@@ -1245,241 +2222,234 @@
     color: var(--accent-red);
   }
 
-  .header-details {
+  .generated-layout :global(.generated-detail) {
+    min-height: 220px;
+    padding: 14px;
+  }
+
+  .generated-detail-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+
+  .generated-meta {
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-size: 11px;
-    color: var(--text-muted);
+    flex-wrap: wrap;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .generated-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .generated-actions :global(.insight-link-copy.kit-copy-btn) {
+    border: 1px solid var(--border-muted);
+    background: var(--bg-inset);
+  }
+
+  .generated-actions :global(.insight-link-copy.kit-copy-btn:hover) {
+    border-color: var(--border-default);
   }
 
   .detail-chip {
-    padding: 1px 6px;
-    border-radius: var(--radius-sm);
-    background: var(--bg-inset);
+    display: inline-flex;
+    align-items: center;
+    min-height: 18px;
+    padding: 2px 6px;
+    border: 1px solid var(--border-muted);
+    border-radius: 3px;
     color: var(--text-secondary);
-    font-size: 11px;
+    background: var(--bg-inset);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
   }
 
   .detail-chip.muted {
     color: var(--text-muted);
-    font-style: italic;
   }
 
-  .detail-text {
+  .text-btn {
     color: var(--text-muted);
-  }
-
-  .model-name {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    opacity: 0.7;
-    margin-left: 2px;
-  }
-
-  .detail-time {
-    margin-left: auto;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .content-empty {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .empty-prompt {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-    color: var(--text-muted);
-    opacity: 0.5;
     font-size: 12px;
   }
 
-  .content-generating {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 16px;
-    color: var(--text-muted);
-  }
-
-  .gen-orbit {
-    position: relative;
-    width: 36px;
-    height: 36px;
-  }
-
-  .orbit-ring {
-    position: absolute;
-    inset: 0;
-    border: 1.5px solid var(--border-muted);
-    border-radius: 50%;
-  }
-
-  .orbit-dot {
-    position: absolute;
-    width: 6px;
-    height: 6px;
-    background: var(--accent-blue);
-    border-radius: 50%;
-    top: -3px;
-    left: 50%;
-    margin-left: -3px;
-    animation: orbit 1.5s linear infinite;
-    transform-origin: 3px 21px;
-  }
-
-  .gen-label {
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-
-  /* ── Markdown Content ── */
-  .markdown-body {
-    font-size: 14px;
-    line-height: 1.7;
+  .text-btn:hover {
     color: var(--text-primary);
-    max-width: 720px;
   }
 
-  .markdown-body :global(h1) {
-    font-size: 20px;
-    font-weight: 700;
-    margin: 0 0 14px;
-    padding-bottom: 8px;
-    border-bottom: 1px solid var(--border-muted);
-    letter-spacing: -0.02em;
+  .text-btn.danger:hover {
+    color: var(--accent-red);
   }
 
-  .markdown-body :global(h2) {
-    font-size: 16px;
-    font-weight: 600;
-    margin: 28px 0 10px;
-    letter-spacing: -0.015em;
+  .markdown-body {
+    color: var(--text-primary);
+    line-height: 1.65;
+    max-width: 76ch;
   }
 
+  .markdown-body :global(h1),
+  .markdown-body :global(h2),
   .markdown-body :global(h3) {
-    font-size: 14px;
-    font-weight: 600;
-    margin: 20px 0 6px;
-    letter-spacing: -0.01em;
+    margin: 14px 0 6px;
+    font-size: 15px;
   }
 
-  .markdown-body :global(p) {
-    margin: 0 0 10px;
+  .markdown-body :global(p),
+  .markdown-body :global(ul),
+  .markdown-body :global(ol) {
+    margin: 8px 0;
   }
 
   .markdown-body :global(ul),
   .markdown-body :global(ol) {
-    margin: 0 0 10px;
-    padding-left: 20px;
+    padding-left: 18px;
   }
 
-  .markdown-body :global(li) {
-    margin: 3px 0;
-  }
-
-  .markdown-body :global(li + li) {
-    margin-top: 4px;
-  }
-
-  .markdown-body :global(code) {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    padding: 2px 5px;
-    background: var(--bg-inset);
-    border-radius: var(--radius-sm);
-  }
-
-  .markdown-body :global(pre) {
-    background: var(--bg-inset);
-    padding: 10px 14px;
-    border-radius: var(--radius-md);
-    overflow-x: auto;
-    margin: 0 0 10px;
-    border: 1px solid var(--border-muted);
-  }
-
-  .markdown-body :global(pre code) {
-    padding: 0;
-    background: transparent;
-    border: none;
-  }
-
-  .markdown-body :global(blockquote) {
-    margin: 0 0 10px;
-    padding: 6px 14px;
-    border-left: 3px solid var(--accent-blue);
+  .content :global(.state-panel) {
+    padding: 18px;
+    display: grid;
+    gap: 6px;
     color: var(--text-secondary);
-    background: color-mix(
-      in srgb,
-      var(--accent-blue) 4%,
-      transparent
-    );
-    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   }
 
-  .markdown-body :global(strong) {
-    font-weight: 600;
+  .content :global(.state-panel > .kit-card__body) {
+    display: contents;
+  }
+
+  .state-panel-alert {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .content :global(.state-panel strong) {
     color: var(--text-primary);
   }
 
-  .markdown-body :global(a) {
-    color: var(--accent-blue);
-    text-decoration: none;
+  .content :global(.state-panel button) {
+    justify-self: start;
+    margin-top: 6px;
+    height: 26px;
+    padding: 0 10px;
+    background: var(--accent-blue);
+    color: var(--accent-blue-foreground);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    font-weight: 700;
   }
 
-  .markdown-body :global(a:hover) {
-    text-decoration: underline;
+  .content :global(.state-panel.error) {
+    border-color: color-mix(
+      in srgb,
+      var(--accent-red) 35%,
+      var(--border-muted)
+    );
   }
 
-  .markdown-body :global(hr) {
-    border: none;
-    border-top: 1px solid var(--border-muted);
-    margin: 20px 0;
+  .content :global(.compact-state) {
+    padding: 14px;
   }
 
-  .markdown-body :global(table) {
-    width: 100%;
-    border-collapse: collapse;
-    margin: 0 0 10px;
+  .content :global(.inline-warning) {
+    padding: 9px 10px;
+    background: color-mix(
+      in srgb,
+      var(--accent-amber) 10%,
+      var(--bg-surface)
+    );
+    border-color: color-mix(
+      in srgb,
+      var(--accent-amber) 24%,
+      var(--border-muted)
+    );
+    color: var(--text-secondary);
     font-size: 12px;
   }
 
-  .markdown-body :global(th),
-  .markdown-body :global(td) {
-    padding: 6px 10px;
+  .skeleton-card,
+  .pattern-grid :global(.skeleton-pattern) {
+    background: linear-gradient(
+      90deg,
+      var(--bg-surface) 0%,
+      var(--bg-surface-hover) 50%,
+      var(--bg-surface) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+  }
+
+  .skeleton-card {
+    border-radius: var(--radius-md);
     border: 1px solid var(--border-muted);
-    text-align: left;
+    height: 92px;
   }
 
-  .markdown-body :global(th) {
-    background: var(--bg-inset);
-    font-weight: 600;
-  }
-
-  /* ── Animations ── */
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
+  .pattern-grid :global(.skeleton-pattern) {
+    height: 310px;
   }
 
   @keyframes shimmer {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
+    0% {
+      background-position: 200% 0;
+    }
+    100% {
+      background-position: -200% 0;
+    }
   }
 
-  @keyframes blink {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.3; }
-  }
+  @media (max-width: 900px) {
+    .toolbar,
+    .section-heading {
+      align-items: stretch;
+      flex-direction: column;
+    }
 
-  @keyframes orbit {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
+    :global(.toolbar-refresh.kit-icon-button) {
+      margin-left: 0;
+    }
+
+    .filter-group {
+      flex: 0 1 auto;
+      min-width: 0;
+      width: 100%;
+    }
+
+    .section-heading p {
+      text-align: left;
+    }
+
+    .section-heading p.insights-help {
+      justify-content: flex-start;
+      text-align: left;
+    }
+
+    .summary-grid,
+    .pattern-grid,
+    .recommendation-list {
+      grid-template-columns: 1fr;
+    }
+
+    .content :global(.distribution-row) {
+      grid-template-columns: 1fr;
+    }
+
+    .driver-row,
+    .evidence-list :global(.evidence-row) {
+      grid-template-columns: 1fr;
+    }
+
+    .evidence-meta {
+      justify-content: flex-start;
+    }
   }
 </style>

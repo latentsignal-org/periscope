@@ -1,10 +1,19 @@
 <script lang="ts">
+  import { Button, Modal, Spinner } from "@kenn-io/kit-ui";
+  import { m } from "../../i18n/index.js";
   import { untrack } from "svelte";
   import {
     importClaudeAI,
     importChatGPT,
     type ImportStats,
   } from "../../api/client.js";
+  import {
+    FileCheckIcon,
+    FileIcon,
+    FileXIcon,
+    TriangleAlertIcon,
+    UploadIcon,
+  } from "../../icons.js";
 
   interface Props {
     open: boolean;
@@ -164,7 +173,7 @@
       error =
         e instanceof Error
           ? e.message
-          : "Import failed";
+          : m.import_failed();
     } finally {
       importing = false;
     }
@@ -189,319 +198,216 @@
   }
 </script>
 
+{#snippet actions()}
+  {#if result}
+    <Button
+      label={m.import_import_more()}
+      tone="neutral"
+      surface="outline"
+      onclick={handleReset}
+    />
+    <Button
+      label={m.import_done()}
+      tone="info"
+      surface="solid"
+      onclick={handleClose}
+    />
+  {:else}
+    <Button
+      label={m.import_cancel()}
+      tone="neutral"
+      surface="outline"
+      disabled={importing}
+      onclick={handleClose}
+    />
+    <Button
+      label={m.import_import()}
+      tone="info"
+      surface="solid"
+      disabled={!selectedFile || importing}
+      onclick={handleImport}
+    />
+  {/if}
+{/snippet}
+
 {#if open}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="modal-overlay"
-    onclick={(e) => {
-      if (
-        (e.target as HTMLElement).classList.contains(
-          "modal-overlay",
-        )
-      )
-        handleClose();
-    }}
-    onkeydown={(e) => {
-      if (e.key === "Escape") handleClose();
-    }}
+  <Modal
+    title={m.import_title()}
+    width="460px"
+    maxWidth="min(460px, 92vw)"
+    closable={!importing}
+    closeOnOverlayClick={!importing}
+    onclose={handleClose}
+    footer={actions}
   >
-    <div
-      class="modal-panel import-panel"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Import conversations"
-    >
-      <div class="modal-header">
-        <h3 class="modal-title">Import Conversations</h3>
+    {#if result}
+      <!-- ── Results ── -->
+      <div class="result-view">
+        <div class="result-check">
+          <FileCheckIcon size="32" strokeWidth="1.5" aria-hidden="true" />
+        </div>
+
+        <p class="result-heading">
+          {m.import_processed({ count: totalProcessed })}
+        </p>
+
+        <div class="result-stats">
+          <div class="stat">
+            <span class="stat-num new">
+              {result.imported}
+            </span>
+            <span class="stat-lbl">{m.import_new()}</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num updated">
+              {result.updated}
+            </span>
+            <span class="stat-lbl">{m.import_updated()}</span>
+          </div>
+          {#if result.skipped > 0}
+            <div class="stat">
+              <span class="stat-num skipped">
+                {result.skipped}
+              </span>
+              <span class="stat-lbl">{m.import_unchanged()}</span>
+            </div>
+          {/if}
+          {#if result.errors > 0}
+            <div class="stat">
+              <span class="stat-num errors">
+                {result.errors}
+              </span>
+              <span class="stat-lbl">{m.import_errors()}</span>
+            </div>
+          {/if}
+        </div>
+      </div>
+    {:else}
+      <!-- ── Provider selector ── -->
+      <div class="provider-strip">
         <button
-          class="modal-close"
-          onclick={handleClose}
+          class="provider-pill"
+          class:selected={provider === "claude-ai"}
+          onclick={() => selectProvider("claude-ai")}
           disabled={importing}
-          aria-label="Close"
-        >&times;</button>
+        >
+          <span class="pdot claude"></span>
+          <span>Claude.ai</span>
+        </button>
+        <button
+          class="provider-pill"
+          class:selected={provider === "chatgpt"}
+          onclick={() => selectProvider("chatgpt")}
+          disabled={importing}
+        >
+          <span class="pdot chatgpt"></span>
+          <span>ChatGPT</span>
+        </button>
       </div>
 
-      <div class="modal-body">
-        {#if result}
-          <!-- ── Results ── -->
-          <div class="result-view">
-            <div class="result-check">
-              <svg
-                width="32"
-                height="32"
-                viewBox="0 0 24 24"
-                fill="none"
-              >
-                <circle
-                  cx="12"
-                  cy="12"
-                  r="10"
-                  stroke="var(--accent-green)"
-                  stroke-width="1.5"
-                />
-                <path
-                  d="M8 12l3 3 5-5"
-                  stroke="var(--accent-green)"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
-            </div>
-
-            <p class="result-heading">
-              {totalProcessed}
-              conversation{totalProcessed !== 1
-                ? "s"
-                : ""}
-              processed
-            </p>
-
-            <div class="result-stats">
-              <div class="stat">
-                <span class="stat-num new">
-                  {result.imported}
-                </span>
-                <span class="stat-lbl">new</span>
-              </div>
-              <div class="stat">
-                <span class="stat-num updated">
-                  {result.updated}
-                </span>
-                <span class="stat-lbl">updated</span>
-              </div>
-              {#if result.skipped > 0}
-                <div class="stat">
-                  <span class="stat-num skipped">
-                    {result.skipped}
-                  </span>
-                  <span class="stat-lbl">unchanged</span>
-                </div>
-              {/if}
-              {#if result.errors > 0}
-                <div class="stat">
-                  <span class="stat-num errors">
-                    {result.errors}
-                  </span>
-                  <span class="stat-lbl">errors</span>
-                </div>
-              {/if}
-            </div>
-
-            <div class="result-actions">
-              <button
-                class="modal-btn"
-                onclick={handleReset}
-              >
-                Import more
-              </button>
-              <button
-                class="modal-btn modal-btn-primary"
-                onclick={handleClose}
-              >
-                Done
-              </button>
-            </div>
-          </div>
+      <p class="hint">
+        {#if provider === "claude-ai"}
+          {m.import_hint_claude({ json: "conversations.json", zip: ".zip" })}
         {:else}
-          <!-- ── Provider selector ── -->
-          <div class="provider-strip">
-            <button
-              class="provider-pill"
-              class:selected={provider === "claude-ai"}
-              onclick={() => selectProvider("claude-ai")}
-              disabled={importing}
-            >
-              <span class="pdot claude"></span>
-              <span>Claude.ai</span>
-            </button>
-            <button
-              class="provider-pill"
-              class:selected={provider === "chatgpt"}
-              onclick={() => selectProvider("chatgpt")}
-              disabled={importing}
-            >
-              <span class="pdot chatgpt"></span>
-              <span>ChatGPT</span>
-            </button>
-          </div>
-
-          <p class="hint">
-            {#if provider === "claude-ai"}
-              Upload <code>conversations.json</code> or
-              the <code>.zip</code> from a Claude.ai data
-              export.
-            {:else}
-              Upload the <code>.zip</code> from a ChatGPT
-              data export.
-            {/if}
-          </p>
-
-          <!-- ── Drop zone ── -->
-          {#if importing}
-            <div class="zone zone-importing">
-              <div class="modal-spinner"></div>
-              {#if phase === "indexing"}
-                <span class="importing-label">
-                  Rebuilding search index...
-                </span>
-              {:else if progressStats}
-                {@const n =
-                  progressStats.imported +
-                  progressStats.updated +
-                  progressStats.skipped +
-                  progressStats.errors}
-                <span class="importing-label">
-                  {n} conversation{n !== 1 ? "s" : ""}
-                  processed...
-                </span>
-              {:else}
-                <span class="importing-label">
-                  Importing conversations...
-                </span>
-              {/if}
-            </div>
-          {:else if selectedFile}
-            <div class="zone zone-file">
-              <div class="file-row">
-                <svg
-                  class="file-icon"
-                  width="20"
-                  height="20"
-                  viewBox="0 0 16 16"
-                  fill="currentColor"
-                >
-                  <path d="M4 0a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V4.5L9.5 0H4zM9 1v3.5A1.5 1.5 0 0010.5 6H14v8a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1h5z"/>
-                </svg>
-                <div class="file-meta">
-                  <span class="file-name">
-                    {selectedFile.name}
-                  </span>
-                  <span class="file-size">
-                    {fileSize}
-                  </span>
-                </div>
-                <button
-                  class="file-clear"
-                  onclick={clearFile}
-                  title="Remove file"
-                  aria-label="Remove file"
-                >
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 16 16"
-                    fill="currentColor"
-                  >
-                    <path d="M4.646 4.646a.5.5 0 01.708 0L8 7.293l2.646-2.647a.5.5 0 01.708.708L8.707 8l2.647 2.646a.5.5 0 01-.708.708L8 8.707l-2.646 2.647a.5.5 0 01-.708-.708L7.293 8 4.646 5.354a.5.5 0 010-.708z"/>
-                  </svg>
-                </button>
-              </div>
-            </div>
-          {:else}
-            <div
-              class="zone zone-empty"
-              class:drag-over={dragOver}
-              role="button"
-              tabindex="0"
-              ondragenter={handleDragEnter}
-              ondragover={handleDragOver}
-              ondragleave={handleDragLeave}
-              ondrop={handleDrop}
-              onclick={() => fileInput?.click()}
-              onkeydown={(e) => {
-                if (
-                  e.key === "Enter" ||
-                  e.key === " "
-                ) {
-                  e.preventDefault();
-                  fileInput?.click();
-                }
-              }}
-            >
-              <svg
-                class="upload-icon"
-                width="28"
-                height="28"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
-                <polyline points="17 8 12 3 7 8"/>
-                <line x1="12" y1="3" x2="12" y2="15"/>
-              </svg>
-              <span class="drop-label">
-                Drop your file here
-              </span>
-              <span class="drop-sub">
-                or click to browse
-              </span>
-            </div>
-          {/if}
-
-          <input
-            bind:this={fileInput}
-            type="file"
-            accept={accepted}
-            onchange={handleFileChange}
-            class="sr-only"
-          />
-
-          {#if error}
-            <div class="import-error">
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 16 16"
-                fill="currentColor"
-              >
-                <path d="M8.982 1.566a1.13 1.13 0 00-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 01-1.1 0L7.1 5.995A.905.905 0 018 5zm.002 6a1 1 0 110 2 1 1 0 010-2z"/>
-              </svg>
-              <span>{error}</span>
-            </div>
-          {/if}
-
-          <div class="import-actions">
-            <button
-              class="modal-btn"
-              onclick={handleClose}
-              disabled={importing}
-            >
-              Cancel
-            </button>
-            <button
-              class="modal-btn modal-btn-primary"
-              onclick={handleImport}
-              disabled={!selectedFile || importing}
-            >
-              Import
-            </button>
-          </div>
+          {m.import_hint_chatgpt({ zip: ".zip" })}
         {/if}
-      </div>
-    </div>
-  </div>
+      </p>
+
+      <!-- ── Drop zone ── -->
+      {#if importing}
+        <div class="zone zone-importing">
+          <Spinner />
+          {#if phase === "indexing"}
+            <span class="importing-label">
+              {m.import_rebuilding_index()}
+            </span>
+          {:else if progressStats}
+            {@const n =
+              progressStats.imported +
+              progressStats.updated +
+              progressStats.skipped +
+              progressStats.errors}
+            <span class="importing-label">
+              {m.import_processing_progress({ count: n })}
+            </span>
+          {:else}
+            <span class="importing-label">
+              {m.import_importing()}
+            </span>
+          {/if}
+        </div>
+      {:else if selectedFile}
+        <div class="zone zone-file">
+          <div class="file-row">
+            <FileIcon class="file-icon" size="20" strokeWidth="1.6" aria-hidden="true" />
+            <div class="file-meta">
+              <span class="file-name">
+                {selectedFile.name}
+              </span>
+              <span class="file-size">
+                {fileSize}
+              </span>
+            </div>
+            <button
+              class="file-clear"
+              onclick={clearFile}
+              title={m.import_remove_file()}
+              aria-label={m.import_remove_file()}
+            >
+              <FileXIcon size="14" strokeWidth="1.8" aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+      {:else}
+        <div
+          class="zone zone-empty"
+          class:drag-over={dragOver}
+          role="button"
+          tabindex="0"
+          ondragenter={handleDragEnter}
+          ondragover={handleDragOver}
+          ondragleave={handleDragLeave}
+          ondrop={handleDrop}
+          onclick={() => fileInput?.click()}
+          onkeydown={(e) => {
+            if (
+              e.key === "Enter" ||
+              e.key === " "
+            ) {
+              e.preventDefault();
+              fileInput?.click();
+            }
+          }}
+        >
+          <UploadIcon class="upload-icon" size="28" strokeWidth="1.5" aria-hidden="true" />
+          <span class="drop-label">
+            {m.import_drop_here()}
+          </span>
+          <span class="drop-sub">
+            {m.import_or_browse()}
+          </span>
+        </div>
+      {/if}
+
+      <input
+        bind:this={fileInput}
+        type="file"
+        accept={accepted}
+        onchange={handleFileChange}
+        class="kit-sr-only"
+      />
+
+      {#if error}
+        <div class="import-error">
+          <TriangleAlertIcon size="14" strokeWidth="1.8" aria-hidden="true" />
+          <span>{error}</span>
+        </div>
+      {/if}
+    {/if}
+  </Modal>
 {/if}
 
 <style>
-  /* ── Panel ── */
-  .import-panel {
-    width: 460px;
-    max-width: 92vw;
-    animation: panel-in 0.2s ease-out;
-  }
-
-  @keyframes panel-in {
-    from {
-      opacity: 0;
-      transform: translateY(8px) scale(0.98);
-    }
-  }
-
   /* ── Provider strip ── */
   .provider-strip {
     display: flex;
@@ -517,7 +423,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 7px;
+    gap: var(--space-4);
     height: 34px;
     font-size: 12px;
     font-weight: 500;
@@ -564,7 +470,7 @@
     line-height: 1.5;
   }
 
-  .hint code {
+  .hint :global(code) {
     font-family: var(--font-mono);
     font-size: 11px;
     background: var(--bg-inset);
@@ -581,7 +487,6 @@
     justify-content: center;
     gap: 6px;
     border-radius: var(--radius-lg);
-    margin-bottom: 12px;
     transition:
       border-color 0.15s,
       background 0.15s,
@@ -594,7 +499,7 @@
     padding: 24px;
     border: 2px dashed var(--border-default);
     cursor: pointer;
-    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.03);
+    box-shadow: inset 0 1px 3px color-mix(in srgb, var(--overlay-bg) 10%, transparent);
   }
 
   .zone-empty:hover {
@@ -623,7 +528,7 @@
       );
   }
 
-  .zone-empty.drag-over .upload-icon {
+  .zone-empty.drag-over :global(.upload-icon) {
     color: var(--accent-blue);
     animation: icon-lift 0.35s ease-out;
   }
@@ -640,7 +545,7 @@
     }
   }
 
-  .upload-icon {
+  :global(.upload-icon) {
     color: var(--text-muted);
     margin-bottom: 2px;
     transition: color 0.15s;
@@ -667,11 +572,11 @@
   .file-row {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: var(--space-4);
     width: 100%;
   }
 
-  .file-icon {
+  :global(.file-icon) {
     color: var(--text-muted);
     flex-shrink: 0;
   }
@@ -739,20 +644,13 @@
     border-radius: var(--radius-sm);
     font-size: 12px;
     color: var(--accent-red);
-    margin-bottom: 12px;
+    margin-top: 12px;
     word-break: break-word;
   }
 
-  .import-error svg {
+  .import-error :global(svg) {
     flex-shrink: 0;
     margin-top: 1px;
-  }
-
-  /* ── Actions ── */
-  .import-actions {
-    display: flex;
-    gap: 8px;
-    justify-content: flex-end;
   }
 
   /* ── Result view ── */
@@ -765,6 +663,7 @@
   }
 
   .result-check {
+    color: var(--accent-green);
     margin-bottom: 2px;
     animation: check-pop 0.35s ease-out;
   }
@@ -858,11 +757,5 @@
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-  }
-
-  .result-actions {
-    display: flex;
-    gap: 8px;
-    margin-top: 8px;
   }
 </style>

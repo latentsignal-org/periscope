@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Card } from "@kenn-io/kit-ui";
   import { copyToClipboard } from "../../utils/clipboard.js";
 
   interface Props {
@@ -44,7 +45,7 @@
 </script>
 
 {#if hasText}
-  <div class="suggestion-block">
+  <Card level="default" padding="none" class="suggestion-block">
     <div class="suggestion-header">
       <button
         type="button"
@@ -72,18 +73,16 @@
         <div class="suggestion-footer">{footerLabel}</div>
       {/if}
     {/if}
-  </div>
+  </Card>
 {:else if hint}
   <div class="suggestion-hint">{hint}</div>
 {/if}
 
 <style>
-  .suggestion-block {
+  :global(.suggestion-block) {
     display: grid;
     gap: 8px;
     padding: 10px 12px;
-    border: 1px solid var(--border-muted);
-    border-radius: var(--radius-md);
     background: color-mix(in srgb, var(--bg-inset) 55%, var(--bg-surface));
   }
 

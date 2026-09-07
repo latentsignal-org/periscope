@@ -1,9 +1,7 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
@@ -147,110 +145,8 @@ func detectOpeners() []Opener {
 	return result
 }
 
-func (s *Server) handleListOpeners(
-	w http.ResponseWriter, _ *http.Request,
-) {
-	openers := detectOpeners()
-	if openers == nil {
-		openers = []Opener{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"openers": openers,
-	})
-}
-
-func (s *Server) handleGetSessionDir(
-	w http.ResponseWriter, r *http.Request,
-) {
-	if s.db.ReadOnly() {
-		writeError(w, http.StatusNotImplemented,
-			"not available in remote mode")
-		return
-	}
-	sessionID := r.PathValue("id")
-	session, err := s.db.GetSessionFull(r.Context(), sessionID)
-	if err != nil {
-		if handleContextError(w, err) {
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	if session == nil || session.DeletedAt != nil {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	dir := resolveSessionDir(session)
-	writeJSON(w, http.StatusOK, map[string]string{
-		"path": dir,
-	})
-}
-
 type openRequest struct {
 	OpenerID string `json:"opener_id"`
-}
-
-func (s *Server) handleOpenSession(
-	w http.ResponseWriter, r *http.Request,
-) {
-	if s.db.ReadOnly() {
-		writeError(w, http.StatusNotImplemented,
-			"not available in remote mode")
-		return
-	}
-	sessionID := r.PathValue("id")
-	session, err := s.db.GetSessionFull(r.Context(), sessionID)
-	if err != nil {
-		if handleContextError(w, err) {
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
-	}
-	if session == nil || session.DeletedAt != nil {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	var req openRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
-		return
-	}
-
-	// Find the project directory.
-	projectDir := resolveSessionDir(session)
-	if projectDir == "" {
-		writeError(w, http.StatusBadRequest, "session has no project directory")
-		return
-	}
-
-	// Find the opener.
-	openers := detectOpeners()
-	var opener *Opener
-	for i := range openers {
-		if openers[i].ID == req.OpenerID {
-			opener = &openers[i]
-			break
-		}
-	}
-	if opener == nil {
-		writeError(w, http.StatusBadRequest,
-			fmt.Sprintf("opener %q not found", req.OpenerID))
-		return
-	}
-
-	// Launch the opener with the project directory.
-	if err := launchOpener(*opener, projectDir); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to launch")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"launched": true,
-		"opener":   opener.Name,
-		"path":     projectDir,
-	})
 }
 
 func launchOpener(o Opener, dir string) error {

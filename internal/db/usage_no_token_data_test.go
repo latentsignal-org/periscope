@@ -1,0 +1,29 @@
+package db
+
+import (
+	"testing"
+
+	"go.kenn.io/agentsview/internal/money"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestNoTokenData(t *testing.T) {
+	cases := []struct {
+		name   string
+		totals UsageTotals
+		want   bool
+	}{
+		{"all zero", UsageTotals{}, true},
+		{"input tokens", UsageTotals{InputTokens: 1}, false},
+		{"output tokens", UsageTotals{OutputTokens: 1}, false},
+		{"cache creation", UsageTotals{CacheCreationTokens: 1}, false},
+		{"cache read", UsageTotals{CacheReadTokens: 1}, false},
+		{"cost", UsageTotals{TotalCost: money.MustParseDollars("0.01")}, false},
+		{"copilot credits", UsageTotals{CopilotAICredits: 1}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, NoTokenData(tc.totals))
+		})
+	}
+}

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/wesm/agentsview/internal/llm"
+	"go.kenn.io/agentsview/internal/llm"
 )
 
 // systemPrompt is cached on the API side, so it can be long without
@@ -311,8 +311,8 @@ func inferTopic(b TurnBundle) string {
 
 func topicWords(s string) []string {
 	fields := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
-		return !(unicode.IsLetter(r) || unicode.IsDigit(r) ||
-			r == '/' || r == '_' || r == '-')
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) &&
+			r != '/' && r != '_' && r != '-'
 	})
 	stop := map[string]struct{}{
 		"the": {}, "and": {}, "that": {}, "this": {}, "with": {},
@@ -407,11 +407,4 @@ func lowerFirst(s string) string {
 	runes := []rune(s)
 	runes[0] = unicode.ToLower(runes[0])
 	return string(runes)
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

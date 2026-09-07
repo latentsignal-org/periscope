@@ -2,11 +2,10 @@ package signals
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
-
-func floatPtr(f float64) *float64 { return &f }
-
-func intPtr(i int) *int { return &i }
 
 func TestComputeHealthScore(t *testing.T) {
 	tests := []struct {
@@ -24,7 +23,7 @@ func TestComputeHealthScore(t *testing.T) {
 				OutcomeConfidence: "high",
 				HasToolCalls:      true,
 			},
-			wantScore:     intPtr(100),
+			wantScore:     new(100),
 			wantGrade:     "A",
 			wantBasis:     []string{"outcome", "tool_health"},
 			wantPenalties: nil,
@@ -36,7 +35,7 @@ func TestComputeHealthScore(t *testing.T) {
 				OutcomeConfidence: "medium",
 				HasToolCalls:      true,
 			},
-			wantScore: intPtr(70),
+			wantScore: new(70),
 			wantGrade: "C",
 			wantBasis: []string{"outcome", "tool_health"},
 			wantPenalties: map[string]int{
@@ -50,7 +49,7 @@ func TestComputeHealthScore(t *testing.T) {
 				OutcomeConfidence: "high",
 				HasToolCalls:      true,
 			},
-			wantScore: intPtr(85),
+			wantScore: new(85),
 			wantGrade: "B",
 			wantBasis: []string{"outcome", "tool_health"},
 			wantPenalties: map[string]int{
@@ -65,7 +64,7 @@ func TestComputeHealthScore(t *testing.T) {
 				HasToolCalls:       true,
 				FailureSignalCount: 20,
 			},
-			wantScore: intPtr(70),
+			wantScore: new(70),
 			wantGrade: "C",
 			wantBasis: []string{"outcome", "tool_health"},
 			wantPenalties: map[string]int{
@@ -80,7 +79,7 @@ func TestComputeHealthScore(t *testing.T) {
 				HasToolCalls:      true,
 				RetryCount:        3,
 			},
-			wantScore: intPtr(85),
+			wantScore: new(85),
 			wantGrade: "B",
 			wantBasis: []string{"outcome", "tool_health"},
 			wantPenalties: map[string]int{
@@ -95,7 +94,7 @@ func TestComputeHealthScore(t *testing.T) {
 				HasToolCalls:      true,
 				EditChurnCount:    2,
 			},
-			wantScore: intPtr(92),
+			wantScore: new(92),
 			wantGrade: "A",
 			wantBasis: []string{"outcome", "tool_health"},
 			wantPenalties: map[string]int{
@@ -110,7 +109,7 @@ func TestComputeHealthScore(t *testing.T) {
 				HasToolCalls:       true,
 				ConsecutiveFailMax: 3,
 			},
-			wantScore: intPtr(90),
+			wantScore: new(90),
 			wantGrade: "A",
 			wantBasis: []string{"outcome", "tool_health"},
 			wantPenalties: map[string]int{
@@ -125,7 +124,7 @@ func TestComputeHealthScore(t *testing.T) {
 				HasToolCalls:       true,
 				ConsecutiveFailMax: 2,
 			},
-			wantScore:     intPtr(100),
+			wantScore:     new(100),
 			wantGrade:     "A",
 			wantBasis:     []string{"outcome", "tool_health"},
 			wantPenalties: nil,
@@ -137,9 +136,9 @@ func TestComputeHealthScore(t *testing.T) {
 				OutcomeConfidence: "high",
 				HasContextData:    true,
 				CompactionCount:   3,
-				PressureMax:       floatPtr(0.95),
+				PressureMax:       new(0.95),
 			},
-			wantScore: intPtr(80),
+			wantScore: new(80),
 			wantGrade: "B",
 			wantBasis: []string{"outcome", "context_pressure"},
 			wantPenalties: map[string]int{
@@ -155,7 +154,7 @@ func TestComputeHealthScore(t *testing.T) {
 				HasContextData:    true,
 				CompactionCount:   1,
 			},
-			wantScore:     intPtr(100),
+			wantScore:     new(100),
 			wantGrade:     "A",
 			wantBasis:     []string{"outcome", "context_pressure"},
 			wantPenalties: nil,
@@ -172,9 +171,9 @@ func TestComputeHealthScore(t *testing.T) {
 				EditChurnCount:     10,
 				ConsecutiveFailMax: 5,
 				CompactionCount:    10,
-				PressureMax:        floatPtr(0.99),
+				PressureMax:        new(0.99),
 			},
-			wantScore: intPtr(0),
+			wantScore: new(0),
 			wantGrade: "F",
 			wantBasis: []string{
 				"outcome", "tool_health", "context_pressure",
@@ -207,7 +206,7 @@ func TestComputeHealthScore(t *testing.T) {
 				OutcomeConfidence: "low",
 				HasToolCalls:      true,
 			},
-			wantScore:     intPtr(100),
+			wantScore:     new(100),
 			wantGrade:     "A",
 			wantBasis:     []string{"outcome", "tool_health"},
 			wantPenalties: nil,
@@ -219,7 +218,7 @@ func TestComputeHealthScore(t *testing.T) {
 				OutcomeConfidence: "low",
 				HasContextData:    true,
 			},
-			wantScore:     intPtr(100),
+			wantScore:     new(100),
 			wantGrade:     "A",
 			wantBasis:     []string{"outcome", "context_pressure"},
 			wantPenalties: nil,
@@ -230,7 +229,7 @@ func TestComputeHealthScore(t *testing.T) {
 				Outcome:           "unknown",
 				OutcomeConfidence: "high",
 			},
-			wantScore:     intPtr(100),
+			wantScore:     new(100),
 			wantGrade:     "A",
 			wantBasis:     []string{"outcome"},
 			wantPenalties: nil,
@@ -241,7 +240,7 @@ func TestComputeHealthScore(t *testing.T) {
 				Outcome:           "completed",
 				OutcomeConfidence: "high",
 			},
-			wantScore:     intPtr(100),
+			wantScore:     new(100),
 			wantGrade:     "A",
 			wantBasis:     []string{"outcome"},
 			wantPenalties: nil,
@@ -252,9 +251,9 @@ func TestComputeHealthScore(t *testing.T) {
 				Outcome:           "completed",
 				OutcomeConfidence: "high",
 				HasContextData:    true,
-				PressureMax:       floatPtr(0.9),
+				PressureMax:       new(0.9),
 			},
-			wantScore:     intPtr(100),
+			wantScore:     new(100),
 			wantGrade:     "A",
 			wantBasis:     []string{"outcome", "context_pressure"},
 			wantPenalties: nil,
@@ -267,7 +266,7 @@ func TestComputeHealthScore(t *testing.T) {
 				HasToolCalls:       true,
 				FailureSignalCount: 10,
 			},
-			wantScore: intPtr(40),
+			wantScore: new(40),
 			wantGrade: "D",
 			wantBasis: []string{"outcome", "tool_health"},
 			wantPenalties: map[string]int{
@@ -283,7 +282,7 @@ func TestComputeHealthScore(t *testing.T) {
 				HasToolCalls:      true,
 				RetryCount:        10,
 			},
-			wantScore: intPtr(75),
+			wantScore: new(75),
 			wantGrade: "B",
 			wantBasis: []string{"outcome", "tool_health"},
 			wantPenalties: map[string]int{
@@ -298,7 +297,7 @@ func TestComputeHealthScore(t *testing.T) {
 				HasToolCalls:      true,
 				EditChurnCount:    10,
 			},
-			wantScore: intPtr(80),
+			wantScore: new(80),
 			wantGrade: "B",
 			wantBasis: []string{"outcome", "tool_health"},
 			wantPenalties: map[string]int{
@@ -313,11 +312,41 @@ func TestComputeHealthScore(t *testing.T) {
 				HasContextData:    true,
 				CompactionCount:   10,
 			},
-			wantScore: intPtr(85),
+			wantScore: new(85),
 			wantGrade: "B",
 			wantBasis: []string{"outcome", "context_pressure"},
 			wantPenalties: map[string]int{
 				"compactions": 15,
+			},
+		},
+		{
+			name: "heuristic penalties are conservative and capped",
+			input: ScoreInput{
+				Outcome:           "completed",
+				OutcomeConfidence: "high",
+				HasToolCalls:      true,
+				Heuristics: HeuristicSignals{
+					ShortPromptCount:            10,
+					UnstructuredStart:           true,
+					MissingSuccessCriteriaCount: 2,
+					MissingVerificationCount:    2,
+					DuplicatePromptCount:        10,
+					NoCodeContextCount:          1,
+					RunawayToolLoopCount:        3,
+				},
+			},
+			wantScore: new(85),
+			wantGrade: "B",
+			wantBasis: []string{
+				"outcome", "tool_health", "prompt_quality",
+				"context_quality", "workflow_quality",
+			},
+			wantPenalties: map[string]int{
+				"constraintless_first_prompt":  1,
+				"missing_success_criteria":     1,
+				"stuck_repeated_prompts":       4,
+				"code_task_without_context":    4,
+				"repeated_failing_tool_cycles": 5,
 			},
 		},
 	}
@@ -328,47 +357,22 @@ func TestComputeHealthScore(t *testing.T) {
 
 			// Check score.
 			if tt.wantScore == nil {
-				if got.Score != nil {
-					t.Errorf(
-						"Score = %d, want nil",
-						*got.Score,
-					)
-				}
+				assert.Nil(t, got.Score)
 			} else {
-				if got.Score == nil {
-					t.Fatal("Score = nil, want", *tt.wantScore)
-				}
-				if *got.Score != *tt.wantScore {
-					t.Errorf(
-						"Score = %d, want %d",
-						*got.Score, *tt.wantScore,
-					)
-				}
+				require.NotNil(t, got.Score)
+				assert.Equal(t, *tt.wantScore, *got.Score)
 			}
 
 			// Check grade.
-			if got.Grade != tt.wantGrade {
-				t.Errorf(
-					"Grade = %q, want %q",
-					got.Grade, tt.wantGrade,
-				)
-			}
+			assert.Equal(t, tt.wantGrade, got.Grade)
 
 			// Check basis.
-			if !slicesEqual(got.Basis, tt.wantBasis) {
-				t.Errorf(
-					"Basis = %v, want %v",
-					got.Basis, tt.wantBasis,
-				)
-			}
+			assert.True(t, slicesEqual(got.Basis, tt.wantBasis),
+				"Basis = %v, want %v", got.Basis, tt.wantBasis)
 
 			// Check penalties.
-			if !mapsEqual(got.Penalties, tt.wantPenalties) {
-				t.Errorf(
-					"Penalties = %v, want %v",
-					got.Penalties, tt.wantPenalties,
-				)
-			}
+			assert.True(t, mapsEqual(got.Penalties, tt.wantPenalties),
+				"Penalties = %v, want %v", got.Penalties, tt.wantPenalties)
 		})
 	}
 }
@@ -443,26 +447,13 @@ func TestComputeHealthScore_MidTaskCompactionPenalty(t *testing.T) {
 				MidTaskCompactionCount: tc.midTaskCount,
 			})
 			if tc.wantPenaltyKey == "" {
-				if _, ok := res.Penalties["mid_task_compactions"]; ok {
-					t.Errorf("unexpected mid-task penalty: %v",
-						res.Penalties)
-				}
+				_, ok := res.Penalties["mid_task_compactions"]
+				assert.False(t, ok, "unexpected mid-task penalty: %v", res.Penalties)
 				return
 			}
 			got, ok := res.Penalties[tc.wantPenaltyKey]
-			if !ok {
-				t.Fatalf(
-					"missing penalty %q in %v",
-					tc.wantPenaltyKey, res.Penalties,
-				)
-			}
-			if got != tc.wantPenaltyValue {
-				t.Errorf(
-					"penalty[%q] = %d, want %d",
-					tc.wantPenaltyKey, got,
-					tc.wantPenaltyValue,
-				)
-			}
+			require.True(t, ok, "missing penalty %q in %v", tc.wantPenaltyKey, res.Penalties)
+			assert.Equal(t, tc.wantPenaltyValue, got)
 		})
 	}
 }

@@ -1,15 +1,18 @@
 package parser
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
+	gitrepo "go.kenn.io/kit/git/repo"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -60,8 +63,8 @@ func GetProjectName(dirName string) string {
 	}
 
 	// Strategy 2: use last non-system-directory component
-	for i := len(parts) - 1; i >= 0; i-- {
-		if p := parts[i]; p != "" && !ignoredSystemDirs[strings.ToLower(p)] {
+	for _, v := range slices.Backward(parts) {
+		if p := v; p != "" && !ignoredSystemDirs[strings.ToLower(p)] {
 			return NormalizeName(p)
 		}
 	}
@@ -84,8 +87,26 @@ func ExtractProjectFromCwd(cwd string) string {
 func ExtractProjectFromCwdWithBranch(
 	cwd, gitBranch string,
 ) string {
+	return extractProjectFromCwdWithBranch(context.TODO(), cwd, gitBranch)
+}
+
+// ExtractProjectFromCwdWithBranchContext extracts a canonical project name
+// from cwd and optionally git branch metadata using ctx for git-backed
+// repository resolution.
+func ExtractProjectFromCwdWithBranchContext(
+	ctx context.Context, cwd, gitBranch string,
+) string {
+	return extractProjectFromCwdWithBranch(ctx, cwd, gitBranch)
+}
+
+func extractProjectFromCwdWithBranch(
+	ctx context.Context, cwd, gitBranch string,
+) string {
 	if cwd == "" {
 		return ""
+	}
+	if ctx == nil {
+		ctx = context.TODO()
 	}
 	winPath := looksLikeWindowsPath(cwd)
 	norm := cwd
@@ -94,13 +115,20 @@ func ExtractProjectFromCwdWithBranch(
 	}
 	cleaned := filepath.Clean(norm)
 
+	// Recognize tool-anchored worktree manager layouts before walking git
+	// roots. These layouts encode the owning project in the path even when
+	// the git root basename is a branch or generated worktree id.
+	if p := projectFromAnchoredWorktreeLayout(cleaned); p != "" {
+		return NormalizeName(p)
+	}
+
 	// Skip the git-root walk when the cwd cannot resolve to a
 	// real local filesystem location. On macOS a bulk walk under
 	// an unbacked autofs prefix cascades through automountd into
 	// opendirectoryd (/usr/libexec/od_user_homes), so we probe
 	// the prefix once before walking.
-	if !isForeignOSPath(cwd, cleaned, winPath) {
-		if root := findGitRepoRoot(cleaned); root != "" {
+	if filepath.IsAbs(cleaned) && !isForeignOSPath(cwd, cleaned, winPath) {
+		if root := findGitRepoRoot(ctx, cleaned); root != "" {
 			name := filepath.Base(root)
 			if isInvalidPathBase(name) {
 				return ""
@@ -109,9 +137,9 @@ func ExtractProjectFromCwdWithBranch(
 		}
 	}
 
-	// Recognize worktree manager layouts:
-	// .superset/worktrees/$PROJECT/$BRANCH[/...]
-	// conductor/workspaces/$PROJECT/$BRANCH[/...]
+	// Generic hosting layouts are intentionally a fallback after live Git
+	// metadata. Otherwise a normal repository containing a matching fixture
+	// path would be attributed to the fixture's repository component.
 	if p := projectFromWorktreeLayout(cleaned); p != "" {
 		return NormalizeName(p)
 	}
@@ -127,16 +155,55 @@ func ExtractProjectFromCwdWithBranch(
 	return NormalizeName(name)
 }
 
-// worktreeLayoutMarkers are path fragments that identify
-// worktree manager directory conventions. Each encodes
-// .../$MARKER/$PROJECT/$BRANCH[/...].
-var worktreeLayoutMarkers []string
+// worktreeLayout describes path fragments that identify worktree
+// manager directory conventions. projectPart is the zero-based
+// component after marker that contains the owning project name.
+type worktreeLayout struct {
+	marker              string
+	projectPart         int
+	minParts            int
+	roborevCIBareLayout bool
+	gitFallbackOnly     bool
+}
+
+var worktreeLayouts []worktreeLayout
+
+const roborevCIBareProject = "roborev_ci"
 
 func init() {
 	sep := string(filepath.Separator)
-	worktreeLayoutMarkers = []string{
-		sep + ".superset" + sep + "worktrees" + sep,
-		sep + "conductor" + sep + "workspaces" + sep,
+	worktreeLayouts = []worktreeLayout{
+		// .superset/worktrees/$PROJECT/$BRANCH[/...]
+		{marker: sep + ".superset" + sep + "worktrees" + sep, projectPart: 0, minParts: 2},
+		// conductor/workspaces/$PROJECT/$BRANCH[/...]
+		{marker: sep + "conductor" + sep + "workspaces" + sep, projectPart: 0, minParts: 2},
+		// .../worktrees/github/github.com/$OWNER/$REPO/$WORKTREE[/...]
+		{
+			marker: sep + "worktrees" + sep + "github" + sep +
+				"github.com" + sep,
+			projectPart:     1,
+			minParts:        3,
+			gitFallbackOnly: true,
+		},
+		// .../worktrees/github.com/$OWNER/$REPO/$WORKTREE[/...]
+		{
+			marker:          sep + "worktrees" + sep + "github.com" + sep,
+			projectPart:     1,
+			minParts:        3,
+			gitFallbackOnly: true,
+		},
+		// ~/.codex/worktrees/$WORKTREE_ID/$REPO[/...]
+		{marker: sep + ".codex" + sep + "worktrees" + sep, projectPart: 1, minParts: 2},
+		// roborev CI: ~/.roborev/ci-worktrees/$REPO/roborev-ci-<jobID>-<id>[/...].
+		// roborev nests the ephemeral worktree under a repo-named parent so the
+		// owning project survives the generated leaf name. Anchored to the
+		// .roborev data dir (like the tool-anchored siblings above) so an
+		// unrelated path that merely contains a "ci-worktrees" directory is not
+		// matched.
+		{
+			marker:      sep + ".roborev" + sep + "ci-worktrees" + sep,
+			projectPart: 0, minParts: 2, roborevCIBareLayout: true,
+		},
 	}
 }
 
@@ -144,20 +211,57 @@ func init() {
 // directory layouts and extracts the project name component.
 // Returns "" if the path does not match any known layout.
 func projectFromWorktreeLayout(path string) string {
-	for _, marker := range worktreeLayoutMarkers {
-		_, rest, found := strings.Cut(path, marker)
+	return projectFromWorktreeLayouts(path, true)
+}
+
+func projectFromAnchoredWorktreeLayout(path string) string {
+	return projectFromWorktreeLayouts(path, false)
+}
+
+func projectFromWorktreeLayouts(path string, includeGitFallbacks bool) string {
+	for _, layout := range worktreeLayouts {
+		if layout.gitFallbackOnly && !includeGitFallbacks {
+			continue
+		}
+		_, rest, found := strings.Cut(path, layout.marker)
 		if !found {
 			continue
 		}
-		// Require at least project/branch to distinguish
-		// from the container directory itself.
-		projEnd := strings.IndexByte(rest, filepath.Separator)
-		if projEnd <= 0 {
+		parts := strings.Split(rest, string(filepath.Separator))
+		if layout.roborevCIBareLayout && isRoborevCIWorktreeLeaf(parts[0]) {
+			return roborevCIBareProject
+		}
+		if len(parts) < layout.minParts {
 			continue
 		}
-		return rest[:projEnd]
+		project := parts[layout.projectPart]
+		if isInvalidPathBase(project) {
+			continue
+		}
+		return project
 	}
 	return ""
+}
+
+func isRoborevCIWorktreeLeaf(name string) bool {
+	rest, ok := strings.CutPrefix(name, "roborev-ci-")
+	if !ok {
+		return false
+	}
+	job, id, ok := strings.Cut(rest, "-")
+	if !ok || job == "" || id == "" {
+		return false
+	}
+	return allASCIIDigits(job) && allASCIIDigits(id)
+}
+
+func allASCIIDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // autofsMountSource is indirected so tests can supply fixture
@@ -381,7 +485,7 @@ func isInvalidPathBase(name string) bool {
 // and linked worktrees/submodules (.git file). When cwd no longer
 // exists on disk, sibling directories are checked for worktree
 // .git files that can reveal the true repo root.
-func findGitRepoRoot(cwd string) string {
+func findGitRepoRoot(ctx context.Context, cwd string) string {
 	if cwd == "" {
 		return ""
 	}
@@ -400,6 +504,7 @@ func findGitRepoRoot(cwd string) string {
 		cwdMissing = true
 		dir = filepath.Dir(dir)
 	}
+	startDir := dir
 
 	// When the original path is gone, walk up to the first
 	// existing ancestor and check its children for worktree
@@ -423,29 +528,58 @@ func findGitRepoRoot(cwd string) string {
 		}
 	}
 
+	root, conservative := findGitRepoRootLocal(dir)
+	if root != "" && !conservative {
+		return root
+	}
+	if !cwdMissing {
+		if gitRoot := gitMainRoot(ctx, startDir); gitRoot != "" {
+			return gitRoot
+		}
+	}
+	return root
+}
+
+func findGitRepoRootLocal(dir string) (root string, conservative bool) {
 	for {
 		gitPath := filepath.Join(dir, ".git")
 		info, err := osStat(gitPath)
 		if err == nil {
 			if info.IsDir() {
-				return dir
+				return dir, false
 			}
 			if info.Mode().IsRegular() {
 				if root := repoRootFromGitFile(dir, gitPath); root != "" {
-					return root
+					if root == dir {
+						return root, true
+					}
+					return root, false
 				}
 				// Keep conservative fallback for gitfile repos
 				// when metadata cannot be parsed.
-				return dir
+				return dir, true
 			}
 		}
 
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return ""
+			return "", false
 		}
 		dir = parent
 	}
+}
+
+func gitMainRoot(ctx context.Context, dir string) string {
+	if ctx == nil || dir == "" {
+		return ""
+	}
+	opCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	root, err := gitrepo.MainRoot(opCtx, dir)
+	if err != nil {
+		return ""
+	}
+	return root
 }
 
 // repoRootFromSiblings checks child directories of dir for
@@ -600,6 +734,15 @@ func repoRootFromGitFile(repoDir, gitFilePath string) string {
 		if filepath.Base(commonDir) == ".git" {
 			return filepath.Dir(commonDir)
 		}
+		if gitConfigCoreBare(commonDir) {
+			// Bare repositories have no main checkout root. Return a
+			// conceptual sibling path so the caller can use its basename
+			// as the stable repository name.
+			name := strings.TrimSuffix(filepath.Base(commonDir), ".git")
+			if !isInvalidPathBase(name) {
+				return filepath.Join(filepath.Dir(commonDir), name)
+			}
+		}
 	}
 
 	// Fallback for linked worktrees if commondir is missing.
@@ -646,6 +789,52 @@ func readCommonDir(gitDir string) string {
 		return filepath.Clean(value)
 	}
 	return filepath.Clean(filepath.Join(gitDir, value))
+}
+
+func gitConfigCoreBare(gitDir string) bool {
+	b, err := os.ReadFile(filepath.Join(gitDir, "config"))
+	if err != nil {
+		return false
+	}
+
+	inCore := false
+	for raw := range strings.SplitSeq(string(b), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" ||
+			strings.HasPrefix(line, "#") ||
+			strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			end := strings.IndexByte(line, ']')
+			if end < 0 {
+				inCore = false
+				continue
+			}
+			section := strings.TrimSpace(line[1:end])
+			section, _, _ = strings.Cut(section, " ")
+			inCore = strings.EqualFold(section, "core")
+			continue
+		}
+		if !inCore {
+			continue
+		}
+
+		key, value, hasValue := strings.Cut(line, "=")
+		if !strings.EqualFold(strings.TrimSpace(key), "bare") {
+			continue
+		}
+		if !hasValue {
+			return true
+		}
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "true", "yes", "on", "1":
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func trimBranchSuffix(name, gitBranch string) string {
@@ -718,6 +907,9 @@ func isDefaultBranchToken(branch string) bool {
 // NeedsProjectReparse checks if a stored project name looks like
 // an un-decoded encoded path that should be re-extracted.
 func NeedsProjectReparse(project string) bool {
+	if strings.HasPrefix(project, "roborev_ci_") {
+		return true
+	}
 	bad := []string{
 		"_Users", "_home", "_private", "_tmp", "_var",
 	}

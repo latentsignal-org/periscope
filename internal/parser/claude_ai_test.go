@@ -72,7 +72,7 @@ const testExportJSON = `[
 
 func TestParseClaudeAIExport(t *testing.T) {
 	var results []ParseResult
-	err := ParseClaudeAIExport(
+	err := parseClaudeAIExport(
 		strings.NewReader(testExportJSON),
 		func(r ParseResult) error {
 			results = append(results, r)
@@ -91,7 +91,7 @@ func TestParseClaudeAIExport(t *testing.T) {
 	assert.Equal(t, "local", s.Machine)
 	assert.Equal(t, AgentClaudeAI, s.Agent)
 	assert.Equal(t, "Hello, how are you?", s.FirstMessage)
-	assert.Equal(t, "Test Chat", s.DisplayName)
+	assert.Equal(t, "Test Chat", s.SessionName)
 	assert.Equal(t, 2, s.MessageCount)
 	assert.Equal(t, 1, s.UserMessageCount)
 	assert.Equal(t,
@@ -148,7 +148,7 @@ func TestParseClaudeAIExport_ContentBlocks(t *testing.T) {
 	}]`
 
 	var results []ParseResult
-	err := ParseClaudeAIExport(
+	err := parseClaudeAIExport(
 		strings.NewReader(input),
 		func(r ParseResult) error {
 			results = append(results, r)
@@ -172,9 +172,214 @@ func TestParseClaudeAIExport_ContentBlocks(t *testing.T) {
 	assert.True(t, msgs[1].HasThinking)
 }
 
+func TestParseClaudeAIExport_AttachmentContent(t *testing.T) {
+	input := `[{
+		"uuid": "conv-attachments",
+		"name": "Attachment Test",
+		"created_at": "2026-01-21T10:00:00.000000Z",
+		"updated_at": "2026-01-21T10:05:00.000000Z",
+		"account": {"uuid": "acct-1"},
+		"chat_messages": [
+			{
+				"uuid": "m1",
+				"text": "Here is the base idea.",
+				"content": [
+					{"type": "text", "text": "Here is the base idea."}
+				],
+				"sender": "assistant",
+				"created_at": "2026-01-21T10:00:00.000000Z",
+				"attachments": [
+					{
+						"file_name": "notes.md",
+						"extracted_content": "line one\nline two"
+					}
+				]
+			}
+		]
+	}]`
+
+	var results []ParseResult
+	err := parseClaudeAIExport(
+		strings.NewReader(input),
+		func(r ParseResult) error {
+			results = append(results, r)
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	msgs := results[0].Messages
+	require.Len(t, msgs, 1)
+
+	assert.Equal(
+		t,
+		"Here is the base idea.\n\n[Attachment: notes.md]\nline one\nline two",
+		msgs[0].Content,
+	)
+}
+
+func TestParseClaudeAIExport_AttachmentFallbackPaths(t *testing.T) {
+	input := `[{
+		"uuid": "conv-attachment-fallbacks",
+		"name": "Attachment Fallback Test",
+		"created_at": "2026-01-21T11:00:00.000000Z",
+		"updated_at": "2026-01-21T11:05:00.000000Z",
+		"account": {"uuid": "acct-1"},
+		"chat_messages": [
+			{
+				"uuid": "m1",
+				"text": "Top-level text survives.",
+				"content": [],
+				"sender": "assistant",
+				"created_at": "2026-01-21T11:00:00.000000Z",
+				"attachments": [
+					{
+						"extracted_content": "attachment with no filename"
+					}
+				]
+			},
+			{
+				"uuid": "m2",
+				"text": "Fallback text survives too.",
+				"content": [
+					{"type": "tool_use", "text": ""}
+				],
+				"sender": "assistant",
+				"created_at": "2026-01-21T11:01:00.000000Z",
+				"attachments": [
+					{
+						"extracted_content": "attachment after unsupported block"
+					}
+				]
+			}
+		]
+	}]`
+
+	var results []ParseResult
+	err := parseClaudeAIExport(
+		strings.NewReader(input),
+		func(r ParseResult) error {
+			results = append(results, r)
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	msgs := results[0].Messages
+	require.Len(t, msgs, 2)
+	assert.Equal(
+		t,
+		"Top-level text survives.\n\nattachment with no filename",
+		msgs[0].Content,
+	)
+	assert.Equal(
+		t,
+		"Fallback text survives too.\n\nattachment after unsupported block",
+		msgs[1].Content,
+	)
+}
+
+func TestParseClaudeAIExport_IgnoredAttachments(t *testing.T) {
+	input := `[{
+		"uuid": "conv-attachments-ignored",
+		"name": "Attachment Ignore Test",
+		"created_at": "2026-01-22T10:00:00.000000Z",
+		"updated_at": "2026-01-22T10:05:00.000000Z",
+		"account": {"uuid": "acct-1"},
+		"chat_messages": [
+			{
+				"uuid": "m1",
+				"text": "User prompt",
+				"content": [
+					{"type": "text", "text": "User prompt"}
+				],
+				"sender": "human",
+				"created_at": "2026-01-22T10:00:00.000000Z"
+			},
+			{
+				"uuid": "m2",
+				"text": "Response kept the same.",
+				"content": [
+					{"type": "text", "text": "Response kept the same."}
+				],
+				"sender": "assistant",
+				"created_at": "2026-01-22T10:01:00.000000Z",
+				"attachments": [
+					{"file_name": "empty.txt", "extracted_content": ""},
+					{"file_name": "noop.txt", "extracted_content": "   "},
+					{"file_name": "missing.txt"},
+					{
+						"file_name": "metadata.json",
+						"mime_type": "application/json",
+						"metadata": {"unexpected": "value"}
+					}
+				]
+			}
+		]
+	}]`
+
+	var results []ParseResult
+	err := parseClaudeAIExport(
+		strings.NewReader(input),
+		func(r ParseResult) error {
+			results = append(results, r)
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	msgs := results[0].Messages
+	require.Len(t, msgs, 2)
+
+	assert.Equal(t, "User prompt", msgs[0].Content)
+	assert.Equal(t, "Response kept the same.", msgs[1].Content)
+	assert.NotContains(t, msgs[1].Content, "metadata.json")
+	assert.NotContains(t, msgs[1].Content, "unexpected")
+}
+
+func TestParseClaudeAIExport_TextFallbackPreservesWhitespace(t *testing.T) {
+	input := `[{
+		"uuid": "conv-fallback",
+		"name": "Fallback Test",
+		"created_at": "2026-01-23T10:00:00.000000Z",
+		"updated_at": "2026-01-23T10:05:00.000000Z",
+		"account": {"uuid": "acct-1"},
+		"chat_messages": [
+			{
+				"uuid": "m1",
+				"text": "  keep surrounding whitespace  ",
+				"content": [],
+				"sender": "assistant",
+				"created_at": "2026-01-23T10:00:00.000000Z",
+				"attachments": []
+			}
+		]
+	}]`
+
+	var results []ParseResult
+	err := parseClaudeAIExport(
+		strings.NewReader(input),
+		func(r ParseResult) error {
+			results = append(results, r)
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Len(t, results[0].Messages, 1)
+	assert.Equal(
+		t,
+		"  keep surrounding whitespace  ",
+		results[0].Messages[0].Content,
+	)
+}
+
 func TestParseClaudeAIExport_EmptyArray(t *testing.T) {
 	var results []ParseResult
-	err := ParseClaudeAIExport(
+	err := parseClaudeAIExport(
 		strings.NewReader("[]"),
 		func(r ParseResult) error {
 			results = append(results, r)
@@ -186,7 +391,7 @@ func TestParseClaudeAIExport_EmptyArray(t *testing.T) {
 }
 
 func TestParseClaudeAIExport_InvalidJSON(t *testing.T) {
-	err := ParseClaudeAIExport(
+	err := parseClaudeAIExport(
 		strings.NewReader("{not json"),
 		func(r ParseResult) error { return nil },
 	)

@@ -1,0 +1,3 @@
+*
+!.gitignore
+!litellm_snapshot.json.gz

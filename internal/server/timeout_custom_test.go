@@ -1,11 +1,15 @@
 package server
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWithTimeout(t *testing.T) {
@@ -13,6 +17,7 @@ func TestWithTimeout(t *testing.T) {
 
 	tests := []struct {
 		name           string
+		operation      string
 		timeout        time.Duration
 		handler        http.HandlerFunc
 		wantStatus     int
@@ -22,18 +27,27 @@ func TestWithTimeout(t *testing.T) {
 		assertResponse func(t *testing.T, resp *http.Response)
 	}{
 		{
-			name:    "timeout",
-			timeout: 10 * time.Millisecond,
+			name:      "timeout",
+			operation: "GET /test",
+			timeout:   10 * time.Millisecond,
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				time.Sleep(50 * time.Millisecond)
 				w.WriteHeader(http.StatusOK)
 				w.Write([]byte("too slow"))
 			},
-			assertResponse: assertTimeoutResponse,
+			assertResponse: func(t *testing.T, resp *http.Response) {
+				assertTimeoutResponse(
+					t, resp,
+					"GET /test",
+					"10ms",
+					"--write-timeout",
+				)
+			},
 		},
 		{
-			name:    "success",
-			timeout: 100 * time.Millisecond,
+			name:      "success",
+			operation: "GET /test",
+			timeout:   100 * time.Millisecond,
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("X-Custom", "value")
 				w.WriteHeader(http.StatusCreated)
@@ -50,7 +64,7 @@ func TestWithTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			s := newTestServerMinimal(t, tt.timeout)
-			wrapped := s.withTimeout(tt.handler)
+			wrapped := s.withTimeout(tt.operation, tt.handler)
 
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			w := httptest.NewRecorder()
@@ -67,18 +81,30 @@ func TestWithTimeout(t *testing.T) {
 			assertRecorderStatus(t, w, tt.wantStatus)
 
 			if tt.wantHeaderKey != "" {
-				if val := resp.Header.Get(tt.wantHeaderKey); val != tt.wantHeaderVal {
-					t.Errorf("expected header %s=%q, got %q", tt.wantHeaderKey, tt.wantHeaderVal, val)
-				}
+				assert.Equal(t, tt.wantHeaderVal,
+					resp.Header.Get(tt.wantHeaderKey),
+					"header %s", tt.wantHeaderKey)
 			}
 
 			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				t.Fatalf("failed to read body: %v", err)
-			}
-			if string(body) != tt.wantBody {
-				t.Errorf("expected body %q, got %q", tt.wantBody, string(body))
-			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantBody, string(body))
 		})
 	}
+}
+
+func TestTimeoutBodyParity(t *testing.T) {
+	t.Parallel()
+
+	operation := "GET /api/v1/sessions"
+	timeout := 30 * time.Second
+
+	msg := timeoutErrorBody(operation, timeout)
+
+	var je jsonError
+	require.NoError(t, json.Unmarshal([]byte(msg), &je))
+	assert.Equal(t, "request timed out", je.Error)
+	assert.Contains(t, je.Detail, operation)
+	assert.Contains(t, je.Detail, "30s")
+	assert.Contains(t, je.Detail, "--write-timeout")
 }
